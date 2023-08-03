@@ -75,7 +75,7 @@ class MERFISHDataFactory(object):
             fiducialImage = self._simulate_fiducial_image()
             tifffile.imsave(
                     os.sep.join([dataDir, 'full_stack_' + str(i) + '.tiff']), 
-                        merfishImages.astype(np.uint16))
+                        merfishImages.astype(uint16))
 
             imageCount = np.max([x[0] for x in self.bitOrganization]) + 1
             for j in range(imageCount):

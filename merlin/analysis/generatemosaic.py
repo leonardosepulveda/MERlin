@@ -59,7 +59,7 @@ class GenerateMosaic(analysistask.AnalysisTask):
         global coordinates.
         """
         return np.matmul(self._micron_to_mosaic_transform(micronExtents),
-                         np.append(micronCoordinates, 1)).astype(np.int32)[:2]
+                         np.append(micronCoordinates, 1)).astype(int32)[:2]
 
     def _micron_to_mosaic_transform(self, micronExtents: ExtentTuple) \
             -> np.ndarray:
@@ -181,7 +181,7 @@ class GenerateMosaic(analysistask.AnalysisTask):
                 transformedImage > 0, mosaic > 0)
             cv2.add(mosaic, transformedImage, dst=mosaic,
                     mask=np.array(
-                        transformedImage > 0).astype(np.uint8))
+                        transformedImage > 0).astype(uint8))
             dividedMosaic = cv2.divide(mosaic, 2)
             mosaic[divisionMask] = dividedMosaic[divisionMask]
 

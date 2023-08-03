@@ -372,6 +372,6 @@ class TifReader(Reader):
             image_data.shape)
 
         if cast_to_int16:
-            image_data = image_data.astype(np.uint16)
+            image_data = image_data.astype(uint16)
 
         return image_data

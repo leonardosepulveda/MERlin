@@ -105,13 +105,13 @@ class DeconvolutionPreprocess(Preprocess):
         hpImage = imagefilters.high_pass_filter(inputImage,
                                                 highPassFilterSize,
                                                 self._highPassSigma)
-        return hpImage.astype(np.float)
+        return hpImage.astype(float)
 
     def _run_analysis(self, fragmentIndex):
         warpTask = self.dataSet.load_analysis_task(
                 self.parameters['warp_task'])
 
-        histogramBins = np.arange(0, np.iinfo(np.uint16).max, 1)
+        histogramBins = np.arange(0, np.iinfo(uint16).max, 1)
         pixelHistogram = np.zeros(
                 (self.get_codebook().get_bit_count(), len(histogramBins)-1))
 
@@ -160,5 +160,5 @@ class DeconvolutionPreprocessGuo(DeconvolutionPreprocess):
         filteredImage = self._high_pass_filter(inputImage)
         deconvolvedImage = deconvolve.deconvolve_lucyrichardson_guo(
             filteredImage, deconFilterSize, self._deconSigma,
-            self._deconIterations).astype(np.uint16)
+            self._deconIterations).astype(uint16)
         return deconvolvedImage

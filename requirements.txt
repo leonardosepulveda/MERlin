@@ -1,5 +1,6 @@
 boto3
 cellpose==2.2
+csbdeep
 cython
 docutils
 google-cloud-storage
@@ -27,6 +28,7 @@ snakemake
 Sphinx
 sphinx-rtd-theme
 tables
+tensorflow
 tifffile
 urllib3
 xmltodict

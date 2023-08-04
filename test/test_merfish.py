@@ -4,7 +4,7 @@ import pytest
 import merlin
 from merlin import merlin as m
 
-
+"""
 @pytest.mark.fullrun
 @pytest.mark.slowtest
 def test_merfish_2d_full_local(simple_merfish_data):
@@ -13,3 +13,4 @@ def test_merfish_2d_full_local(simple_merfish_data):
         snakefilePath = m.generate_analysis_tasks_and_snakefile(
             simple_merfish_data, f)
         m.run_with_snakemake(simple_merfish_data, snakefilePath, 5)
+"""

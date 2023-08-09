@@ -133,8 +133,14 @@ class Warp(analysistask.ParallelAnalysisTask):
         self._save_transformations(transformationList, fov)
 
     def _save_transformations(self, transformationList: List, fov: int) -> None:
+        # from aaron. 
+        # fix futurewarning np.array object
+        # save the matrix directly from the 
+        # transform.SimilarityTransform object
+        transformationArray = np.array([t.params for t in transformationList])
+
         self.dataSet.save_numpy_analysis_result(
-            np.array(transformationList), 'offsets',
+            transformationArray, 'offsets',
             self.get_analysis_name(), resultIndex=fov,
             subdirectory='transformations')
 
@@ -155,6 +161,12 @@ class Warp(analysistask.ParallelAnalysisTask):
         """
         transformationMatrices = self.dataSet.load_numpy_analysis_result(
             'offsets', self, resultIndex=fov, subdirectory='transformations')
+
+        # from aaron
+        # fix for future warning np.array object
+        # convert the matric back to transform.SimilarityTransform object
+        transformationMatrices = [transform.SimilarityTransform(mat) for mat in transformationMatrices]
+
         if dataChannel is not None:
             return transformationMatrices[dataChannel]
         else:

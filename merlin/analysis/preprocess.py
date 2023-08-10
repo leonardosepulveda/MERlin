@@ -113,7 +113,7 @@ class DeconvolutionPreprocess(Preprocess):
         warpTask = self.dataSet.load_analysis_task(
                 self.parameters['warp_task'])
 
-        histogramBins = np.arange(0, np.iinfo(uint16).max, 1)
+        histogramBins = np.arange(0, np.iinfo(np.uint16).max, 1)
         pixelHistogram = np.zeros(
                 (self.get_codebook().get_bit_count(), len(histogramBins)-1))
 

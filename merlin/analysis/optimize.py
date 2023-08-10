@@ -153,10 +153,8 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
                 initialScaleFactors[i] = \
                     np.argmin(np.abs(cumulativeHistogram-0.9)) + 2
         else:
-            # For CAREpreprocess, if no pixel hist is requested
-            # initialize all factors to 1.
             initialScaleFactors = np.ones(bitCount).astype(float)
-
+    
         return initialScaleFactors
 
     def _get_previous_scale_factors(self) -> np.ndarray:

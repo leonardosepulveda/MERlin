@@ -55,6 +55,8 @@ class DeconvolutionPreprocess(Preprocess):
             self.parameters['decon_iterations'] = 20
         if 'codebook_index' not in self.parameters:
             self.parameters['codebook_index'] = 0
+        if 'save_pixel_histogram' not in self.parameters:
+            self.parameters['save_pixel_histogram'] = True
 
         self._highPassSigma = self.parameters['highpass_sigma']
         self._deconSigma = self.parameters['decon_sigma']
@@ -130,7 +132,8 @@ class DeconvolutionPreprocess(Preprocess):
                 pixelHistogram[bi, :] += np.histogram(
                         deconvolvedImage, bins=histogramBins)[0]
 
-        self._save_pixel_histogram(pixelHistogram, fragmentIndex)
+        if self.parameters['save_pixel_histogram']:
+            self._save_pixel_histogram(pixelHistogram, fragmentIndex)
 
     def _preprocess_image(self, inputImage: np.ndarray) -> np.ndarray:
         deconFilterSize = self.parameters['decon_filter_size']

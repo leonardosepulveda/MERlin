@@ -138,7 +138,7 @@ class DeconvolutionPreprocess(Preprocess):
         filteredImage = self._high_pass_filter(inputImage)
         deconvolvedImage = deconvolve.deconvolve_lucyrichardson(
             filteredImage, deconFilterSize, self._deconSigma,
-            self._deconIterations).astype(np.uint16)
+            self._deconIterations).astype('uint16')
         return deconvolvedImage
 
 

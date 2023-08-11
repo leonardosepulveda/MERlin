@@ -533,7 +533,7 @@ class DataSet(object):
 
         savePath = self._analysis_result_save_path(
                 resultName, analysisName, resultIndex, subdirectory, '.npy')
-        return np.load(savePath, allow_pickle=True)
+        return np.load(savePath, allow_pickle=False)
 
     def load_numpy_analysis_result_if_available(
             self, resultName: str, analysisName: str, defaultValue,

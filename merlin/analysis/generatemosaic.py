@@ -59,7 +59,7 @@ class GenerateMosaic(analysistask.AnalysisTask):
         global coordinates.
         """
         return np.matmul(self._micron_to_mosaic_transform(micronExtents),
-                         np.append(micronCoordinates, 1)).astype(int32)[:2]
+                         np.append(micronCoordinates, 1)).astype(int)[:2]
 
     def _micron_to_mosaic_transform(self, micronExtents: ExtentTuple) \
             -> np.ndarray:

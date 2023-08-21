@@ -181,7 +181,7 @@ class GenerateMosaic(analysistask.AnalysisTask):
                 transformedImage > 0, mosaic > 0)
             cv2.add(mosaic, transformedImage, dst=mosaic,
                     mask=np.array(
-                        transformedImage > 0).astype(uint8))
+                        transformedImage > 0).astype('uint8'))
             dividedMosaic = cv2.divide(mosaic, 2)
             mosaic[divisionMask] = dividedMosaic[divisionMask]
 

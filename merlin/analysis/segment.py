@@ -18,6 +18,15 @@ from merlin.util import watershed
 import pandas
 import networkx as nx
 
+"""
+TODO:
+- remove CellPoseSegment from Xingjie
+- remove CellPoseSegmentSingleChannel from me
+- write new class called CellposeSegment that allow 2D and 3D seg
+- replace get_overlapping_objects and combine_2d_segmentation_masks_into
+  _3d for the built-in matching function from cellpose (from aaron)
+"""
+
 
 class FeatureSavingAnalysisTask(analysistask.ParallelAnalysisTask):
 

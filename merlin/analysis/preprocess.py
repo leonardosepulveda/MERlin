@@ -121,6 +121,14 @@ class DeconvolutionPreprocess(Preprocess):
 
         # this currently only is to calculate the pixel histograms in order
         # to estimate the initial scale factors. This is likely unnecessary
+        """
+        LS:
+        the above comment has been tested for confocal data.  
+        Aaron / Rongxin checked that if they initialized all scaling
+        factors to 1 they pretty much got the same results. 
+
+        remains to be seen if this step is unnecesary also for epi data
+        """
         for bi, b in enumerate(self.get_codebook().get_bit_names()):
             dataChannel = self.dataSet.get_data_organization()\
                     .get_data_channel_for_bit(b)

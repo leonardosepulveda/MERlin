@@ -97,6 +97,14 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
 
         chromaticCorrector = aberration.RigidChromaticCorrector(
             chromaticTransformations, self.get_reference_color())
+        
+        """
+        LS
+        The name here is confusing. Get_processed_image_set get the 
+        warped, filtered and then deconvolved images.
+
+        it would be clearer to use a variable named 'preprocessedImages'
+        """
         warpedImages = preprocessTask.get_processed_image_set(
             fovIndex, zIndex=zIndex, chromaticCorrector=chromaticCorrector)
 

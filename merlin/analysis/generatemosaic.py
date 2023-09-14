@@ -50,6 +50,11 @@ class GenerateMosaic(analysistask.AnalysisTask):
             as [channel, zIndex, 1, x, y]. The order of the channels is as
             specified in the provided parameters file or in the data
             organization if no data channels are specified.
+
+        TODO:
+        If 'separate_files' is true, then the mosaics cannot be called from 
+        this function, and there is no functionality to read separate mosaics 
+        into a jupyter notebook using the mosaic task.  
         """
         return self.dataSet.get_analysis_image_set(self, 'mosaic')
 

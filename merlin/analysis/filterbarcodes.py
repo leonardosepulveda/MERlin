@@ -5,6 +5,42 @@ from scipy import optimize
 from merlin.core import analysistask
 from merlin.analysis import decode
 
+"""
+Comments on local decoding:
+
+We find that using a subset of a whole sample to perform decoding change
+the total number of barcodes found. 
+
+The approximate boost in number of barcodes is below
+
+neighborhood      Fold increase in barcodes
+size (FOV)      (with respect to whole sample)
+        
+  11x11
+   9x9
+   7x7
+   5x5
+   3x3
+   1x1
+  .5x.5
+ .25x.25
+.125x.125
+
+This applies both to confocal and epi samples.
+
+Aaron found that performing the optimization in individual FOVs instead
+of globally did not add many additional barcodes after the decoding step.
+So, the differences that we found while decoding FOV neighborhoods of 
+different sizes has to come from the Filtering step. I suspect the 
+difference comes from the generate_adaptive_barcodes being run in a 
+subset of the whole sample.
+
+
+
+
+
+"""
+
 
 class AbstractFilterBarcodes(decode.BarcodeSavingParallelAnalysisTask):
     """

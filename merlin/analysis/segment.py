@@ -132,18 +132,6 @@ class WatershedSegment(FeatureSavingAnalysisTask):
             (filterSize, filterSize), filterSigma)
             for z in range(len(self.dataSet.get_z_positions()))])
 
-class CellPoseSegment(FeatureSavingAnalysisTask):
-
-    """
-    An analysis task that determines the boundaries of features in the
-    image data in each field of view using cellpose (https://github.com/
-    MouseLand/cellpose).
-
-    This class uses cellpose 2.0, that allows providing a user-trained
-    model for segmentation.
-
-    """
-
 class CellPoseSegmentSingleChannel(FeatureSavingAnalysisTask):
 
     """

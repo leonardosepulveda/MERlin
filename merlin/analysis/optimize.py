@@ -33,7 +33,10 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
         if 'crop_width' not in self.parameters:
             self.parameters['crop_width'] = 0
         if 'random_seed' not in self.parameters:
-            self.parameters['random_seed'] = 0
+
+            # set the random seed
+            # make sure to set a different one for each optimize
+            np.random.seed(self.parameters['random_seed'])
 
         if 'fov_index' in self.parameters:
             logger = self.dataSet.get_logger(self)

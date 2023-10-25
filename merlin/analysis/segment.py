@@ -4,6 +4,7 @@ import numpy as np
 from skimage import measure
 from skimage import segmentation
 from skimage import exposure
+from skimage import transform
 import rtree
 from shapely import geometry
 from typing import List, Dict, Tuple
@@ -20,11 +21,13 @@ import networkx as nx
 
 """
 TODO:
-- remove CellPoseSegment from Xingjie
+- remove CellPoseSegment from Xingjie ..............  DONE
 - remove CellPoseSegmentSingleChannel from me
 - write new class called CellposeSegment that allow 2D and 3D seg
 - replace get_overlapping_objects and combine_2d_segmentation_masks_into
   _3d for the built-in matching function from cellpose (from aaron)
+- Copy cellposeSegment3D class from Aaron ........... DONE
+  
 """
 
 
@@ -131,18 +134,6 @@ class WatershedSegment(FeatureSavingAnalysisTask):
             warpTask.get_aligned_image(fov, channelIndex, z),
             (filterSize, filterSize), filterSigma)
             for z in range(len(self.dataSet.get_z_positions()))])
-
-class CellPoseSegment(FeatureSavingAnalysisTask):
-
-    """
-    An analysis task that determines the boundaries of features in the
-    image data in each field of view using cellpose (https://github.com/
-    MouseLand/cellpose).
-
-    This class uses cellpose 2.0, that allows providing a user-trained
-    model for segmentation.
-
-    """
 
 class CellPoseSegmentSingleChannel(FeatureSavingAnalysisTask):
 
@@ -407,6 +398,167 @@ class CellPoseSegmentSingleChannel(FeatureSavingAnalysisTask):
         featureDB = self.get_feature_database()
         featureDB.write_features(featureList, fragmentIndex)
 
+
+class CellPoseSegmentSingleChannel3D(FeatureSavingAnalysisTask):
+
+    """
+    An analysis task that determines the boundaries of features in the
+    image data in each field of view using cellpose (https://github.com/
+    MouseLand/cellpose).
+
+    3D implementation for spinning disk
+    taken from aahalpern's fork
+    """
+
+    def __init__(self, dataSet, parameters=None, analysisName=None):
+        super().__init__(dataSet, parameters, analysisName)
+
+        if 'diameter' not in self.parameters:
+            self.parameters['diameter'] = 50
+        if 'channel_name' not in self.parameters:
+            self.parameters['channel_name'] = 'DAPI'
+        
+        # better to supply a user trained model
+        if 'model_type' not in self.parameters:
+            self.parameters['model_type'] = 'cyto2' # specify cp model if not using user trained model path
+        if 'path_to_user_model' not in self.parameters:
+            self.parameters['path_to_user_model'] = False
+            
+        # save mask file
+        if 'dump_segmented_masks' not in self.parameters:
+            self.parameters['dump_segmented_masks'] = True
+        if 'use_gpu' not in self.parameters:
+            self.parameters['use_gpu'] = False
+
+        if 'cellpose_3D_stitching' not in self.parameters:
+            self.parameters['cellpose_3D_stitching'] = True # cellpose way of doing stitching
+        if 'anisotropy' not in self.parameters:
+            # not used for stitching
+            # ex. 2 if z is samples half as dense as XY
+            self.parameters['anisotropy'] = 1 
+        if 'stitch_threshold' not in self.parameters:
+            self.parameters['stitch_threshold'] = 0.4
+            
+        # downsample to save on memory for cellpose
+            # ex downsample_factor 2 will reduce the image size in half, but keep the same number of z planes
+        if 'downsample_factor' not in self.parameters:
+            self.parameters['downsample_factor'] = None
+
+    def fragment_count(self):
+        return len(self.dataSet.get_fovs())
+
+    def get_estimated_memory(self):
+        # TODO - refine estimate
+        return 2048
+
+    def get_estimated_time(self):
+        # TODO - refine estimate
+        return 5
+
+    def get_dependencies(self):
+        return [self.parameters['warp_task'],
+                self.parameters['global_align_task']]
+
+    def get_cell_boundaries(self) -> List[spatialfeature.SpatialFeature]:
+        featureDB = self.get_feature_database()
+        return featureDB.read_features()
+
+    def _read_image_stack(self, fov: int, channelIndex: int) -> np.ndarray:
+        warpTask = self.dataSet.load_analysis_task(
+            self.parameters['warp_task'])
+        zPositions = self.dataSet.get_z_positions()
+        zIndices = [self.dataSet.position_to_z_index(z) for z in zPositions]
+
+        # check - get aligned images is asking for zIndex not z position
+        return np.array([warpTask.get_aligned_image(fov, channelIndex, z)
+                         for z in zIndices])
+
+    def _save_tiff_images(self, fov, filename_prefix, image_stack):
+        '''Save a stack of images as a tiff file.'''
+        with self.dataSet.writer_for_analysis_images(self, filename_prefix, fov) as outputTif:
+             for frame in image_stack:
+                    outputTif.save(frame,
+                                   photometric='MINISBLACK',
+                                   contiguous=True)
+
+    def _run_analysis(self, fragmentIndex):
+
+        globalTask = self.dataSet.load_analysis_task(
+                self.parameters['global_align_task'])
+
+        # read channel index
+        channel_ids = self.dataSet.get_data_organization().get_data_channel_index(
+                self.parameters['channel_name'])
+
+        # read images and perform segmentation
+        seg_images = self._read_image_stack(fragmentIndex, channel_ids)
+
+        # select the model    
+        # if path_to_user_model exist, override and use user model
+        if self.parameters['path_to_user_model']:
+            model = cellpose.models.CellposeModel(
+                            gpu = self.parameters['use_gpu'],
+                            pretrained_model=self.parameters['path_to_user_model'])
+        else:
+            model = cellpose.models.Cellpose(gpu=self.parameters['use_gpu'],
+                                             model_type=self.parameters['model_type'])
+
+        # downsample the image to save on memory
+        if self.parameters['downsample_factor'] is not None:
+            factor = self.parameters['downsample_factor']
+            num_frames, rows_i, cols_i = seg_images.shape
+            rows_f = int(rows_i / factor)
+            cols_f = int(cols_i / factor)
+            seg_images = transform.resize(seg_images, [num_frames,rows_f,cols_f],
+                preserve_range = True).astype(seg_images.dtype)
+            # scale the diameter factor too
+            self.parameters['diameter'] = self.parameters['diameter']/factor
+
+        # evaluate the model using one of two ways, 3d vs 2d stitching
+        # 2d stitching seems smoother imo
+        if self.parameters['cellpose_3D_stitching']:
+            # 2d-3d stitching method
+            cellpose_output = model.eval(seg_images, 
+                                            diameter = self.parameters['diameter'], 
+                                            do_3D = False,
+                                            channels = [0,0],
+                                            stitch_threshold=self.parameters['stitch_threshold']
+                                            )
+        else:
+            # 3d anisotropy method
+            cellpose_output = model.eval(seg_images, 
+                                            diameter = self.parameters['diameter'], 
+                                            do_3D = True,
+                                            channels = [0,0],
+                                            anisotropy = self.parameters['anisotropy']
+                                            )
+                                            
+        # only take the mask output of cellpose
+        # do it this way since sometimes cellpose responds with 3 or 4 outputs... weird...
+        masks = cellpose_output[0]
+        
+        # upsample the mask image if it was downsampled
+        if self.parameters['downsample_factor'] is not None:
+            masks = transform.resize(masks, [num_frames,rows_i,cols_i],
+                order = 0,
+                preserve_range = True).astype(masks.dtype)
+        
+        if self.parameters['dump_segmented_masks']:
+            self._save_tiff_images(fragmentIndex, 'segmented_mask', masks)
+
+        # Get the boundary features
+        zPos = np.array(self.dataSet.get_data_organization().get_z_positions())
+
+        mask_values = np.unique(masks)[1:] # ignore the zero mask value
+
+        featureList = [spatialfeature.SpatialFeature.feature_from_label_matrix(
+                        (masks == val),
+                        fragmentIndex,
+                        globalTask.fov_to_global_transform(fragmentIndex),
+                        zPos) for val in mask_values]
+
+        featureDB = self.get_feature_database()
+        featureDB.write_features(featureList, fragmentIndex)
 
 class CleanCellBoundaries(analysistask.ParallelAnalysisTask):
     '''

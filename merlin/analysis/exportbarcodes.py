@@ -12,6 +12,16 @@ class ExportBarcodes(analysistask.AnalysisTask):
         super().__init__(dataSet, parameters, analysisName)
 
         if 'columns' not in self.parameters:
+            # Available barcode information:
+            #
+            # 'barcode_id', 'fov', 'cell_index', 
+            # 'mean_intensity', 'max_intensity', 'area',
+            # 'mean_distance', 'min_distance', 
+            # 'x', 'y', 'z', 'global_x', 'global_y','global_z', 
+            # 'intensity_0', 'intensity_1', ... 'intensity_Nbits',
+            #
+            # TODO: current implementation does not provide cell_index
+
             self.parameters['columns'] = ['barcode_id', 'global_x',
                                           'global_y', 'cell_index']
         if 'exclude_blanks' not in self.parameters:

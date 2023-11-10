@@ -33,11 +33,9 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
         if 'crop_width' not in self.parameters:
             self.parameters['crop_width'] = 0
         if 'random_seed' not in self.parameters:
-
-            # set the random seed
-            # make sure to set a different one for each optimize
-            # from Aaron
-            np.random.seed(self.parameters['random_seed'])
+            random_number_generator = np.random.default_rng()
+        else:
+            random_number_generator = np.random.default_rng(seed=self.parameters['random_seed'])
 
         if 'fov_index' in self.parameters:
             logger = self.dataSet.get_logger(self)
@@ -50,10 +48,10 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
         elif ('fovs' in self.parameters) and ('zIndices' in self.parameters):
         
             self.parameters['fov_index'] = []
-            fovIndex = np.random.choice(list(self.parameters['fovs']), 
+            fovIndex = random_number_generator.choice(list(self.parameters['fovs']), 
                 size = self.parameters['fov_per_iteration'])
                     
-            zIndex = np.random.choice(list(self.parameters['zIndices']),
+            zIndex = random_number_generator.choice(list(self.parameters['zIndices']),
                 size = self.parameters['fov_per_iteration'])
                 
             self.parameters['fov_index'] = [[int(fov),int(ind)] for fov, ind in zip(fovIndex, zIndex)]
@@ -63,9 +61,9 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
         else:
             self.parameters['fov_index'] = []
             for i in range(self.parameters['fov_per_iteration']):
-                fovIndex = int(np.random.choice(
+                fovIndex = int(random_number_generator.choice(
                     list(self.dataSet.get_fovs())))
-                zIndex = int(np.random.choice(
+                zIndex = int(random_number_generator.choice(
                     list(range(len(self.dataSet.get_z_positions())))))
                 self.parameters['fov_index'].append([fovIndex, zIndex])
 

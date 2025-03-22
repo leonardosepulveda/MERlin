@@ -45,27 +45,23 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
             # save the optimized images
         if 'write_decoded_images' not in self.parameters:
             self.parameters['write_decoded_images'] = True
-
-        if 'fov_index' in self.parameters:
-            logger = self.dataSet.get_logger(self)
-            logger.info('Setting fov_per_iteration to length of fov_index')
-
-            self.parameters['fov_per_iteration'] = \
-                len(self.parameters['fov_index'])
         
+        # clean up optimize
         # specify fovs and zIndices separately
-        elif ('fovs' in self.parameters) and ('zIndices' in self.parameters):
-        
-            self.parameters['fov_index'] = []
-            fovIndex = np.random.choice(list(self.parameters['fovs']), 
-                size = self.parameters['fov_per_iteration'])
-                    
-            zIndex = np.random.choice(list(self.parameters['zIndices']),
-                size = self.parameters['fov_per_iteration'])
+        if ('fovs' in self.parameters) and ('zIndices' in self.parameters):
+            # turn off random choice when fovs and zIndices are specified
+            fovIndex = self.parameters['fovs']
+            zIndex = self.parameters['zIndices']
+
+            #fovIndex = np.random.choice(list(self.parameters['fovs']), 
+            #    size = self.parameters['fov_per_iteration'])
+            #        
+            #zIndex = np.random.choice(list(self.parameters['zIndices']),
+            #    size = self.parameters['fov_per_iteration'])
                 
             self.parameters['fov_index'] = [[int(fov),int(ind)] for fov, ind in zip(fovIndex, zIndex)]
             
-        # this should fix the issue of optimize choosing different FOVs on rerun...
+        # this should choose same FOV upon rerun...
         else:
             
             self.parameters['fov_index'] = []
@@ -76,6 +72,7 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
                 size = self.parameters['fov_per_iteration'])
                 
             self.parameters['fov_index'] = [[int(fov),int(ind)] for fov, ind in zip(fovIndex, zIndex)]
+
         # add parameter to only optimize inside the segmentation mask:
         # probably only do this with cellpose 3D class
         # specify the segment task to use
@@ -160,7 +157,6 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
 
         # this defaults to zero and will cause no change
         decoder.barcodesSeenThreshold = self.parameters['min_barcodes_for_refactoring']
-
 
         decodeMask = None
         if self.parameters['use_segmentation_mask']: # masked decode

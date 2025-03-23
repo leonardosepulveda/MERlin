@@ -289,11 +289,23 @@ class DataOrganization(object):
 
     def get_z_positions(self) -> List[float]:
         """Get the z positions present in this data organization.
-
         Returns:
             A sorted list of all unique z positions
         """
-        return sorted(np.unique([y for x in self.data['zPos'] for y in x]))
+        # assume channels that contain dapi or polyt in the channelName are for segmentation
+        sel = self.data['channelName'].str.contains('dapi|polyt', case = False, regex=True)
+        zpos = self.data['zPos'][~sel]
+        return sorted(np.unique([y for x in zpos for y in x]))
+    
+    def get_z_positions_segmentation(self) -> List[float]:
+        """Get the z positions present in this data organization.
+        Returns:
+            A sorted list of all unique z positions
+        """
+        # assume channels that contain dapi or polyt in the channelName are for segmentation
+        sel = self.data['channelName'].str.contains('dapi|polyt', case = False, regex=True)
+        zpos = self.data['zPos'][sel]
+        return sorted(np.unique([y for x in zpos for y in x]))
 
     def get_fovs(self) -> np.ndarray:
         return np.unique(self.fileMap['fov'])

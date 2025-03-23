@@ -7,7 +7,6 @@ import os
 import pickle
 from skimage import registration
 from skimage import transform
-from skimage import registration
 from skimage import morphology
 import cv2
 
@@ -78,20 +77,21 @@ class Warp(analysistask.ParallelAnalysisTask):
             dataChannel, fov, self.dataSet.z_index_to_position(zIndex))
         transformation = self.get_transformation(fov, dataChannel)
 
+        # apply the chromatic correction
         if chromaticCorrector is not None:
             imageColor = self.dataSet.get_data_organization()\
                 .get_data_channel_color(dataChannel)
-            inputimage = chromaticCorrector.transform_image(
-                inputImage, imageColor)
+            inputImage = chromaticCorrector.transform_image(
+                inputImage, imageColor).astype(inputImage.dtype)
 
         # this is the warped image with no padding
         warped_image = transform.warp(inputImage, transformation,
-            preserve_range=True)
+            preserve_range=True).astype(inputImage.dtype)
         
         # an overly complicated attempt to smooth boundary at poorly warped images
         if self.parameters['boundary_smooth']:
             warped_image_blur = transform.warp(inputImage, transformation,
-                preserve_range=True, mode = 'edge')
+                preserve_range=True, mode = 'edge').astype(inputImage.dtype)
             warped_image_blur = cv2.GaussianBlur(warped_image_blur,
                 ksize = (23, 23), 
                 sigmaX = 11, 
@@ -214,7 +214,7 @@ class FiducialCorrelationWarp(Warp):
             self.parameters['highpass_sigma'] = 3
 
         if 'median_filter' not in self.parameters:
-            self.parameters['median_filter'] # median filter can deal with hot pixels
+            self.parameters['median_filter'] = False # median filter can deal with hot pixels
 
         # xingjie parameters
         if 'percentile_pixel_to_keep' not in self.parameters:

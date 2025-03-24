@@ -460,6 +460,9 @@ class HDF5SpatialFeatureDB(SpatialFeatureDB):
             np.array(feature.get_bounding_box())
         featureGroup.attrs['volume'] = feature.get_volume()
         featureGroup['z_coordinates'] = feature.get_z_coordinates()
+        
+        # add number of z planes with actual polygons
+        featureGroup['num_z'] = len([element for element in feature.get_boundaries() if element])
 
         for i, bSet in enumerate(feature.get_boundaries()):
             zBoundaryGroup = featureGroup.create_group('zIndex_' + str(i))

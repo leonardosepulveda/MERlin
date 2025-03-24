@@ -904,7 +904,7 @@ class CellPoseSegment3D(FeatureSavingAnalysisTask):
             warpedImage = transform.warp(rawImage, transformation, preserve_range=True)
             stack.append(warpedImage)
 
-        return np.array(stack).astype(rawImage)
+        return np.array(stack).astype(rawImage.dtype)
 
     def _save_tiff_images(self, fov, filename_prefix, image_stack, use_skimage = False):
         '''Save a stack of images as a tiff file.'''

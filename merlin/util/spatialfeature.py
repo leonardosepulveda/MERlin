@@ -462,7 +462,7 @@ class HDF5SpatialFeatureDB(SpatialFeatureDB):
         featureGroup['z_coordinates'] = feature.get_z_coordinates()
         
         # add number of z planes with actual polygons
-        featureGroup['num_z'] = len([element for element in feature.get_boundaries() if element])
+        featureGroup.attrs['num_z'] = len([element for element in feature.get_boundaries() if element])
 
         for i, bSet in enumerate(feature.get_boundaries()):
             zBoundaryGroup = featureGroup.create_group('zIndex_' + str(i))
@@ -579,6 +579,11 @@ class HDF5SpatialFeatureDB(SpatialFeatureDB):
                     columns = list(np.unique(allAttrKeys))
                     df = pandas.DataFrame(data=allAttrValues, columns=columns)
                     finalDF = df.loc[:, ['fov', 'volume']].copy(deep=True)
+
+                    # try to include num_z if it exists
+                    if 'num_z' in columns:
+                        finalDF['num_z'] = df['num_z']
+
                     finalDF.index = df['id'].str.decode(encoding='utf-8'
                                                         ).values.tolist()
                     boundingBoxDF = pandas.DataFrame(

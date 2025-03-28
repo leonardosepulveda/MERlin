@@ -104,11 +104,13 @@ class GenerateMosaic(analysistask.AnalysisTask):
 
         maximumProjection = False
         if 'z_index' in self.parameters:
-            if self.parameters['z_index'] != 'maximum_projection':
-                zIndexes = [self.parameters['z_index']]
-            else:
+            if self.parameters['z_index'] == 'maximum_projection':
                 maximumProjection = True
                 zIndexes = [0]
+            if isinstance(self.parameters['z_index'], list):
+                zIndexes = self.parameters['z_index']
+            if isinstance(self.parameters['z_index'], int):
+                zIndexes = [self.parameters['z_index']]
         else:
             zIndexes = range(len(self.dataSet.get_z_positions()))
 

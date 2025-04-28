@@ -396,6 +396,10 @@ class PixelBasedDecoder(object):
         vc = df['barcode_id'].value_counts()
         barcodesSeen[vc.index] = vc.values
 
+        # get indices of barcodes seen and not seen, useful for filtering later
+        barcodesSeen_idx = df['barcode_id'].unique()
+        barcodesNotSeen_idx = np.setdiff1d(np.arange(self._barcodeCount), barcodesSeen_idx)
+
         # deal with the image intensity traces
         # annoying but to save time put the pixel mag and pixel traces together
         intensity_image = np.vstack([pixelMagnitudes.reshape(1,*pixelMagnitudes.shape),
@@ -430,19 +434,26 @@ class PixelBasedDecoder(object):
             for bid, group in df_min.groupby('barcode_id'):
                 num_bcs_in_group = len(group)
 
-                if num_bcs_in_group > self.barcodesSeenThreshold: # ignore low abundance barcodes?
+                if num_bcs_in_group >= self.barcodesSeenThreshold: # ignore low abundance barcodes?
                     sumMinPixelTraces[bid] = group.iloc[:,1:].sum(axis = 0)
 
             offPixelTraces = sumMinPixelTraces.copy() # necessary?
+            # disregard bits that are supposed to be ON, thus leaving 'background'
             offPixelTraces[self._decodingMatrix > 0] = np.nan
 
             # if some barcodes are not seen don't include them
             # see also this step for the intensity refactoring...
-            offPixelTraces[offPixelTraces == 0] = np.nan
+            # offPixelTraces[offPixelTraces == 0] = np.nan
+            offPixelTraces[barcodesNotSeen_idx] = np.nan
 
             offBitIntensity = np.nansum(offPixelTraces, axis = 0) / np.sum(
                 (self._decodingMatrix == 0) * barcodesSeen[:, None], axis = 0)
+            
+            # just in case return a zero in case using old version of numpy, seen np.nansum note about all NA
+            offBitIntensity[np.isnan(offBitIntensity)] = 0.0
+
             backgroundRefactors = offBitIntensity
+            
         else:
             backgroundRefactors = np.zeros(self._bitCount)
 
@@ -455,22 +466,29 @@ class PixelBasedDecoder(object):
         # dataframe with the barcode id and norm pixel trace
         df_npt = pandas.concat([df, pandas.DataFrame(normPixelTrace)], axis = 1)
 
-        sumPixelTraces = np.zeros((self._barcodeCount, self._bitCount))
+        sumPixelTraces = np.zeros((self._barcodeCount, self._bitCount)) # #barcodes x #bits
         # for each barcode get the average pixel trace
         for bid, group in df_npt.groupby('barcode_id'):
             num_bcs_in_group = len(group)
 
-            if num_bcs_in_group > self.barcodesSeenThreshold: # ignore low abundance barcodes?
+            if num_bcs_in_group >= self.barcodesSeenThreshold: # ignore low abundance barcodes?
                 sumPixelTraces[bid] = group.iloc[:,1:].sum(axis = 0)/num_bcs_in_group
 
+        # only consider bits that are supposed to be ON in the codebook
         sumPixelTraces[self._decodingMatrix == 0] = np.nan
 
         # add extra step here to deal with barcodes we don't see
         # relevant for large codebooks??
-        sumPixelTraces[sumPixelTraces == 0] = np.nan
+        # sumPixelTraces[sumPixelTraces == 0] = np.nan # don't like the old way of handling this
+        # set rows that were not seen to nan
+        sumPixelTraces[barcodesNotSeen_idx] = np.nan
 
         onBitIntensity = np.nanmean(sumPixelTraces, axis = 0)
-        refactors = onBitIntensity/np.mean(onBitIntensity)
+        refactors = onBitIntensity/np.nanmean(onBitIntensity) # note nanmean here see below
+
+        # if this is very sparse data, there might have been nans in the refactors
+        # now that the refactors were calculated for what we could do, reset the unseen refactors to 1
+        refactors[np.isnan(refactors)] = 1.0
 
         return refactors, backgroundRefactors, barcodesSeen
 

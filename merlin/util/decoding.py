@@ -381,6 +381,15 @@ class PixelBasedDecoder(object):
         labels = morphology.remove_small_objects(labels, 
                                                 min_size = self.refactorAreaThreshold)
 
+        # if NO barcodes are detected (labels are all zeros), we need a way to exit gracefully...
+        # the return values should not affect the results...
+        if np.all(labels == 0):
+            print('*** warning no barcodes detected in while refactoring***')
+            backgroundRefactors = np.zeros(self._bitCount)
+            refactors = np.ones(self._bitCount)
+            barcodesSeen = np.zeros(self._barcodeCount)
+            return refactors, backgroundRefactors, barcodesSeen 
+
         # get props of decoded regions to find the barcode id
         properties = measure.regionprops_table(labels,
                     intensity_image = decodedImage,
@@ -453,7 +462,7 @@ class PixelBasedDecoder(object):
             offBitIntensity[np.isnan(offBitIntensity)] = 0.0
 
             backgroundRefactors = offBitIntensity
-            
+
         else:
             backgroundRefactors = np.zeros(self._bitCount)
 

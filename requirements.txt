@@ -1,5 +1,5 @@
 boto3
-cellpose==2.2
+cellpose>=4.0
 cython
 docutils
 google-cloud-storage

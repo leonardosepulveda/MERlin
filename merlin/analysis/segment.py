@@ -1198,125 +1198,137 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
         globalTask = self.dataSet.load_analysis_task(
                 self.parameters['global_align_task'])
 
-        # assume single channel first
-        is_two_channel = False
-        if self.parameters['channel_2_name'] is not None:
-            is_two_channel = True
+        # check if the mask is already generated - this may be caused by GPU time limit and spatialfeature bottleneck
+        imagePath = self.dataSet._analysis_image_name(self, 'segmented_mask_', fragmentIndex)
+        print(f'looking for image at {imagePath}')
+        if os.path.exists(imagePath):
+            print(f'reading saved mask file at {imagePath}')
+            masks = io.imread(imagePath)
+        # else run the full analysis
+        else:
+            print(f'starting cellposeSAM')
+            # assume single channel first
+            is_two_channel = False
+            if self.parameters['channel_2_name'] is not None:
+                is_two_channel = True
 
-        # get channel index and read images
-        channel_1_id = self.dataSet.get_data_organization().get_data_channel_index(
-                self.parameters['channel_1_name'])
-        seg_images_1 = self._read_image_stack(fragmentIndex, channel_1_id)
+            # get channel index and read images
+            channel_1_id = self.dataSet.get_data_organization().get_data_channel_index(
+                    self.parameters['channel_1_name'])
+            seg_images_1 = self._read_image_stack(fragmentIndex, channel_1_id)
 
-        if is_two_channel:
-            channel_2_id = self.dataSet.get_data_organization().get_data_channel_index(
-                self.parameters['channel_2_name'])
-            seg_images_2 = self._read_image_stack(fragmentIndex, channel_2_id)
-
-        # downsample the image to save on memory
-        if self.parameters['downsample_factor'] is not None:
-            factor = self.parameters['downsample_factor']
-            num_frames, rows_i, cols_i = seg_images_1.shape
-            rows_f = int(rows_i / factor)
-            cols_f = int(cols_i / factor)
-            seg_images_1 = transform.resize(seg_images_1, [num_frames,rows_f,cols_f],
-                preserve_range = True).astype(seg_images_1.dtype)
             if is_two_channel:
-                seg_images_2 = transform.resize(seg_images_2, [num_frames,rows_f,cols_f],
-                    preserve_range = True).astype(seg_images_2.dtype)
+                channel_2_id = self.dataSet.get_data_organization().get_data_channel_index(
+                    self.parameters['channel_2_name'])
+                seg_images_2 = self._read_image_stack(fragmentIndex, channel_2_id)
 
-        # stack the images if necessary
-        if is_two_channel:
-            seg_images = np.stack([seg_images_1, seg_images_2], axis = 3) # this should be a [z,x,y,c] stack
-        else:
-            seg_images = seg_images_1
+            # downsample the image to save on memory
+            if self.parameters['downsample_factor'] is not None:
+                factor = self.parameters['downsample_factor']
+                num_frames, rows_i, cols_i = seg_images_1.shape
+                rows_f = int(rows_i / factor)
+                cols_f = int(cols_i / factor)
+                seg_images_1 = transform.resize(seg_images_1, [num_frames,rows_f,cols_f],
+                    preserve_range = True).astype(seg_images_1.dtype)
+                if is_two_channel:
+                    seg_images_2 = transform.resize(seg_images_2, [num_frames,rows_f,cols_f],
+                        preserve_range = True).astype(seg_images_2.dtype)
 
-        # axis for cellpose
-        if seg_images.ndim == 2:
-            z_axis = None
-            channel_axis = None
-        if seg_images.ndim == 3:
-            z_axis = 0
-            channel_axis = None
-        if seg_images.ndim == 4:
-            z_axis = 0
-            channel_axis = 3
+            # stack the images if necessary
+            if is_two_channel:
+                seg_images = np.stack([seg_images_1, seg_images_2], axis = 3) # this should be a [z,x,y,c] stack
+            else:
+                seg_images = seg_images_1
 
-        # get ready for cellpose stuff
-        # if path_to_user_model exist, override and use user model - must be trained in cellpose
-        if self.parameters['path_to_user_model']:
-            model = cellpose.models.CellposeModel(gpu = self.parameters['use_gpu'],
-                                                  pretrained_model=self.parameters['path_to_user_model'])
-        else:
-            model = cellpose.models.CellposeModel(gpu=self.parameters['use_gpu'])
+            # axis for cellpose
+            if seg_images.ndim == 2:
+                z_axis = None
+                channel_axis = None
+            if seg_images.ndim == 3:
+                z_axis = 0
+                channel_axis = None
+            if seg_images.ndim == 4:
+                z_axis = 0
+                channel_axis = 3
 
-        if self.parameters['do_3D']:
-            cellpose_output = model.eval(seg_images,
-                                            do_3D = True,
-                                            z_axis = 0,
-                                            channel_axis = channel_axis,
-                                            flow3D_smooth = self.parameters['flow3D_smooth'],
-                                            flow_threshold = self.parameters['flow_threshold'], 
-                                            cellprob_threshold = self.parameters['cellprob_threshold'],
-                                            min_size = self.parameters['min_size'],
-                                            normalize={"tile_norm_blocksize": 256})
-            masks = cellpose_output[0]
+            # get ready for cellpose stuff
+            # if path_to_user_model exist, override and use user model - must be trained in cellpose
+            if self.parameters['path_to_user_model']:
+                model = cellpose.models.CellposeModel(gpu = self.parameters['use_gpu'],
+                                                    pretrained_model=self.parameters['path_to_user_model'])
+            else:
+                model = cellpose.models.CellposeModel(gpu=self.parameters['use_gpu'])
 
-        else: # 2D mode is a little different from CP1-3 from what I can tell
-            masks_raw = np.zeros(seg_images.shape, dtype = np.uint16)
-            # have to run this plane by plane
-            for i,im in enumerate(seg_images):
-                cellpose_output = model.eval(im, 
-                                                do_3D = False,
+            if self.parameters['do_3D']:
+                cellpose_output = model.eval(seg_images,
+                                                do_3D = True,
+                                                z_axis = 0,
+                                                channel_axis = channel_axis,
+                                                flow3D_smooth = self.parameters['flow3D_smooth'],
                                                 flow_threshold = self.parameters['flow_threshold'], 
                                                 cellprob_threshold = self.parameters['cellprob_threshold'],
                                                 min_size = self.parameters['min_size'],
                                                 normalize={"tile_norm_blocksize": 256})
-                masks_raw[i] = cellpose_output[0]
-            masks = cellpose.utils.stitch3D(masks_raw, stitch_threshold=self.parameters['stitch_threshold'])
+                masks = cellpose_output[0]
 
-        # this will cause masks to grow with the hope that they are a little smoother...
-        if self.parameters['expand_mask'] > 0:
-            for i in range(len(masks)):
-                masks[i] = segmentation.expand_labels(masks[i], int(self.parameters['expand_mask']))
+            else: # 2D mode is a little different from CP1-3 from what I can tell
+                masks_raw = np.zeros(seg_images.shape, dtype = np.uint16)
+                # have to run this plane by plane
+                for i,im in enumerate(seg_images):
+                    cellpose_output = model.eval(im, 
+                                                    do_3D = False,
+                                                    flow_threshold = self.parameters['flow_threshold'], 
+                                                    cellprob_threshold = self.parameters['cellprob_threshold'],
+                                                    min_size = self.parameters['min_size'],
+                                                    normalize={"tile_norm_blocksize": 256})
+                    masks_raw[i] = cellpose_output[0]
+                masks = cellpose.utils.stitch3D(masks_raw, stitch_threshold=self.parameters['stitch_threshold'])
+
+            # this will cause masks to grow with the hope that they are a little smoother...
+            if self.parameters['expand_mask'] > 0:
+                for i in range(len(masks)):
+                    masks[i] = segmentation.expand_labels(masks[i], int(self.parameters['expand_mask']))
 
 
-        # recall that the segmentation channel may have more z positions 
-        # only take those zpositions
-        zPos = np.array(self.dataSet.get_data_organization().get_z_positions())
-        zPos_segment = np.array(self.dataSet.get_data_organization().get_z_positions_segmentation())
-        sel = np.isin(zPos_segment, zPos)
-        masks = masks[sel]
+            # recall that the segmentation channel may have more z positions 
+            # only take those zpositions
+            zPos = np.array(self.dataSet.get_data_organization().get_z_positions())
+            zPos_segment = np.array(self.dataSet.get_data_organization().get_z_positions_segmentation())
+            sel = np.isin(zPos_segment, zPos)
+            masks = masks[sel]
 
-        # upsample the images if they were downsampled
-        if self.parameters['downsample_factor'] is not None:
-            masks = transform.resize(masks, [len(masks),rows_i,cols_i],
-                order = 0,
-                preserve_range = True).astype(masks.dtype)
+            # upsample the images if they were downsampled
+            if self.parameters['downsample_factor'] is not None:
+                masks = transform.resize(masks, [len(masks),rows_i,cols_i],
+                    order = 0,
+                    preserve_range = True).astype(masks.dtype)
 
-        # saving images
-        if self.parameters['dump_segmented_masks'] and fragmentIndex in self.parameters['dump_segmented_FOVs']:
-            self._save_tiff_images(fragmentIndex, 'segmented_mask_', masks)
-        
-        if self.parameters['dump_segmented_images'] and fragmentIndex in self.parameters['dump_segmented_FOVs']:
-
-            seg_images_1 = seg_images_1[sel]
-            seg_images_1 = transform.resize(seg_images_1, [len(masks),rows_i,cols_i],
-                order = 1,
-                preserve_range = True).astype(seg_images_1.dtype)
+            # saving images
+            if self.parameters['dump_segmented_masks'] and fragmentIndex in self.parameters['dump_segmented_FOVs']:
+                self._save_tiff_images(fragmentIndex, 'segmented_mask_', masks)
             
-            if is_two_channel:
-                seg_images_2 = seg_images_2[sel]
-                seg_images_2 = transform.resize(seg_images_2, [len(masks),rows_i,cols_i],
-                    order = 1,
-                    preserve_range = True).astype(seg_images_2.dtype)
-                
-            self._save_tiff_images(fragmentIndex, 'segmented_images_1_', seg_images_1)
-            if is_two_channel:
-                self._save_tiff_images(fragmentIndex, 'segmented_images_2_', seg_images_2)
+            if self.parameters['dump_segmented_images'] and fragmentIndex in self.parameters['dump_segmented_FOVs']:
 
+                seg_images_1 = seg_images_1[sel]
+                seg_images_1 = transform.resize(seg_images_1, [len(masks),rows_i,cols_i],
+                    order = 1,
+                    preserve_range = True).astype(seg_images_1.dtype)
+                
+                if is_two_channel:
+                    seg_images_2 = seg_images_2[sel]
+                    seg_images_2 = transform.resize(seg_images_2, [len(masks),rows_i,cols_i],
+                        order = 1,
+                        preserve_range = True).astype(seg_images_2.dtype)
+                    
+                self._save_tiff_images(fragmentIndex, 'segmented_images_1_', seg_images_1)
+                if is_two_channel:
+                    self._save_tiff_images(fragmentIndex, 'segmented_images_2_', seg_images_2)
+
+        # finish if/else and do the spatial feature part...
         # extract the features
         mask_values = np.unique(masks)[1:] # ignore the zero mask value
+
+        zPos = np.array(self.dataSet.get_data_organization().get_z_positions()) # just in case we got here without loading z positions
 
         featureList = [spatialfeature.SpatialFeature.feature_from_label_matrix(
                         (masks == val),

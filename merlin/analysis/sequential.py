@@ -187,7 +187,6 @@ class SmfishSignal(analysistask.ParallelAnalysisTask):
 
     def get_dependencies(self):
         return [self.parameters['warp_task'],
-                self.parameters['segment_task'],
                 self.parameters['global_align_task']]
 
     def _run_analysis(self, fragmentIndex):

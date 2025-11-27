@@ -319,13 +319,16 @@ class SmfishColocalizationSignal(analysistask.ParallelAnalysisTask):
             self.parameters['segment_task'] = None
 
         if 'distance_threshold_nm' not in self.parameters:
-            self.parameters['distance_threshold_nm'] = None # trigger automatic distance thresholding
+            self.parameters['distance_threshold_nm'] = 500
+            #self.parameters['distance_threshold_nm'] = None # trigger automatic distance thresholding
 
         # these are the channels to analyze for smFISH colocalization
         if 'channel_1_names' not in self.parameters:
             raise ValueError("no list of channel 1 names")
         if 'channel_2_names' not in self.parameters:
             raise ValueError("no list of channel 2 names")
+        
+        ### Thresholds for spot detection ###
         # if only a single channel name is provided, make it a list
         if isinstance(self.parameters['channel_1_names'], str):
             self.parameters['channel_1_names'] = [self.parameters['channel_1_names']]
@@ -350,6 +353,10 @@ class SmfishColocalizationSignal(analysistask.ParallelAnalysisTask):
             raise ValueError("channel 1 names and channel 1 thresholds must be of same length")
         if len(self.parameters['channel_2_names']) != len(self.parameters['channel_2_spot_thresholds']):
             raise ValueError("channel 2 names and channel 2 thresholds must be of same length")
+        ### End of setting thresholds ###
+
+        if 'do_anti_colocalization' not in self.parameters:
+            self.parameters['self.do_anti_colocalization'] = False
 
         self.alignTask = self.dataSet.load_analysis_task(self.parameters['global_align_task'])
         self.warpTask = self.dataSet.load_analysis_task(self.parameters['warp_task'])
@@ -417,21 +424,24 @@ class SmfishColocalizationSignal(analysistask.ParallelAnalysisTask):
 
         # place to store output dataframes
         results = []
-        results_coloc = []
 
-        # analysis loop
+        # analysis loops
+        # we are going to loop over z indexes first
+        for zIndex in self.parameters['z_indexes']:
 
-        for c1_name, c2_name, c1_thresh, c2_thresh in zip(self.parameters['channel_1_names'],
-                                                            self.parameters['channel_2_names'],
-                                                            self.parameters['channel_1_spot_thresholds'],
-                                                            self.parameters['channel_2_spot_thresholds'],
-                                                            ):
-            
-            ch1 = self.dataSet.get_data_organization().get_data_channel_index(c1_name) # channel 1 id
-            ch2 = self.dataSet.get_data_organization().get_data_channel_index(c2_name) # channel 2 id
+            # place to store results for this z plane
+            results_z = []
 
-            for zIndex in self.parameters['z_indexes']:
-            
+            # then loop over channel pairs
+            for c1_name, c2_name, c1_thresh, c2_thresh in zip(self.parameters['channel_1_names'],
+                                                                self.parameters['channel_2_names'],
+                                                                self.parameters['channel_1_spot_thresholds'],
+                                                                self.parameters['channel_2_spot_thresholds'],
+                                                                ):
+                
+                ch1 = self.dataSet.get_data_organization().get_data_channel_index(c1_name) # channel 1 id
+                ch2 = self.dataSet.get_data_organization().get_data_channel_index(c2_name) # channel 2 id
+
                 # get the aligned image
                 img_channel_1 = self.warpTask.get_aligned_image(fragmentIndex, ch1, zIndex)
                 img_channel_2 = self.warpTask.get_aligned_image(fragmentIndex, ch2, zIndex)
@@ -460,21 +470,32 @@ class SmfishColocalizationSignal(analysistask.ParallelAnalysisTask):
                     c2_spots, _ = bigfish.detection.spots_thresholding(img_log_channel_2, img_mask_channel_2, c2_thresh)
 
                 # colocalization analysis
-                output = bigfish.multistack.detect_spots_colocalization(
+                # auto distance threshold
+                if self.parameters['distance_threshold_nm'] is None:
+                    output = bigfish.multistack.detect_spots_colocalization(
                             spots_1=c1_spots, 
                             spots_2=c2_spots,
                             voxel_size=(self.voxel_size_nm, self.voxel_size_nm),
-                            threshold=self.parameters['distance_threshold_nm'],
                             return_indices=True,
                             return_threshold=True)
-                
+                    distance_threshold = output[5]
+
+                else: # use provided distance threshold
+                    distance_threshold = self.parameters['distance_threshold_nm']
+                    output = bigfish.multistack.detect_spots_colocalization(
+                                spots_1=c1_spots, 
+                                spots_2=c2_spots,
+                                voxel_size=(self.voxel_size_nm, self.voxel_size_nm),
+                                threshold=distance_threshold,
+                                return_indices=True,
+                                return_threshold=False)
+
                 c1_spots_colocalized = output[0]
                 c2_spots_colocalized = output[1]
                 distances =  output[2]
                 c1_indices = output[3]
                 c2_indices = output[4]
-                distance_threshold = output[5]
-
+                
                 # save the raw spots for both channels
                 for spots, channel, thresh, indices in [(c1_spots, c1_name, c1_thresh, c1_indices), 
                                                         (c2_spots, c2_name, c2_thresh, c2_indices)]:
@@ -505,7 +526,75 @@ class SmfishColocalizationSignal(analysistask.ParallelAnalysisTask):
                         # points are assigned a cell id if they are within
                         result = gpd.sjoin(gdf_pts, gdf_polys, predicate='within', how='left')
                         result['index_right'] = result['index_right'].fillna(-1)
-                    results.append(result)
+                    results_z.append(result)
+
+            # here we will check if channel 1 or 2 has any colocalization with any other channel
+            # as an attempt to remove false positives... 
+
+            # turn the results for a single z plane into a dataframe
+            results_z = pandas.concat(results_z, axis = 0, ignore_index = True)
+
+            # then do the anti-colocalization analysis if requested
+            if self.parameters['do_anti_colocalization']:
+                # remove the old index in case
+                #results_z.reset_index(inplace=True, drop=True)
+                results_z['anti_colocalization'] = False
+                results_z['anti_colocalization_distance'] = -1
+
+                for c1_name, c2_name in zip(self.parameters['channel_1_names'],
+                                            self.parameters['channel_2_names'],):
+                    
+
+                    df_c1 = results_z[results_z['channel'] == c1_name]
+                    df_c2 = results_z[results_z['channel'] == c2_name]
+                    # these are all other points not in channel 1 or 2
+                    df_c3 = results_z[((results_z['channel'] != c1_name) &
+                                       (results_z['channel'] != c2_name))]
+
+                    # these spots are in pixel coordinates
+                    channel_1_spots = np.stack([df_c1['x'],df_c1['y']], axis = 1)
+                    channel_2_spots = np.stack([df_c2['x'],df_c2['y']], axis = 1)
+                    channel_3_spots = np.stack([df_c3['x'],df_c3['y']], axis = 1)
+
+                    # just consider a single distance parameter here...
+                    if self.parameters['distance_threshold_nm'] is None:
+                        raise ValueError("automatic distance thresholding not supported for anti-colocalization")
+
+                    # first check if channel 1 colozalizes wth any other channel besides channel 2
+                    output = bigfish.multistack.detect_spots_colocalization(
+                            spots_1=channel_1_spots, 
+                            spots_2=channel_3_spots,
+                            voxel_size=(self.voxel_size_nm, self.voxel_size_nm),
+                            threshold=self.parameters['distance_threshold_nm'], # must have a distance threshold set...
+                            return_indices=True,
+                            return_threshold=False)
+                    c1_spots_colocalized = output[0]
+                    c3_spots_colocalized = output[1]
+                    distances =  output[2]
+                    c1_indices = output[3]
+                    c3_indices = output[4]
+                    results_z.loc[df_c1.index[c1_indices], 'anti_colocalization'] = True
+                    results_z.loc[df_c1.index[c1_indices], 'anti_colocalization_distance'] = distances
+                    
+                    # then check if channel 2 colocalizes wth any other channel besides channel 1
+                    output = bigfish.multistack.detect_spots_colocalization(
+                            spots_1=channel_2_spots, 
+                            spots_2=channel_3_spots,
+                            voxel_size=(self.voxel_size_nm, self.voxel_size_nm),
+                            threshold=self.parameters['distance_threshold_nm'], # must have a distance threshold set...
+                            return_indices=True,
+                            return_threshold=False)
+                    c2_spots_colocalized = output[0]
+                    c3_spots_colocalized = output[1]
+                    distances =  output[2]
+                    c2_indices = output[3]
+                    c3_indices = output[4]
+                    results_z.loc[df_c2.index[c2_indices], 'anti_colocalization'] = True
+                    results_z.loc[df_c2.index[c2_indices], 'anti_colocalization_distance'] = distances
+                # end of anti-colocalization loop
+
+            # finally add the results for this z plane to the overall results
+            results.append(results_z)
 
         # final dataframe of raw spots
         df = pandas.concat(results, axis = 0, ignore_index = True)

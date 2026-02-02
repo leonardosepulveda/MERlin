@@ -37,6 +37,8 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
             self.parameters['optimize_chromatic_correction'] = False
         if 'crop_width' not in self.parameters:
             self.parameters['crop_width'] = 0
+        if 'distance_threshold' not in self.parameters:
+            self.parameters['distance_threshold'] = 0.5176 # this is the default of decoder
         if 'random_seed' in self.parameters:
             # set the random seed
             # make sure to set a different one for each optimize
@@ -165,6 +167,7 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
         di, pm, npt, d = decoder.decode_pixels(warpedImages,
                                             scaleFactors,
                                             backgrounds,
+                                            distanceThreshold=self.parameters['distance_threshold'],
                                             decodeMask = decodeMask,
                                             use_gpu = self.parameters['use_gpu'])
         
@@ -597,7 +600,7 @@ class OptimizeIterationFOV(OptimizeIteration):
         di, pm, npt, d = decoder.decode_pixels(warpedImages, 
                                                scaleFactors,
                                                backgrounds,
-                                               self.parameters['distance_threshold']
+                                               distanceThreshold=self.parameters['distance_threshold'],
                                                )
 
         refactors, backgrounds, barcodesSeen = \

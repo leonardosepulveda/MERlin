@@ -205,7 +205,7 @@ class DataSet(object):
 
     def writer_for_analysis_images(
             self, analysisTask: TaskOrName, imageBaseName: str,
-            imageIndex: int = None, imagej: bool = False) -> tifffile.TiffWriter:
+            imageIndex: int = None, imagej: bool = False, ome: bool = False) -> tifffile.TiffWriter:
         """Get a writer for writing tiff files from an analysis task.
 
         Args:
@@ -213,11 +213,12 @@ class DataSet(object):
             imageBaseName:
             imageIndex:
             imagej:
+            ome:
         Returns:
 
         """
         return tifffile.TiffWriter(self._analysis_image_name(
-            analysisTask, imageBaseName, imageIndex), imagej=imagej, bigtiff=True) 
+            analysisTask, imageBaseName, imageIndex), imagej=imagej, ome=ome, bigtiff=True) 
             # turned on bigtiff here by default
             # so must use FIJI to read data...
 
@@ -388,6 +389,58 @@ class DataSet(object):
 
         with open(savePath, 'r') as f:
             return pandas.read_csv(f, **kwargs)
+
+    def save_dataframe_to_parquet(
+                self, dataframe: pandas.DataFrame, resultName: str,
+                analysisTask: TaskOrName = None, resultIndex: int = None,
+                subdirectory: str = None, **kwargs) -> None:
+            """Save a pandas data frame to a parquet.
+
+            If a previous pandas data frame has been save with the same resultName,
+            it will be overwritten
+
+            Args:
+                dataframe: the data frame to save
+                resultName: the name of the output file
+                analysisTask: the analysis task that the dataframe should be
+                    saved under. If None, the dataframe is saved to the
+                    data set root.
+                resultIndex: index of the dataframe to save or None if no index
+                    should be specified
+                subdirectory: subdirectory of the analysis task that the dataframe
+                    should be saved to or None if the dataframe should be
+                    saved to the root directory for the analysis task.
+                **kwargs: arguments to pass on to pandas.to_csv
+            """
+            savePath = self._analysis_result_save_path(
+                    resultName, analysisTask, resultIndex, subdirectory, '.parquet')
+
+            #dataframe.to_parquet(savePath, **kwargs) # do we need kwargs
+            dataframe.to_parquet(savePath)
+
+
+    def load_dataframe_from_parquet(
+                self, resultName: str, analysisTask: TaskOrName = None,
+                resultIndex: int = None, subdirectory: str = None,
+                **kwargs) -> Union[pandas.DataFrame, None]:
+            """Load a pandas data frame from a csv file stored in this data set.
+
+            Args:
+                resultName:
+                analysisTask:
+                resultIndex:
+                subdirectory:
+                **kwargs:
+            Returns:
+                the pandas data frame
+            Raises:
+                FileNotFoundError: if the file does not exist
+            """
+            savePath = self._analysis_result_save_path(
+                    resultName, analysisTask, resultIndex, subdirectory, '.parquet') \
+            
+            #return pandas.read_parquet(savePath, **kwargs) # do we need kwargs               
+            return pandas.read_parquet(savePath)
 
     def open_pandas_hdfstore(self, mode: str, resultName: str,
                              analysisName: str, resultIndex: int = None,

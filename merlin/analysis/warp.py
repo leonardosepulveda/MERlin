@@ -36,6 +36,11 @@ class Warp(analysistask.ParallelAnalysisTask):
         # may be useful for long codebooks
         if 'boundary_smooth' not in self.parameters:
             self.parameters['boundary_smooth'] = False
+            
+        if 'ignore_fiducial_correction' not in self.parameters: #ALWAYS leave this FALSE
+            # only activate in special situation
+            self.parameters['ignore_fiducial_correction'] = False
+            
 
     def get_aligned_image_set(
             self, fov: int,
@@ -83,6 +88,11 @@ class Warp(analysistask.ParallelAnalysisTask):
                 .get_data_channel_color(dataChannel)
             inputImage = chromaticCorrector.transform_image(
                 inputImage, imageColor).astype(inputImage.dtype)
+
+        # very special case of not applying fiducial correction
+        # this should only be used in special circumstances...
+        if self.parameters['ignore_fiducial_correction']:
+            return inputImage
 
         # this is the warped image with no padding
         warped_image = transform.warp(inputImage, transformation,

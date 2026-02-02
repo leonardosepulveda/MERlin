@@ -159,31 +159,53 @@ class SmfishSignal(analysistask.ParallelAnalysisTask):
     def __init__(self, dataSet, parameters=None, analysisName=None):
         super().__init__(dataSet, parameters, analysisName)
 
-        # expect a list 
-        if 'z_indexes' not in self.parameters:
-            self.parameters['z_indexes'] = list(range(len(self.dataSet.get_z_positions()))) # do all planes
+        # expect a list
         if isinstance(self.parameters['z_indexes'], int):
             self.parameters['z_indexes'] = [self.parameters['z_indexes']]
+        if 'z_indexes' not in self.parameters:
+            self.parameters['z_indexes'] = list(range(len(self.dataSet.get_z_positions()))) # do all planes
 
         # these are the channels to analyze for smFISH spots
         if 'channel_names' not in self.parameters:
-            raise ValueError("no list of channel names")
+            #raise ValueError("no list of channel names")
+            pass # why is this raising and issue!?
 
+        # this is supposed to be the PSF standard deviation according to bigfish
+        # I think ~250nm/2.35 is probabably a better estimate?
         if 'spot_radius_nm' not in self.parameters:
             self.parameters['spot_radius_nm'] = 150
 
+        # segmentation task is optional, None will not sjoin with cellids
         if 'segment_task' not in self.parameters:
             self.parameters['segment_task'] = None
 
         # make sure the threshold is a list
         # the spot finding will be run for each threshold in the list
         if 'spot_threshold' not in self.parameters:
-            self.parameters['spot_threshold'] = [None] # this will trigger automatic thresholding
+            self.parameters['spot_threshold'] = None # this will trigger automatic thresholding
+        if self.parameters['spot_threshold'] is None:
+            self.parameters['spot_threshold'] = [None] # to handle null in analysis json in case...
         if isinstance(self.parameters['spot_threshold'], numbers.Number):
             self.parameters['spot_threshold'] = [self.parameters['spot_threshold']]
 
-        self.alignTask = self.dataSet.load_analysis_task(
-            self.parameters['global_align_task'])
+        # return gaussian fitting of spots
+        if 'subpixel_fitting' not in self.parameters:
+            self.parameters['subpixel_fitting'] = False
+
+        self.alignTask = self.dataSet.load_analysis_task(self.parameters['global_align_task'])
+        self.warpTask = self.dataSet.load_analysis_task(self.parameters['warp_task'])
+
+        # define and find some useful parameters
+        self.voxel_size_nm = int(self.dataSet.micronsPerPixel * 1000) # in nanometers
+        self.spot_radius_nm = int(self.parameters['spot_radius_nm'])
+
+        self.spot_radius_px = bigfish.detection.get_object_radius_pixel(
+            voxel_size_nm = (self.voxel_size_nm, self.voxel_size_nm), 
+            object_radius_nm = (self.spot_radius_nm, self.spot_radius_nm), 
+            ndim = 2)
+
+        #apply monkey patch... actually this function is simple enough just rewrite it here
+        #bigfish.detection._fit_subpixel_2d = self._fit_subpixel_2d
 
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
@@ -205,24 +227,154 @@ class SmfishSignal(analysistask.ParallelAnalysisTask):
                     self.parameters['segment_task'],
                     self.parameters['global_align_task']]
 
+    # this is a monkey patch to fix bigfish subpixel fitting to return all gaussian params
+    # by default it only returns the coordinates...
+    # a little clunky, is there a better way to do this?
+
+    def _fit_subpixel_2d(self, image, coord, radius_to_crop, 
+                         voxel_size_yx, spot_radius_yx):
+        """Fit a 2-d gaussian on a detected spot.
+        Parameters
+        ----------
+        image : np.ndarray
+            Image with shape (y, x).
+        coord : np.ndarray
+            Coordinate of the spot detected, with shape (2,). One coordinate per
+            dimension (yx coordinates).
+        radius_to_crop : Tuple[float]
+            Enlarged radius of a spot, in pixel, used to crop an image around it.
+            Tuple with 2 scalars (one per dimension yx).
+        voxel_size_yx : int or float
+            Size of a voxel in the yx plan, in nanometer.
+        spot_radius_yx : int or float
+            Radius of the spot in the yx plan, in nanometer.
+
+        Returns
+        -------
+        new_coord : List[float]
+            Coordinates of the spot centroid with a subpixel accuracy (one element
+            per dimension)
+        *** patched to ouput***
+        [mu_y, mu_x, sigma_yx, amplitude, background, successful fit]
+
+        """
+        # extract spot image
+        image_spot, bbox_low = bigfish.detection.get_spot_surface(
+            image=image, spot_y=coord[0], spot_x=coord[1], radius_yx=radius_to_crop[-1])
+        # fit gaussian
+        try:
+            parameters = bigfish.detection.modelize_spot(
+                reference_spot=image_spot,
+                voxel_size=(voxel_size_yx, voxel_size_yx),
+                spot_radius=(spot_radius_yx, spot_radius_yx),
+                return_coord=True)
+            # format coordinates and ensure it is fitted within the spot image
+            y_max, x_max = image_spot.shape
+            coord_y = parameters[0] / voxel_size_yx
+            if coord_y < 0 or coord_y > y_max:
+                coord_y = coord[0]
+            else:
+                coord_y += bbox_low[0]
+            coord_x = parameters[1] / voxel_size_yx
+            if coord_x < 0 or coord_x > x_max:
+                coord_x = coord[1]
+            else:
+                coord_x += bbox_low[1]
+            new_coord = [coord_y, coord_x]
+            # sucessful fit
+            good_fit = True
+        # if a spot is ill-conditioned, we simply keep its original coordinates
+        except RuntimeError:
+            # bad fit
+            good_fit = False
+            new_coord = list(coord)
+            parameters = (0,0,-1,-1,-1) # return dummy parameters
+        # here are the params that are returned
+        # [mu_y, mu_x, sigma_yx, amplitude, background, successful fit]
+        return new_coord + list(parameters[2:]) + [good_fit]
+
+    def fit_subpixel(self, image, spots, voxel_size, spot_radius):
+        """Fit gaussian signal on every spot to find a subpixel coordinates.
+
+        Parameters
+        ----------
+        image : np.ndarray
+            Image with shape (z, y, x) or (y, x).
+        spots : np.ndarray
+            Coordinate of the spots detected, with shape (nb_spots, 3) or
+            (nb_spots, 2). One coordinate per dimension (zyx or yx coordinates).
+        voxel_size : int, float, Tuple(int, float) or List(int, float)
+            Size of a voxel, in nanometer. One value per spatial dimension (zyx or
+            yx dimensions). If it's a scalar, the same value is applied to every
+            dimensions.
+        spot_radius : int, float, Tuple(int, float) or List(int, float)
+            Radius of the spot, in nanometer. One value per spatial dimension (zyx
+            or yx dimensions). If it's a scalar, the same radius is applied to
+            every dimensions.
+
+        Returns
+        -------
+        spots_subpixel : np.ndarray
+            Coordinate and fit params of the spots detected, with shape (nb_spots, 6)
+            nb_spots x [mu_y, mu_x, sigma_yx, amplitude, background, successful fit]
+        """
+        # check consistency between parameters
+        ndim = image.ndim
+        # compute radius used to crop spot image
+        radius_pixel = bigfish.detection.get_object_radius_pixel(
+            voxel_size_nm=voxel_size,
+            object_radius_nm=spot_radius,
+            ndim=ndim)
+        radius = [np.sqrt(ndim) * r for r in radius_pixel]
+        radius = tuple(radius)
+        # loop over every spot
+        spots_subpixel = []
+        for coord in spots[:, :ndim]:
+            #subpixel_coord = bigfish.detection._fit_subpixel_2d(
+            subpixel_coord = self._fit_subpixel_2d(
+                image=image, 
+                coord=coord,
+                radius_to_crop=radius,
+                voxel_size_yx=voxel_size,
+                spot_radius_yx=spot_radius)
+            spots_subpixel.append(subpixel_coord)
+        # format results
+        spots_subpixel = np.stack(spots_subpixel)
+        return spots_subpixel
+
+    def _load_feature_database(self, fragmentIndex):
+        sTask = self.dataSet.load_analysis_task(self.parameters['segment_task'])
+        self.cells = sTask.get_feature_database().read_features(fragmentIndex)
+        self.cellids_all = [str(cell.get_feature_id()) for cell in self.cells]
+
+    def _get_feature_database_zIndex(self, zIndex):
+        polys = [cell.get_boundaries()[zIndex] for cell in self.cells]
+        # only take valid polygons
+        mask = [len(p) > 0 for p in polys]
+        cellids = [cid for cid, m in zip(self.cellids_all, mask) if m]
+        polys = [poly[0] for poly, m in zip(polys, mask) if m]
+        gdf_polys = gpd.GeoDataFrame(index = cellids, geometry = polys)
+        return gdf_polys
+
+    def _make_geodataframe_points(self, fragmentIndex, spots):
+        # convert these spots to global coordinates
+        spots_global = np.array([self.alignTask.fov_coordinates_to_global(fragmentIndex,
+                                    (spot[1], spot[0])) for spot in spots])
+        # convert to shapely Points
+        points = [Point(pt[0], pt[1]) for pt in spots_global]
+        gdf_pts = gpd.GeoDataFrame(geometry = points)
+        gdf_pts['x'] = spots[:,1]
+        gdf_pts['y'] = spots[:,0]
+        gdf_pts['global_x'] = spots_global[:,0]
+        gdf_pts['global_y'] = spots_global[:,1]
+        gdf_pts['fragmentIndex'] = fragmentIndex
+        return gdf_pts
+
     def _run_analysis(self, fragmentIndex):
 
-        voxel_size_nm = int(self.dataSet.micronsPerPixel * 1000) # in nanometers
-        spot_radius_nm = int(self.parameters['spot_radius_nm'])
-
-        # spot radius
-        spot_radius_px = bigfish.detection.get_object_radius_pixel(
-            voxel_size_nm = (voxel_size_nm, voxel_size_nm), 
-            object_radius_nm = (spot_radius_nm, spot_radius_nm), 
-            ndim = 2)
-
-        fTask = self.dataSet.load_analysis_task(self.parameters['warp_task'])
-
+        # load the features if segmentation is provided
         if self.parameters['segment_task'] is not None:
-            sTask = self.dataSet.load_analysis_task(self.parameters['segment_task'])
-            # load the cell features upfront
-            cells = sTask.get_feature_database().read_features(fragmentIndex)
-            cellids_all = [cell.get_feature_id() for cell in cells]
+            self._load_feature_database(fragmentIndex)
 
         # place to store output dataframes
         results = []
@@ -233,13 +385,14 @@ class SmfishSignal(analysistask.ParallelAnalysisTask):
             for zIndex in self.parameters['z_indexes']:
             
                 # get the aligned image
-                img = fTask.get_aligned_image(fragmentIndex, ch, zIndex)
+                img = self.warpTask.get_aligned_image(fragmentIndex, ch, zIndex)
 
                 # bigfish analysis step by step
                 # LoG filter
-                img_log = bigfish.stack.log_filter(img, sigma = spot_radius_px)
+                img_log = bigfish.stack.log_filter(img, sigma = self.spot_radius_px)
                 # local maximum detection
-                img_mask = bigfish.detection.local_maximum_detection(img_log, min_distance = spot_radius_px)
+                img_mask = bigfish.detection.local_maximum_detection(img_log, 
+                                                                     min_distance = self.spot_radius_px)
                 
                 # determine threshold automatically or use provided one
                 for threshold in self.parameters['spot_threshold']:
@@ -255,35 +408,33 @@ class SmfishSignal(analysistask.ParallelAnalysisTask):
                         print(f'No spots found in FOV {fragmentIndex}, channel {channel_name}, z {zIndex} at threshold {threshold}')
                         continue
 
-                    # convert these spots to global coordinates
-                    spots_global = np.array([self.alignTask.fov_coordinates_to_global(fragmentIndex,
-                                                (spot[1], spot[0])) for spot in spots])
-                    # convert to shapely Points
-                    points = [Point(pt[0], pt[1]) for pt in spots_global]
-                    gdf_pts = gpd.GeoDataFrame(geometry = points)
-
-                    gdf_pts['fov'] = fragmentIndex
+                    # convert these spots to geodataframe
+                    gdf_pts = self._make_geodataframe_points(fragmentIndex, spots)
                     gdf_pts['zIndex'] = zIndex
-                    gdf_pts['x'] = spots[:,1]
-                    gdf_pts['y'] = spots[:,0]
-                    gdf_pts['global_x'] = spots_global[:,0]
-                    gdf_pts['global_y'] = spots_global[:,1]
                     gdf_pts['channel'] = channel_name
                     gdf_pts['threshold'] = threshold
+
+                    # do subpixel fitting if requested
+                    if self.parameters['subpixel_fitting']:
+                        spots_fitted = self.fit_subpixel(
+                            image=img,
+                            spots=spots,
+                            voxel_size=self.voxel_size_nm,
+                            spot_radius=self.spot_radius_nm)
+                        # add fitting parameters to dataframe
+                        gdf_pts['subpixel_y'] = spots_fitted[:,0]
+                        gdf_pts['subpixel_x'] = spots_fitted[:,1]
+                        gdf_pts['sigma_yx'] = spots_fitted[:,2]
+                        gdf_pts['amplitude'] = spots_fitted[:,3]
+                        gdf_pts['background'] = spots_fitted[:,4]
+                        gdf_pts['fit_successful'] = spots_fitted[:,5]
 
                     if self.parameters['segment_task'] is None:
                         result = gdf_pts
                         result['index_right'] = -1  # no cell id
                     else: # do sjoin with segmentation
                         # get the polygons from a specific z index
-                        polys = [cell.get_boundaries()[zIndex] for cell in cells]
-                        # only take valid polygons
-                        mask = [len(p) > 0 for p in polys]
-                        cellids = [cid for cid, m in zip(cellids_all, mask) if m]
-                        polys = [poly[0] for poly, m in zip(polys, mask) if m]
-
-                        gdf_polys = gpd.GeoDataFrame(index = cellids, geometry = polys)
-
+                        gdf_polys = self._get_feature_database_zIndex(zIndex)
                         # points are assigned a cell id if they are within
                         result = gpd.sjoin(gdf_pts, gdf_polys, predicate='within', how='left')
                         result['index_right'] = result['index_right'].fillna(-1) #
@@ -294,11 +445,11 @@ class SmfishSignal(analysistask.ParallelAnalysisTask):
         df = pandas.concat(results, axis = 0, ignore_index = True)
         df.drop(columns = ['geometry'], inplace = True)
 
-        self.dataSet.save_dataframe_to_csv(
+        self.dataSet.save_dataframe_to_parquet(
                 df, 'smfish_signal', self.get_analysis_name(),
                 fragmentIndex, 'signals')
 
-class SmfishColocalizationSignal(analysistask.ParallelAnalysisTask):
+class SmfishColocalizationSignal(SmfishSignal):
 
     """
     An analysis task that detects smFISH spots at attempts to find colocalized spots
@@ -307,16 +458,6 @@ class SmfishColocalizationSignal(analysistask.ParallelAnalysisTask):
 
     def __init__(self, dataSet, parameters=None, analysisName=None):
         super().__init__(dataSet, parameters, analysisName)
-
-        # expect a list 
-        if 'z_indexes' not in self.parameters:
-            self.parameters['z_indexes'] = list(range(len(self.dataSet.get_z_positions())))
-        if isinstance(self.parameters['z_indexes'], int):
-            self.parameters['z_indexes'] = [self.parameters['z_indexes']]
-        if 'spot_radius_nm' not in self.parameters:
-            self.parameters['spot_radius_nm'] = 150
-        if 'segment_task' not in self.parameters:
-            self.parameters['segment_task'] = None
 
         if 'distance_threshold_nm' not in self.parameters:
             self.parameters['distance_threshold_nm'] = 500
@@ -356,66 +497,7 @@ class SmfishColocalizationSignal(analysistask.ParallelAnalysisTask):
         ### End of setting thresholds ###
 
         if 'do_anti_colocalization' not in self.parameters:
-            self.parameters['self.do_anti_colocalization'] = False
-
-        self.alignTask = self.dataSet.load_analysis_task(self.parameters['global_align_task'])
-        self.warpTask = self.dataSet.load_analysis_task(self.parameters['warp_task'])
-
-        # define and find some useful parameters
-        self.voxel_size_nm = int(self.dataSet.micronsPerPixel * 1000) # in nanometers
-        self.spot_radius_nm = int(self.parameters['spot_radius_nm'])
-
-        self.spot_radius_px = bigfish.detection.get_object_radius_pixel(
-            voxel_size_nm = (self.voxel_size_nm, self.voxel_size_nm), 
-            object_radius_nm = (self.spot_radius_nm, self.spot_radius_nm), 
-            ndim = 2)
-
-    def fragment_count(self):
-        return len(self.dataSet.get_fovs())
-
-    def get_estimated_memory(self):
-        return 2048
-
-    def get_estimated_time(self):
-        return 1
-
-    def get_dependencies(self):
-
-        # want this to work with or without segmentation
-        if self.parameters['segment_task'] is None:
-            return [self.parameters['warp_task'],
-                    self.parameters['global_align_task']]
-        else:
-            return [self.parameters['warp_task'],
-                    self.parameters['segment_task'],
-                    self.parameters['global_align_task']]
-
-    def _load_feature_database(self, fragmentIndex):
-        sTask = self.dataSet.load_analysis_task(self.parameters['segment_task'])
-        self.cells = sTask.get_feature_database().read_features(fragmentIndex)
-        self.cellids_all = [str(cell.get_feature_id()) for cell in self.cells]
-
-    def _get_feature_database_zIndex(self, zIndex):
-        polys = [cell.get_boundaries()[zIndex] for cell in self.cells]
-        # only take valid polygons
-        mask = [len(p) > 0 for p in polys]
-        cellids = [cid for cid, m in zip(self.cellids_all, mask) if m]
-        polys = [poly[0] for poly, m in zip(polys, mask) if m]
-        gdf_polys = gpd.GeoDataFrame(index = cellids, geometry = polys)
-        return gdf_polys
-
-    def _make_geodataframe_points(self, fragmentIndex, spots):
-        # convert these spots to global coordinates
-        spots_global = np.array([self.alignTask.fov_coordinates_to_global(fragmentIndex,
-                                    (spot[1], spot[0])) for spot in spots])
-        # convert to shapely Points
-        points = [Point(pt[0], pt[1]) for pt in spots_global]
-        gdf_pts = gpd.GeoDataFrame(geometry = points)
-        gdf_pts['x'] = spots[:,1]
-        gdf_pts['y'] = spots[:,0]
-        gdf_pts['global_x'] = spots_global[:,0]
-        gdf_pts['global_y'] = spots_global[:,1]
-        return gdf_pts
+            self.parameters['do_anti_colocalization'] = False
 
     def _run_analysis(self, fragmentIndex):
 
@@ -600,7 +682,7 @@ class SmfishColocalizationSignal(analysistask.ParallelAnalysisTask):
         df = pandas.concat(results, axis = 0, ignore_index = True)
         df.drop(columns = ['geometry'], inplace = True)
 
-        self.dataSet.save_dataframe_to_csv(
+        self.dataSet.save_dataframe_to_parquet(
                 df, 'smfish_signal', self.get_analysis_name(),
                 fragmentIndex, 'signals')
 

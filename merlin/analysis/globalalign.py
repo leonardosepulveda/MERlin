@@ -159,7 +159,7 @@ class SimpleGlobalAlignment(GlobalAlignment):
         """
 
         return [x for y in (self.fov_coordinates_to_global(fov, (0, 0)),
-                            self.fov_coordinates_to_global(fov, (2048, 2048)))
+                            self.fov_coordinates_to_global(fov, (2048, 2048))) # this seems like a bug if the image is not 2048x2048
                 for x in y]
 
     def global_coordinates_to_fov(self, fov, globalCoordinates):

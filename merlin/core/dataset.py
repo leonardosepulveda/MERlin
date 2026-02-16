@@ -213,7 +213,7 @@ class DataSet(object):
             imageBaseName:
             imageIndex:
             imagej:
-            ome:
+            ome: whether to write OME metadata
         Returns:
 
         """

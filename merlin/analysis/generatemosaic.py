@@ -1,8 +1,4 @@
-from turtle import pos
-from importlib_metadata import metadata
 import numpy as np
-from requests import options
-from requests import options
 import skimage
 import cv2
 from typing import Tuple

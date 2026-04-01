@@ -445,6 +445,9 @@ class SmfishSignal(analysistask.ParallelAnalysisTask):
         df = pandas.concat(results, axis = 0, ignore_index = True)
         df.drop(columns = ['geometry'], inplace = True)
 
+        # seems like parquet has some issues saving index as int
+        df['index_right'] = df['index_right'].astype(str)
+
         self.dataSet.save_dataframe_to_parquet(
                 df, 'smfish_signal', self.get_analysis_name(),
                 fragmentIndex, 'signals')
@@ -681,6 +684,9 @@ class SmfishColocalizationSignal(SmfishSignal):
         # final dataframe of raw spots
         df = pandas.concat(results, axis = 0, ignore_index = True)
         df.drop(columns = ['geometry'], inplace = True)
+
+        # seems like parquet has some issues saving index as int
+        df['index_right'] = df['index_right'].astype(str)
 
         self.dataSet.save_dataframe_to_parquet(
                 df, 'smfish_signal', self.get_analysis_name(),

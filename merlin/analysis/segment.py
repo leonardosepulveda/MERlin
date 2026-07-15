@@ -442,6 +442,8 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
             self.parameters['flow_threshold'] = 0.4
         if 'cellprob_threshold' not in self.parameters:
             self.parameters['cellprob_threshold'] = 0.0
+        if 'tile_norm_blocksize' not in self.parameters:
+            self.parameters['tile_norm_blocksize'] = 0
 
         # this is in case sometimes the masks come out a bit patchy
         if 'expand_mask' not in self.parameters:
@@ -603,7 +605,7 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
                                                 flow_threshold = self.parameters['flow_threshold'], 
                                                 cellprob_threshold = self.parameters['cellprob_threshold'],
                                                 min_size = self.parameters['min_size'],
-                                                normalize={"tile_norm_blocksize": 256})
+                                                normalize={"tile_norm_blocksize": self.parameters['tile_norm_blocksize']})
                 masks = cellpose_output[0]
 
             else: # 2D mode is a little different from CP1-3 from what I can tell
@@ -620,7 +622,7 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
                                                     flow_threshold = self.parameters['flow_threshold'], 
                                                     cellprob_threshold = self.parameters['cellprob_threshold'],
                                                     min_size = self.parameters['min_size'],
-                                                    normalize={"tile_norm_blocksize": 256})
+                                                    normalize={"tile_norm_blocksize": self.parameters['tile_norm_blocksize']})
                     masks_raw[i] = cellpose_output[0]
                 masks = cellpose.utils.stitch3D(masks_raw, stitch_threshold=self.parameters['stitch_threshold'])
 

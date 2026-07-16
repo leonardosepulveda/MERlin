@@ -9,3 +9,8 @@ __pycache__/
 
 pip-log.txt
 pip-delete-this-directory.txt
+
+# Local-only history records (see CLAUDE.md)
+prompt_history/
+verbatim_history/
+.claude/settings.local.json

@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "powershell",
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"C:\\Users\\Leonardo\\Dropbox\\research\\analysis\\LineageTracing\\260715_LT059_merlin_update\\MERlin\\.claude\\hooks\\save_verbatim.ps1\"",
+            "timeout": 30,
+            "statusMessage": "Saving verbatim response"
+          }
+        ]
+      }
+    ]
+  }
+}

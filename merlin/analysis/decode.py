@@ -141,7 +141,7 @@ class Decode(BarcodeSavingParallelAnalysisTask):
         
         chromaticCorrector = optimizeTask.get_chromatic_corrector()
 
-        zPositions = self.dataSet.get_z_positions()
+        zPositions = self.dataSet.get_z_positions(fragmentIndex)
         zPositionCount = len(zPositions)
         bitCount = codebook.get_bit_count()
         imageShape = self.dataSet.get_image_dimensions()
@@ -229,7 +229,7 @@ class Decode(BarcodeSavingParallelAnalysisTask):
         if self.parameters['remove_z_duplicated_barcodes']:
             bcDB = self.get_barcode_database()
             bc = self._remove_z_duplicate_barcodes(
-                bcDB.get_barcodes(fov=fragmentIndex))
+                bcDB.get_barcodes(fov=fragmentIndex), fragmentIndex)
             bcDB.empty_database(fragmentIndex)
             bcDB.write_barcodes(bc, fov=fragmentIndex)
 
@@ -325,10 +325,10 @@ class Decode(BarcodeSavingParallelAnalysisTask):
                 fov = fov
                 )
 
-    def _remove_z_duplicate_barcodes(self, bc):
+    def _remove_z_duplicate_barcodes(self, bc, fov):
         bc = barcodefilters.remove_zplane_duplicates_all_barcodeids(
             bc, self.parameters['z_duplicate_zPlane_threshold'],
             self.parameters['z_duplicate_xy_pixel_threshold'],
-            self.dataSet.get_z_positions())
+            self.dataSet.get_z_positions(fov))
         return bc
 

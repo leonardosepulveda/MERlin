@@ -162,14 +162,24 @@ class GenerateMosaic(analysistask.AnalysisTask):
         mosaic = np.zeros(np.flip(mosaicDimensions, axis=0), dtype=np.uint16)
 
         for f in self.dataSet.get_fovs():
+            fovZCount = len(self.dataSet.get_z_positions(f))
             if maximumProjection:
+                # only project over the z's this fov actually has (ragged
+                # z-stacks may give it fewer than the global z count)
                 inputImage = np.max([warpTask.get_aligned_image(
                     f, dataChannel, z, chromaticCorrector)
-                    for z in range(len(self.dataSet.get_z_positions()))],
+                    for z in range(fovZCount)],
                     axis=0)
-            else:
+            elif zIndex < fovZCount:
                 inputImage = warpTask.get_aligned_image(
                     f, dataChannel, zIndex, chromaticCorrector)
+            else:
+                # this fov has no data at this depth (ragged z-stack) --
+                # contribute a blank tile so it doesn't skew the
+                # coverage/division-mask accounting below, which already
+                # treats an all-zero contribution as "not imaged here"
+                inputImage = np.zeros(
+                    self.dataSet.get_image_dimensions(), dtype=np.uint16)
 
             if cropWidth > 0:
                 inputImage[:cropWidth, :] = 0
@@ -289,8 +299,17 @@ class GenerateMosaicSimple(analysistask.AnalysisTask):
             chromaticCorrector = self.dataSet.load_analysis_task(
                 self.parameters['optimize_task']).get_chromatic_corrector()
 
-        inputImage = self.warpTask.get_aligned_image(
-            fov, dataChannel, zIndex, chromaticCorrector)
+        if zIndex < len(self.dataSet.get_z_positions(fov)):
+            inputImage = self.warpTask.get_aligned_image(
+                fov, dataChannel, zIndex, chromaticCorrector)
+        else:
+            # this fov has no data at this depth (ragged z-stack) --
+            # contribute a blank tile; the downsample/warp/crop pipeline
+            # below runs unchanged so the tile shape stays consistent, and
+            # prepare_mosaic's tile_mask = tile > 0 already treats an
+            # all-zero tile as "not imaged here"
+            inputImage = np.zeros(
+                self.dataSet.get_image_dimensions(), dtype=np.uint16)
 
         if self.parameters['downsample'] != 1:
             inputImage = skimage.transform.rescale(

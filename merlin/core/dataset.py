@@ -1299,6 +1299,19 @@ class MERFISHDataSet(ImageDataSet):
         """
         return self.dataOrganization.get_z_positions(fov)
 
+    def get_z_positions_segmentation(self, fov: int = None) -> List[float]:
+        """Get the z positions of the segmentation (dapi/polyt) channels
+        present in this dataset.
+
+        Args:
+            fov: if provided, the z positions are restricted to those
+                    actually available for this fov. If None (default),
+                    the full, dataset-wide z position list is returned.
+        Returns:
+            A sorted list of unique z positions
+        """
+        return self.dataOrganization.get_z_positions_segmentation(fov)
+
     def get_fovs(self) -> List[int]:
         return self.dataOrganization.get_fovs()
 

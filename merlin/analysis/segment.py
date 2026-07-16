@@ -1,5 +1,6 @@
 import os
 import time
+import warnings
 import cv2
 import numpy as np
 from skimage import measure
@@ -109,7 +110,7 @@ class WatershedSegment(FeatureSavingAnalysisTask):
             normalizedWatershed, measure.label(seeds), mask=watershedMask,
             connectivity=np.ones((3, 3, 3)), watershed_line=True)
 
-        zPos = np.array(self.dataSet.get_data_organization().get_z_positions())
+        zPos = np.array(self.dataSet.get_z_positions(fragmentIndex))
         featureList = [spatialfeature.SpatialFeature.feature_from_label_matrix(
             (watershedOutput == i), fragmentIndex,
             globalTask.fov_to_global_transform(fragmentIndex), zPos)
@@ -126,7 +127,7 @@ class WatershedSegment(FeatureSavingAnalysisTask):
         return np.array([cv2.GaussianBlur(
             warpTask.get_aligned_image(fov, channelIndex, z),
             (filterSize, filterSize), filterSigma)
-            for z in range(len(self.dataSet.get_z_positions()))])
+            for z in range(len(self.dataSet.get_z_positions(fov)))])
 
 
 class CellPoseSegment3D(FeatureSavingAnalysisTask):
@@ -217,7 +218,7 @@ class CellPoseSegment3D(FeatureSavingAnalysisTask):
         
         transformation = warpTask.get_transformation(fov, channelIndex)
 
-        zPositions = self.dataSet.get_data_organization().get_z_positions_segmentation()
+        zPositions = self.dataSet.get_z_positions_segmentation(fov)
 
         stack = []
         for zPos in zPositions:
@@ -330,11 +331,25 @@ class CellPoseSegment3D(FeatureSavingAnalysisTask):
         # do it this way since sometimes cellpose responds with 3 or 4 outputs... weird...
         masks = cellpose_output[0]
         
-        # recall that the segmentation channel may have more z positions 
+        # recall that the segmentation channel may have more z positions
         # only take those zpositions
-        zPos = np.array(self.dataSet.get_data_organization().get_z_positions())
-        zPos_segment = np.array(self.dataSet.get_data_organization().get_z_positions_segmentation())
+        zPos = np.array(self.dataSet.get_z_positions(fragmentIndex))
+        zPos_segment = np.array(self.dataSet.get_z_positions_segmentation(fragmentIndex))
         sel = np.isin(zPos_segment, zPos)
+        if sel.sum() != len(zPos):
+            warnings.warn(
+                ('Segmentation z positions for fov {0} do not fully cover '
+                 "this fov's regular z positions (expected {1} matches, "
+                 'found {2}); feature z-coordinates for this fov are '
+                 "derived from the segmentation channel's own retained z "
+                 'positions instead.')
+                .format(fragmentIndex, len(zPos), sel.sum()))
+        # use the actually-retained z-values (not the unfiltered zPos) as the
+        # z-coordinate for each retained mask plane -- these are guaranteed to
+        # match masks/seg_images_1's length and order after the sel mask,
+        # unlike zPos which only coincides with them when every zPos entry is
+        # present in zPos_segment
+        zPosRetained = zPos_segment[sel]
         masks = masks[sel]
 
         seg_images_1 = seg_images_1[sel]
@@ -374,7 +389,7 @@ class CellPoseSegment3D(FeatureSavingAnalysisTask):
                         (masks == val),
                         fragmentIndex,
                         globalTask.fov_to_global_transform(fragmentIndex),
-                        zPos) for val in mask_values]
+                        zPosRetained) for val in mask_values]
 
         featureDB = self.get_feature_database()
         featureDB.write_features(featureList, fragmentIndex)
@@ -479,7 +494,7 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
         transformation = warpTask.get_transformation(fov, channelIndex)
 
         # here we get more z positions
-        zPositions = self.dataSet.get_data_organization().get_z_positions_segmentation()
+        zPositions = self.dataSet.get_z_positions_segmentation(fov)
 
         stack = []
         for zPos in zPositions:
@@ -515,8 +530,8 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
         # dataset.get_analysis_image
     
     # could probably do this with recursion...
-    def _load_mask_stack(self, fov, filename_prefix = 'segmented_mask_'):           
-            num_z = len(self.dataSet.get_data_organization().get_z_positions())
+    def _load_mask_stack(self, fov, filename_prefix = 'segmented_mask_'):
+            num_z = len(self.dataSet.get_z_positions(fov))
             masks = [self._load_mask_image(fov, zIndex, filename_prefix = 'segmented_mask_') for zIndex in range(num_z)]
             return np.array(masks)
 
@@ -632,11 +647,24 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
                     masks[i] = segmentation.expand_labels(masks[i], int(self.parameters['expand_mask']))
 
 
-            # recall that the segmentation channel may have more z positions 
+            # recall that the segmentation channel may have more z positions
             # only take those zpositions
-            zPos = np.array(self.dataSet.get_data_organization().get_z_positions())
-            zPos_segment = np.array(self.dataSet.get_data_organization().get_z_positions_segmentation())
+            zPos = np.array(self.dataSet.get_z_positions(fragmentIndex))
+            zPos_segment = np.array(self.dataSet.get_z_positions_segmentation(fragmentIndex))
             sel = np.isin(zPos_segment, zPos)
+            if sel.sum() != len(zPos):
+                warnings.warn(
+                    ('Segmentation z positions for fov {0} do not fully '
+                     "cover this fov's regular z positions (expected {1} "
+                     'matches, found {2}); feature z-coordinates for this '
+                     "fov are derived from the segmentation channel's own "
+                     'retained z positions instead.')
+                    .format(fragmentIndex, len(zPos), sel.sum()))
+            # use the actually-retained z-values (not the unfiltered zPos) --
+            # guaranteed to match masks/seg_images's length and order after
+            # the sel mask, unlike zPos which only coincides with them when
+            # every zPos entry is present in zPos_segment
+            zPosRetained = zPos_segment[sel]
             masks = masks[sel]
 
             # upsample the images if they were downsampled
@@ -672,7 +700,13 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
         
         mask_values = np.unique(masks)[1:] # ignore the zero mask value
 
-        zPos = np.array(self.dataSet.get_data_organization().get_z_positions()) # just in case we got here without loading z positions
+        # just in case we got here without loading z positions (the
+        # use_old_segmentation branch above loads masks straight from disk
+        # and never computes zPosRetained) -- _load_mask_stack sizes its
+        # stack from this same fov-scoped regular z count, so it's the
+        # correct z-coordinate source for a previously-saved mask stack too
+        if 'zPosRetained' not in locals():
+            zPosRetained = np.array(self.dataSet.get_z_positions(fragmentIndex))
 
         featureList = []
         for val in mask_values:
@@ -681,7 +715,7 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
                         (masks == val),
                         fragmentIndex,
                         globalTask.fov_to_global_transform(fragmentIndex),
-                        zPos)
+                        zPosRetained)
             featureList.append(feat)
             t1 = time.time()
             print(f'generated features mask value {val} in time {t1-t0}s')

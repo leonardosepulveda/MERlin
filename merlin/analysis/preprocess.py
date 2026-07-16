@@ -102,7 +102,7 @@ class CAREPreprocess(Preprocess):
             return np.array([[self.get_processed_image(
                 fov, self.dataSet.get_data_organization()
                     .get_data_channel_for_bit(b), zIndex, chromaticCorrector)
-                for zIndex in range(len(self.dataSet.get_z_positions()))]
+                for zIndex in range(len(self.dataSet.get_z_positions(fov)))]
                 for b in self.get_codebook().get_bit_names()])
         else:
             return np.array([self.get_processed_image(
@@ -117,7 +117,7 @@ class CAREPreprocess(Preprocess):
         inputImage = self.warpTask.get_aligned_image(fov, dataChannel, zIndex,
                                                     chromaticCorrector)
         return self._preprocess_image(inputImage)
-    
+
     def _preprocess_image(self, inputImage: np.ndarray) -> np.ndarray:
         outputImage = self.model.predict(inputImage, 'YX')
         outputImage = self._high_pass_filter(outputImage)
@@ -154,14 +154,14 @@ class CAREPreprocess(Preprocess):
                 for bi, b in enumerate(self.get_codebook().get_bit_names()):
                     dataChannel = self.dataSet.get_data_organization()\
                             .get_data_channel_for_bit(b)
-                    for i in range(len(self.dataSet.get_z_positions())):
+                    for i in range(len(self.dataSet.get_z_positions(fragmentIndex))):
                         inputImage = warpTask.get_aligned_image(
                                 fragmentIndex, dataChannel, i)
                         outputImage = self._preprocess_image(inputImage)
 
                         pixelHistogram[bi, :] += np.histogram(
                                 outputImage, bins=histogramBins)[0]
-                        
+
                         outputTif.save(outputImage,photometric='MINISBLACK')
 
             self._save_pixel_histogram(pixelHistogram, fragmentIndex)
@@ -221,7 +221,7 @@ class DeconvolutionPreprocess(Preprocess):
             return np.array([[self.get_processed_image(
                 fov, self.dataSet.get_data_organization()
                     .get_data_channel_for_bit(b), zIndex, chromaticCorrector)
-                for zIndex in range(len(self.dataSet.get_z_positions()))]
+                for zIndex in range(len(self.dataSet.get_z_positions(fov)))]
                 for b in self.get_codebook().get_bit_names()])
         else:
             return np.array([self.get_processed_image(
@@ -245,9 +245,9 @@ class DeconvolutionPreprocess(Preprocess):
         return hpImage.astype(np.float32)
 
     def _run_analysis(self, fragmentIndex):
-            
+
         if self.parameters['save_pixel_histogram'] or (fragmentIndex in self.parameters['write_preprocessed_FOV']):
-    
+
             warpTask = self.dataSet.load_analysis_task(
                     self.parameters['warp_task'])
 
@@ -257,15 +257,15 @@ class DeconvolutionPreprocess(Preprocess):
 
                 # this currently only is to calculate the pixel histograms in order
                 # to estimate the initial scale factors. This is likely unnecessary?
-                
+
             with self.dataSet.writer_for_analysis_images(
                      self.analysisName, 'preprocessed_images', fragmentIndex) as outputTif:
-                
+
                 for bi, b in enumerate(self.get_codebook().get_bit_names()):
                     dataChannel = self.dataSet.get_data_organization()\
                             .get_data_channel_for_bit(b)
-                    
-                    for i in range(len(self.dataSet.get_z_positions())):
+
+                    for i in range(len(self.dataSet.get_z_positions(fragmentIndex))):
                         inputImage = warpTask.get_aligned_image(
                                 fragmentIndex, dataChannel, i)
                         deconvolvedImage = self._preprocess_image(inputImage)
@@ -401,7 +401,7 @@ class DeconvolutionPreprocessDW(Preprocess):
             return np.array([[self.get_processed_image(
                 fov, self.dataSet.get_data_organization()
                     .get_data_channel_for_bit(b), zIndex, chromaticCorrector)
-                for zIndex in range(len(self.dataSet.get_z_positions()))]
+                for zIndex in range(len(self.dataSet.get_z_positions(fov)))]
                 for b in self.get_codebook().get_bit_names()])
         else:
             return np.array([self.get_processed_image(
@@ -461,7 +461,7 @@ class DeconvolutionPreprocessDW(Preprocess):
                      self.get_raw_image_name(dataChannel), 
                      fragmentIndex) as outputTif:
                 
-                for zPosition in self.dataSet.get_z_positions():
+                for zPosition in self.dataSet.get_z_positions(fragmentIndex):
                         frame = self.dataSet.get_raw_image(dataChannel, fragmentIndex, zPosition)
                         outputTif.save(frame, photometric='MINISBLACK')
 

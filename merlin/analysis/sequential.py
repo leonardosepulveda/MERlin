@@ -137,6 +137,13 @@ class SumSignal(analysistask.ParallelAnalysisTask):
 
     def _run_analysis(self, fragmentIndex):
         zIndex = int(self.parameters['z_index'])
+        fovZPositions = self.dataSet.get_z_positions(fragmentIndex)
+        if zIndex >= len(fovZPositions):
+            raise analysistask.InvalidParameterException(
+                'Invalid z_index specified for %s. Fov %i only has %i '
+                'available z positions but z_index %i was requested.'
+                % (self.analysisName, fragmentIndex, len(fovZPositions),
+                   zIndex))
         channels, geneNames = self.dataSet.get_data_organization()\
             .get_sequential_rounds()
 
@@ -159,11 +166,13 @@ class SmfishSignal(analysistask.ParallelAnalysisTask):
     def __init__(self, dataSet, parameters=None, analysisName=None):
         super().__init__(dataSet, parameters, analysisName)
 
-        # expect a list
-        if isinstance(self.parameters['z_indexes'], int):
-            self.parameters['z_indexes'] = [self.parameters['z_indexes']]
+        # expect a list; None is a sentinel meaning "do all planes", resolved
+        # per-fov in _resolve_z_indexes since fovs can have different
+        # available z ranges with ragged z-stacks
         if 'z_indexes' not in self.parameters:
-            self.parameters['z_indexes'] = list(range(len(self.dataSet.get_z_positions()))) # do all planes
+            self.parameters['z_indexes'] = None
+        elif isinstance(self.parameters['z_indexes'], int):
+            self.parameters['z_indexes'] = [self.parameters['z_indexes']]
 
         # these are the channels to analyze for smFISH spots
         if 'channel_names' not in self.parameters:
@@ -370,6 +379,28 @@ class SmfishSignal(analysistask.ParallelAnalysisTask):
         gdf_pts['fragmentIndex'] = fragmentIndex
         return gdf_pts
 
+    def _resolve_z_indexes(self, fov: int) -> list:
+        """Determine the z indexes to process for the specified fov.
+
+        If the user did not specify 'z_indexes' (parameter is None), returns
+        this fov's full own available z range (fovs can have different
+        depths with ragged z-stacks). If the user specified an explicit
+        list, returns it filtered to the z indexes actually available for
+        this fov, printing a notice naming any indexes skipped for this fov.
+        """
+        fovZCount = len(self.dataSet.get_z_positions(fov))
+        if self.parameters['z_indexes'] is None:
+            return list(range(fovZCount))
+
+        requested = self.parameters['z_indexes']
+        valid = [z for z in requested if z < fovZCount]
+        skipped = [z for z in requested if z >= fovZCount]
+        if skipped:
+            print('Fov %i only has %i available z positions; skipping '
+                  'requested z_indexes %s for this fov.'
+                  % (fov, fovZCount, skipped))
+        return valid
+
     def _run_analysis(self, fragmentIndex):
 
         # load the features if segmentation is provided
@@ -379,11 +410,13 @@ class SmfishSignal(analysistask.ParallelAnalysisTask):
         # place to store output dataframes
         results = []
 
+        zIndexes = self._resolve_z_indexes(fragmentIndex)
+
         # analysis loop
         for channel_name in self.parameters['channel_names']:
             ch = self.dataSet.get_data_organization().get_data_channel_index(channel_name) # channel id
-            for zIndex in self.parameters['z_indexes']:
-            
+            for zIndex in zIndexes:
+
                 # get the aligned image
                 img = self.warpTask.get_aligned_image(fragmentIndex, ch, zIndex)
 
@@ -512,7 +545,7 @@ class SmfishColocalizationSignal(SmfishSignal):
 
         # analysis loops
         # we are going to loop over z indexes first
-        for zIndex in self.parameters['z_indexes']:
+        for zIndex in self._resolve_z_indexes(fragmentIndex):
 
             # place to store results for this z plane
             results_z = []

@@ -57,6 +57,11 @@ def base_files():
             [merlin.CODEBOOK_HOME, 'test_codebook2.csv']))
     shutil.copyfile(
         os.sep.join(
+            [root, 'auxiliary_files', 'test_codebook_ragged.csv']),
+        os.sep.join(
+            [merlin.CODEBOOK_HOME, 'test_codebook_ragged.csv']))
+    shutil.copyfile(
+        os.sep.join(
             [root, 'auxiliary_files', 'test_positions.csv']),
         os.sep.join(
             [merlin.POSITION_HOME, 'test_positions.csv']))
@@ -156,7 +161,7 @@ def ragged_merfish_data(ragged_merfish_files):
     testMERFISHData = dataset.MERFISHDataSet(
             'ragged_merfish_test',
             dataOrganizationName='test_data_organization_ragged.csv',
-            codebookNames=['test_codebook.csv'],
+            codebookNames=['test_codebook_ragged.csv'],
             positionFileName='test_positions_ragged.csv',
             analysisHome=os.path.join(merlin.ANALYSIS_HOME, '..',
                                       'test_analysis_ragged'),
@@ -165,6 +170,90 @@ def ragged_merfish_data(ragged_merfish_files):
     yield testMERFISHData
 
     shutil.rmtree('test_analysis_ragged')
+
+
+@pytest.fixture(scope='session')
+def ragged_warp_task(ragged_merfish_data):
+    from merlin.analysis import warp
+    # edge_width_to_remove/percentile_pixel_to_keep are relaxed from their
+    # defaults since the tiny synthetic ragged test images are much smaller
+    # than the default edge crop; must be .save()d so downstream tasks can
+    # load_analysis_task('raggedWarp') by name
+    task = warp.FiducialCorrelationWarp(
+        ragged_merfish_data,
+        parameters={'edge_width_to_remove': 0, 'percentile_pixel_to_keep': 100},
+        analysisName='raggedWarp')
+    task.save()
+    for fov in ragged_merfish_data.get_fovs():
+        task._run_analysis(int(fov))
+    return task
+
+
+@pytest.fixture(scope='session')
+def ragged_global_align_task(ragged_merfish_data):
+    from merlin.analysis import globalalign
+    task = globalalign.SimpleGlobalAlignment(
+        ragged_merfish_data, parameters={}, analysisName='raggedGlobalAlign')
+    task.save()
+    task._run_analysis()
+    return task
+
+
+@pytest.fixture(scope='session')
+def ragged_preprocess_task(ragged_merfish_data, ragged_warp_task):
+    from merlin.analysis import preprocess
+    # save_pixel_histogram=False avoids needing histogram files on disk,
+    # which _calculate_initial_scale_factors would otherwise require
+    task = preprocess.DeconvolutionPreprocess(
+        ragged_merfish_data,
+        parameters={'warp_task': 'raggedWarp', 'codebook_index': 0,
+                    'save_pixel_histogram': False},
+        analysisName='raggedPreprocess')
+    task.save()
+    return task
+
+
+@pytest.fixture(scope='session')
+def ragged_optimize_task(ragged_merfish_data, ragged_preprocess_task):
+    from merlin.analysis import optimize
+    task = optimize.OptimizeIterationFOV(
+        ragged_merfish_data, parameters={'preprocess_task': 'raggedPreprocess'},
+        analysisName='raggedOptimize')
+    task.save()
+    # .run() (not _run_analysis directly) so completion is recorded --
+    # get_scale_factors()/get_backgrounds() check is_complete() before
+    # returning results
+    for fragmentIndex in range(len(task.parameters['fov_index'])):
+        task.run(fragmentIndex)
+    return task
+
+
+@pytest.fixture(scope='session')
+def ragged_decode_task(ragged_merfish_data, ragged_preprocess_task,
+                        ragged_optimize_task, ragged_global_align_task):
+    from merlin.analysis import decode
+    task = decode.Decode(
+        ragged_merfish_data,
+        parameters={'preprocess_task': 'raggedPreprocess',
+                    'optimize_task': 'raggedOptimize',
+                    'global_align_task': 'raggedGlobalAlign',
+                    'single_fov_optimization': True},
+        analysisName='raggedDecode')
+    task.save()
+    return task
+
+
+@pytest.fixture(scope='session')
+def ragged_segment_task(ragged_merfish_data, ragged_warp_task,
+                         ragged_global_align_task):
+    from merlin.analysis import segment
+    task = segment.WatershedSegment(
+        ragged_merfish_data,
+        parameters={'warp_task': 'raggedWarp',
+                    'global_align_task': 'raggedGlobalAlign'},
+        analysisName='raggedSegment')
+    task.save()
+    return task
 
 
 @pytest.fixture(scope='function')

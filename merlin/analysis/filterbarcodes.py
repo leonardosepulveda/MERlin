@@ -387,7 +387,8 @@ class AdaptiveFilterBarcodes(AbstractFilterBarcodes):
         
         # do z duplicates after adaptive threshold
         if self.parameters['remove_z_duplicated_barcodes']:
-            currentBarcodes = self._remove_z_duplicate_barcodes(currentBarcodes)
+            currentBarcodes = self._remove_z_duplicate_barcodes(
+                currentBarcodes, fragmentIndex)
 
         bcDatabase.write_barcodes(currentBarcodes, fov=fragmentIndex)
 
@@ -396,11 +397,11 @@ class AdaptiveFilterBarcodes(AbstractFilterBarcodes):
     # lets expose this filtering here, it feels more natural than in decode
     # I don't want to waste time filtering during the decode step with gpu nodes
     # same function from decode.py
-    def _remove_z_duplicate_barcodes(self, bc):
+    def _remove_z_duplicate_barcodes(self, bc, fov):
         bc = barcodefilters.remove_zplane_duplicates_all_barcodeids(
             bc, self.parameters['z_duplicate_zPlane_threshold'],
             self.parameters['z_duplicate_xy_pixel_threshold'],
-            self.dataSet.get_z_positions())
+            self.dataSet.get_z_positions(fov))
         return bc
 
 

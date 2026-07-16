@@ -10,6 +10,7 @@ import pickle
 import os
 import time
 
+from merlin.core import analysistask
 from merlin.analysis import decode
 from merlin.util import decoding
 from merlin.util import registration
@@ -67,12 +68,15 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
         else:
             
             self.parameters['fov_index'] = []
-            fovIndex = np.random.choice(list(self.dataSet.get_fovs()), 
+            fovIndex = np.random.choice(list(self.dataSet.get_fovs()),
                 size = self.parameters['fov_per_iteration'])
-                    
-            zIndex = np.random.choice(list(range(len(self.dataSet.get_z_positions()))),
-                size = self.parameters['fov_per_iteration'])
-                
+
+            # each fov may have a different available z range (ragged
+            # z-stacks), so sample each fov's z index from its own range
+            # instead of one shared global range
+            zIndex = [np.random.choice(len(self.dataSet.get_z_positions(int(fov))))
+                      for fov in fovIndex]
+
             self.parameters['fov_index'] = [[int(fov),int(ind)] for fov, ind in zip(fovIndex, zIndex)]
 
         # add parameter to only optimize inside the segmentation mask:
@@ -553,13 +557,40 @@ class OptimizeIterationFOV(OptimizeIteration):
         if 'distance_threshold' not in self.parameters:
             self.parameters['distance_threshold'] = 0.5176 # this is the default of decoder
             # maybe should make it bigger?
-        if 'z_index' not in self.parameters:
-            zpos = self.dataSet.get_data_organization().get_z_positions()
-            self.parameters['z_index'] = int(len(zpos)/2)
+        # z_index is resolved per-fov in _run_analysis (fovs can have
+        # different available z ranges with ragged z-stacks) -- record
+        # whether the user explicitly requested a specific z_index before any
+        # default is applied, since an explicit value is validated per-fov
+        # instead of silently substituted
+        self._zIndexExplicit = 'z_index' in self.parameters
 
         # for now just do all FOVs
         self.parameters['fov_index'] = self.dataSet.get_fovs().tolist() # for serializing json converts numpy type to python type...
         self.parameters['fov_per_iteration'] = len(self.parameters['fov_index'])
+
+    def _resolve_z_index(self, fovIndex: int) -> int:
+        """Determine which z index to use for the specified fov.
+
+        If the user did not explicitly specify 'z_index', defaults to the
+        middle of this fov's own available z range (fovs can have different
+        depths with ragged z-stacks). If the user did specify 'z_index', it
+        is used as-is but validated against this fov's own range.
+
+        Raises:
+            analysistask.InvalidParameterException: if an explicitly
+                specified z_index is not available for this fov.
+        """
+        fovZPositions = self.dataSet.get_z_positions(fovIndex)
+        if not self._zIndexExplicit:
+            return int(len(fovZPositions) / 2)
+
+        zIndex = self.parameters['z_index']
+        if zIndex >= len(fovZPositions):
+            raise analysistask.InvalidParameterException(
+                'Invalid z_index specified for %s. Fov %i only has %i '
+                'available z positions but z_index %i was requested.'
+                % (self.analysisName, fovIndex, len(fovZPositions), zIndex))
+        return zIndex
 
     def _run_analysis(self, fragmentIndex):
         preprocessTask = self.dataSet.load_analysis_task(
@@ -568,7 +599,7 @@ class OptimizeIterationFOV(OptimizeIteration):
 
         # this is where the FOV and zindex are decided
         fovIndex = self.parameters['fov_index'][fragmentIndex]
-        zIndex = self.parameters['z_index']
+        zIndex = self._resolve_z_index(fovIndex)
 
         scaleFactors = self._get_previous_scale_factors(fragmentIndex)
         backgrounds = self._get_previous_backgrounds(fragmentIndex)

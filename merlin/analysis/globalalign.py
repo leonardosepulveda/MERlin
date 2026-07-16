@@ -132,7 +132,7 @@ class SimpleGlobalAlignment(GlobalAlignment):
             return (fovStart[0] + fovCoordinates[0]*micronsPerPixel,
                     fovStart[1] + fovCoordinates[1]*micronsPerPixel)
         elif len(fovCoordinates) == 3:
-            zPositions = self.dataSet.get_z_positions()
+            zPositions = self.dataSet.get_z_positions(fov)
             return (np.interp(fovCoordinates[0], np.arange(len(zPositions)),
                               zPositions),
                     fovStart[0] + fovCoordinates[1]*micronsPerPixel,

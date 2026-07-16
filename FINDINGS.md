@@ -26,31 +26,74 @@ space, but produces a dataset MERlin can't process today.
 2. Thin FOVs contribute blank/zero pixels at mosaic depths beyond their own signal.
 3. Support is opt-in/backward-compatible (`allowRaggedZStacks` flag, default off).
 
-**Status — Stage 1 of 5 done** (commit `60bba1d` on `feature/ragged-z-stacks`,
-2026-07-16): `DataOrganization`/`MERFISHDataSet` gained a per-fov `get_z_positions(fov)`
-API and an opt-in `allowRaggedZStacks` flag; `merlin.py` gained a matching CLI flag; new
-ragged-Z test fixtures and tests were added (all passing).
+**Status — done, Stages 1-5** (Stage 1: commit `60bba1d`; Stages 2-5: next commit on
+`feature/ragged-z-stacks`, both 2026-07-16). The user confirmed this experiment does not
+use `FiducialCorrelationWarp3D` (the colleague's 3D-registration path), and directly
+re-verifying `warp.py` showed `Warp.get_aligned_image` needs **no changes at all** for
+the plain-2D case: a thin fov's z-range is always a literal prefix of the global sorted
+list (same start/step, only depth differs), so any consumer that simply loops over
+`get_z_positions(fov)` instead of the global list never asks for an out-of-range z in
+the first place. This made Stages 2-5 simpler than originally sketched — no central
+warp.py zero-fill was needed after all. What actually changed:
+- `decode.py`, `filterbarcodes.py`: per-fov z-position calls (2 call sites each).
+- `preprocess.py` (`CAREPreprocess`/`DeconvolutionPreprocess`/`DeconvolutionPreprocessDW`):
+  per-fov batch-shape and pixel-histogram loops.
+- `globalalign.py`: `SimpleGlobalAlignment.fov_coordinates_to_global` fov-scoped.
+- `segment.py`: `WatershedSegment`, `CellPoseSegment3D`/`CellPoseSegmentSAM` per-fov
+  z-position calls, plus a genuine correctness fix (not just raggedness-related): feature
+  z-coordinates now come from the actually-retained `zPos_segment[sel]` values instead of
+  the unfiltered `zPos`, with a warning (not a raise) when the assumed
+  `zPos(fov) ⊆ zPos_segment(fov)` invariant breaks for a given fov.
+- `optimize.py`: `OptimizeIterationFOV`'s single global `z_index` default became
+  fov-relative (middle of that fov's own depth), computed in `_run_analysis` instead of
+  `__init__` (no fov known there); an explicit user-supplied override invalid for a
+  specific fov raises `analysistask.InvalidParameterException` naming that fov (user's
+  choice: no silent clipping). `OptimizeIteration`'s random per-iteration z sampling now
+  samples per-fov instead of from one shared global range.
+- `sequential.py`: `SumSignal` keeps its constructor-time global sanity check, plus a new
+  per-fov runtime check that raises for a fov where the configured `z_index` is invalid.
+  `SmfishSignal`/`SmfishColocalizationSignal` resolve `z_indexes` per-fov via a shared
+  `_resolve_z_indexes` helper — default is "all of this fov's own planes"; an explicit
+  user list has invalid-for-this-fov entries skipped with a printed notice (user's
+  choice, since this is naturally a "process what's there" loop, unlike SumSignal's
+  single required value). Also fixed a pre-existing latent bug: `z_indexes` isinstance
+  check ran before the "key not present" check, which would `KeyError` if absent.
+- `generatemosaic.py`: `GenerateMosaic._prepare_mosaic_slice`/`GenerateMosaicSimple
+  .load_tile` gate the `get_aligned_image` call on whether the requested z is within that
+  fov's own depth; when not, substitute a same-shape zero array. The existing
+  `pixel > 0`-based coverage/division-mask accounting already correctly treats an
+  all-zero contribution as "not imaged here" — no separate explicit mask was needed.
 
-**Open next step — Stage 2**: centralize "return zeros for a fov/z beyond that fov's
-depth" in `Warp.get_aligned_image` / `FiducialCorrelationWarp3D.get_aligned_image`
-(`warp.py`) — this is the real choke point nearly every downstream consumer (segment,
-decode, preprocess, sequential, generatemosaic) reads through, and it currently *raises*
-rather than returning zeros for an out-of-range z. `Warp3D`'s own z-interpolation
-(picks neighbors from the *global* z array today) needs particular care. After that:
-Stage 3 (mechanical per-module swaps in segment.py/decode.py/preprocess.py/
-globalalign.py), Stage 4 (optimize.py/sequential.py constructor-time global z_index
-validation → per-fov runtime checks), Stage 5 (generatemosaic.py's coverage/
-division-mask needs to distinguish "not imaged" from "imaged but dark", not just Stage
-2's zero-fill).
+**Verified end-to-end**, not just unit-tested: built a real `warp → globalalign →
+preprocess → optimize → decode` chain against the ragged fixture (`test/
+test_ragged_z_pipeline.py`) and confirmed correct, per-fov-scoped shapes throughout
+(e.g. decode's per-fov zarr shape matches that fov's own z-count: 4/2/3/4 for fovs
+0/1/2/3). Also confirmed `WatershedSegment` works for the one fov where its (pre-existing,
+raggedness-independent) assumption that segmentation and regular channels share the same
+z-grid happens to hold. `CellPoseSegment3D`/`CellPoseSegmentSAM` (need cellpose, not
+installed) and `SmfishSignal`'s actual bigfish spot detection (synthetic images have no
+real spot content) are not integration-tested — their fixed z-logic was verified directly
+via `_resolve_z_indexes`/the `zPos_segment[sel]` masking arithmetic instead.
+
+**Known test flakiness discovered this round**: `test_decode_ragged_zarr_shape_matches_fov_z_count`
+intermittently fails with `PermissionError: WinError 5` *during* a zarr write (inside
+zarr's own atomic tmp-file-rename), not on the shape assertion itself — confirmed
+non-deterministic by rerunning identical code repeatedly (pass/fail alternated). This is
+the same class of pre-existing Windows file-lock flakiness already documented below, now
+also manifesting inside zarr's write path specifically; not a decode.py logic bug.
 
 ## Test environment
 
 No local machine environment had MERlin's dependencies. A dedicated conda env
 `merlin_test` (Python 3.11, `C:\Users\Leonardo\anaconda3\envs\merlin_test`) was built
-with a lightweight subset of `requirements.txt` sufficient for every test file except
+with a lightweight subset of `requirements.txt`, later extended with scikit-image, rtree,
+scikit-learn, pyclustering, geopandas, and bigfish (`big-fish` on pip) once it became
+clear those were needed to import/exercise `segment.py`/`optimize.py`/`decode.py`/
+`sequential.py` for real. This env now covers every test file except
 `test_decon.py`/`test_snakemake.py`/`test_merfish.py` (need cv2-heavy/snakemake/
-tensorflow) and `test_spatialfeature.py` (needs scikit-image, not installed). Reuse this
-env for future test runs. A venv under the Claude session's Temp scratchpad fails with a
+tensorflow) and anything needing cellpose, csbdeep/CARE, or the external `dw` binary
+(not installed — these remain untested at the integration level). Reuse this env for
+future test runs. A venv under the Claude session's Temp scratchpad fails with a
 Windows long-path DLL error on `pytables` — use a conda env under `anaconda3/envs`
 instead (short, fixed path).
 

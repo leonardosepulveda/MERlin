@@ -1,5 +1,6 @@
 import os
 import re
+import warnings
 from typing import List
 from typing import Tuple
 import pandas
@@ -31,7 +32,8 @@ class DataOrganization(object):
     image files.
     """
 
-    def __init__(self, dataSet, filePath: str = None):
+    def __init__(self, dataSet, filePath: str = None,
+                 allowRaggedZStacks: bool = False):
         """
         Create a new DataOrganization for the data in the specified data set.
 
@@ -41,12 +43,25 @@ class DataOrganization(object):
         stored in the dataSet, overwriting any previously stored
         DataOrganization.
 
+        Args:
+            allowRaggedZStacks: if True, a fov whose raw file has fewer
+                    frames than the deepest globally-configured z position
+                    requires is tolerated (its available z range is
+                    inferred from its own file's frame count, see
+                    get_z_positions) instead of raising InputDataError.
+                    Defaults to False to preserve prior behavior for
+                    datasets where every fov shares the same z range.
         Raises:
             InputDataError: If the set of raw data is incomplete or the
                     format of the raw data deviates from expectations.
         """
 
         self._dataSet = dataSet
+        self._allowRaggedZStacks = allowRaggedZStacks
+        # caches the per-(imageType, imagingRound, fov) raw frame count so
+        # repeated get_z_positions(fov) calls during analysis don't re-parse
+        # the same file header multiple times
+        self._fovFrameCountCache = {}
 
         if filePath is not None:
             if not os.path.exists(filePath):
@@ -287,25 +302,119 @@ class DataOrganization(object):
 
         return frame
 
-    def get_z_positions(self) -> List[float]:
+    def get_z_positions(self, fov: int = None) -> List[float]:
         """Get the z positions present in this data organization.
+
+        Args:
+            fov: if provided, the z positions are restricted to those
+                    actually available for this fov (a fov's raw file may
+                    have fewer frames than the deepest z position
+                    configured here, e.g. when acquisition was trimmed to
+                    this fov's own tissue depth). If None (default), the
+                    full, dataset-wide z position list is returned exactly
+                    as before, regardless of individual fovs' raw files.
         Returns:
-            A sorted list of all unique z positions
+            A sorted list of unique z positions
         """
         # assume channels that contain dapi or polyt in the channelName are for segmentation
         sel = self.data['channelName'].str.contains('dapi|polyt', case = False, regex=True)
-        zpos = self.data['zPos'][~sel]
-        return sorted(np.unique([y for x in zpos for y in x]))
-    
-    def get_z_positions_segmentation(self) -> List[float]:
+        if fov is None:
+            zpos = self.data['zPos'][~sel]
+            return sorted(np.unique([y for x in zpos for y in x]))
+        return self._get_available_z_positions(self.data.index[~sel], fov)
+
+    def get_z_positions_segmentation(self, fov: int = None) -> List[float]:
         """Get the z positions present in this data organization.
+
+        Args:
+            fov: if provided, the z positions are restricted to those
+                    actually available for this fov (see get_z_positions).
+                    If None (default), the full, dataset-wide z position
+                    list is returned exactly as before.
         Returns:
-            A sorted list of all unique z positions
+            A sorted list of unique z positions
         """
         # assume channels that contain dapi or polyt in the channelName are for segmentation
         sel = self.data['channelName'].str.contains('dapi|polyt', case = False, regex=True)
-        zpos = self.data['zPos'][sel]
-        return sorted(np.unique([y for x in zpos for y in x]))
+        if fov is None:
+            zpos = self.data['zPos'][sel]
+            return sorted(np.unique([y for x in zpos for y in x]))
+        return self._get_available_z_positions(self.data.index[sel], fov)
+
+    def _get_available_z_positions(
+            self, channelIndices, fov: int) -> List[float]:
+        """Get the z positions common to the raw files of the specified
+        fov across the specified data channels.
+
+        A z position is considered available for a channel only if that
+        channel's raw file for this fov actually contains the frame it
+        maps to -- inferred from the file's own frame count, not from a
+        separate per-fov metadata table (a fov whose acquisition was
+        trimmed to a shallower depth simply has a shorter raw file).
+        Different channels can point at different imaging rounds (and
+        therefore different raw files) for the same fov, so nothing
+        guarantees they were all trimmed to the same depth; the
+        intersection across channels is the set of z positions genuinely
+        usable by every channel that needs them.
+
+        Args:
+            channelIndices: the data channel indices to consider
+            fov: index of the field of view
+        Returns:
+            A sorted list of the z positions available in every channel
+        """
+        availableZSets = []
+        for dataChannel in channelIndices:
+            channelInfo = self.data.loc[dataChannel]
+            zPosArray = channelInfo['zPos']
+            frames = channelInfo['frame']
+            if not isinstance(zPosArray, np.ndarray) \
+                    or not isinstance(frames, np.ndarray):
+                # a channel with a single scalar zPos/frame has no z sweep
+                # and so does not constrain which z positions are available
+                continue
+            frameCount = self._get_fov_frame_count(dataChannel, fov)
+            availableZSets.append(set(zPosArray[frames < frameCount].tolist()))
+
+        if not availableZSets:
+            # no channel in this selection has a real z sweep to truncate;
+            # fall back to the full configured z list for these channels
+            zpos = self.data['zPos'].loc[channelIndices]
+            return sorted(np.unique([y for x in zpos for y in x]))
+
+        return sorted(set.intersection(*availableZSets))
+
+    def _get_fov_frame_count(self, dataChannel: int, fov: int) -> int:
+        """Get the number of frames actually present in the raw file for
+        the specified data channel and fov.
+
+        Results are cached per (imageType, imagingRound, fov) since
+        multiple data channels commonly share the same underlying raw
+        file/round, to avoid re-parsing the same file header repeatedly.
+
+        Args:
+            dataChannel: index of the data channel
+            fov: index of the field of view
+        Returns:
+            The number of frames in the corresponding raw image file
+        Raises:
+            InputDataError: if the frame count cannot be determined, e.g.
+                    the raw file is missing or corrupted
+        """
+        channelInfo = self.data.iloc[dataChannel]
+        cacheKey = (channelInfo['imageType'], channelInfo['imagingRound'], fov)
+        if cacheKey not in self._fovFrameCountCache:
+            imagePath = self._get_image_path(
+                channelInfo['imageType'], fov, channelInfo['imagingRound'])
+            try:
+                self._fovFrameCountCache[cacheKey] = \
+                    self._dataSet.image_stack_size(imagePath)[2]
+            except Exception as e:
+                raise InputDataError(
+                    ('Unable to determine image stack size for fov {0} from'
+                     ' data channel {1} at {2}')
+                    .format(fov, dataChannel, imagePath)) from e
+        return self._fovFrameCountCache[cacheKey]
 
     def get_fovs(self) -> np.ndarray:
         return np.unique(self.fileMap['fov'])
@@ -457,18 +566,33 @@ class DataOrganization(object):
                          ' data channel {1} at {2}')
                         .format(dataChannel, fov, imagePath))
 
+                # share this frame count with get_z_positions(fov)/
+                # get_z_positions_segmentation(fov) so they don't need to
+                # reopen the same file later
+                self._fovFrameCountCache[
+                    (channelInfo['imageType'], channelInfo['imagingRound'],
+                     fov)] = imageSize[2]
+
                 frames = channelInfo['frame']
 
                 # this assumes fiducials are stored in the same image file
                 requiredFrames = max(np.max(frames),
                                      channelInfo['fiducialFrame'])
                 if requiredFrames >= imageSize[2]:
-                    raise InputDataError(
-                        ('Insufficient frames in data for channel {0} and '
-                         'fov {1}. Expected {2} frames '
-                         'but only found {3} in file {4}')
-                        .format(dataChannel, fov, requiredFrames, imageSize[2],
-                                imagePath))
+                    if not self._allowRaggedZStacks:
+                        raise InputDataError(
+                            ('Insufficient frames in data for channel {0} and '
+                             'fov {1}. Expected {2} frames '
+                             'but only found {3} in file {4}')
+                            .format(dataChannel, fov, requiredFrames,
+                                    imageSize[2], imagePath))
+                    warnings.warn(
+                        ('Fov {0} has fewer frames than expected for channel '
+                         '{1} (expected at least {2}, found {3} in file {4}); '
+                         'treating this fov as having a shallower z range '
+                         'since allowRaggedZStacks is enabled.')
+                        .format(fov, dataChannel, requiredFrames + 1,
+                                imageSize[2], imagePath))
 
                 if expectedImageSize is None:
                     expectedImageSize = [imageSize[0], imageSize[1]]

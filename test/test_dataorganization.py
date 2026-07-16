@@ -1,6 +1,8 @@
 import os
 import numpy as np
+import pytest
 
+from merlin.core import dataset
 from merlin.data import dataorganization
 
 
@@ -127,3 +129,70 @@ def test_dataorganization_get_sequential_rounds_two_codebooks(
         dataOrganization.get_sequential_rounds()
 
     assert sequentialRounds == [16, 17]
+
+
+def test_dataorganization_ragged_get_z_positions_default_unchanged(
+        ragged_merfish_data):
+    # fov=None must reproduce the exact dataset-wide behavior regardless of
+    # any individual fov's raw file, matching every fov's full union
+    dataOrg = ragged_merfish_data.get_data_organization()
+    assert dataOrg.get_z_positions() == [0, 1, 2, 3]
+    assert dataOrg.get_z_positions(fov=None) == [0, 1, 2, 3]
+    assert dataOrg.get_z_positions_segmentation() == [0, 1, 2]
+
+
+def test_dataorganization_ragged_get_z_positions_per_fov(ragged_merfish_data):
+    dataOrg = ragged_merfish_data.get_data_organization()
+    # fov 0: full depth in every round
+    assert dataOrg.get_z_positions(0) == [0, 1, 2, 3]
+    # fov 1: round 0 (bit1/bit2) full, round 1 (bit3/bit4) truncated to
+    # z=[0,1] -- the overall available range is the intersection across
+    # both rounds, not just the shallower round considered in isolation
+    assert dataOrg.get_z_positions(1) == [0, 1]
+    # fov 2: both bit rounds truncated uniformly to z=[0,1,2]
+    assert dataOrg.get_z_positions(2) == [0, 1, 2]
+    # fov 3: bit rounds are full depth; only the segmentation round is
+    # truncated for this fov (see test below), so regular z is unaffected
+    assert dataOrg.get_z_positions(3) == [0, 1, 2, 3]
+
+
+def test_dataorganization_ragged_get_z_positions_segmentation_per_fov(
+        ragged_merfish_data):
+    dataOrg = ragged_merfish_data.get_data_organization()
+    # fov 0-2: segmentation (DAPI/polyT) round is full depth for all three,
+    # even though fov 1 and 2 have truncated *regular* channels -- the two
+    # z lists are derived independently of each other
+    assert dataOrg.get_z_positions_segmentation(0) == [0, 1, 2]
+    assert dataOrg.get_z_positions_segmentation(1) == [0, 1, 2]
+    assert dataOrg.get_z_positions_segmentation(2) == [0, 1, 2]
+    # fov 3: segmentation round truncated to z=[0,1], independent of the
+    # regular z list (which is full depth for this fov)
+    assert dataOrg.get_z_positions_segmentation(3) == [0, 1]
+
+
+def test_dataorganization_ragged_validate_file_map_requires_flag(
+        ragged_merfish_files, tmp_path):
+    with pytest.raises(dataorganization.InputDataError):
+        dataset.MERFISHDataSet(
+            'ragged_merfish_test',
+            dataOrganizationName='test_data_organization_ragged.csv',
+            codebookNames=['test_codebook.csv'],
+            positionFileName='test_positions_ragged.csv',
+            analysisHome=str(tmp_path / 'strict'),
+            microscopeParametersName='test_microscope_parameters.json',
+            allowRaggedZStacks=False)
+
+
+def test_dataorganization_ragged_validate_file_map_tolerates_with_flag(
+        ragged_merfish_files, tmp_path):
+    with pytest.warns(UserWarning):
+        raggedData = dataset.MERFISHDataSet(
+            'ragged_merfish_test',
+            dataOrganizationName='test_data_organization_ragged.csv',
+            codebookNames=['test_codebook.csv'],
+            positionFileName='test_positions_ragged.csv',
+            analysisHome=str(tmp_path / 'lenient'),
+            microscopeParametersName='test_microscope_parameters.json',
+            allowRaggedZStacks=True)
+
+    assert raggedData.get_data_organization().get_z_positions(1) == [0, 1]

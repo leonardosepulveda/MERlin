@@ -19,6 +19,8 @@ merlin.MICROSCOPE_PARAMETERS_HOME = os.path.abspath('test_microcope_parameters')
 
 dataDirectory = os.sep.join([merlin.DATA_HOME, 'test'])
 merfishDataDirectory = os.sep.join([merlin.DATA_HOME, 'merfish_test'])
+raggedMerfishDataDirectory = os.sep.join(
+    [merlin.DATA_HOME, 'ragged_merfish_test'])
 
 
 @pytest.fixture(scope='session')
@@ -39,6 +41,12 @@ def base_files():
             [merlin.DATA_ORGANIZATION_HOME, 'test_data_organization.csv']))
     shutil.copyfile(
         os.sep.join(
+            [root, 'auxiliary_files', 'test_data_organization_ragged.csv']),
+        os.sep.join(
+            [merlin.DATA_ORGANIZATION_HOME,
+             'test_data_organization_ragged.csv']))
+    shutil.copyfile(
+        os.sep.join(
             [root, 'auxiliary_files', 'test_codebook.csv']),
         os.sep.join(
             [merlin.CODEBOOK_HOME, 'test_codebook.csv']))
@@ -52,6 +60,11 @@ def base_files():
             [root, 'auxiliary_files', 'test_positions.csv']),
         os.sep.join(
             [merlin.POSITION_HOME, 'test_positions.csv']))
+    shutil.copyfile(
+        os.sep.join(
+            [root, 'auxiliary_files', 'test_positions_ragged.csv']),
+        os.sep.join(
+            [merlin.POSITION_HOME, 'test_positions_ragged.csv']))
     shutil.copyfile(
         os.sep.join(
             [root, 'auxiliary_files', 'test_analysis_parameters.json']),
@@ -118,6 +131,40 @@ def two_codebook_merfish_data(merfish_files):
     yield testMERFISHData
 
     shutil.rmtree('test_analysis_two_codebook')
+
+
+@pytest.fixture(scope='session')
+def ragged_merfish_files(base_files):
+    os.mkdir(raggedMerfishDataDirectory)
+
+    for imageFile in glob.iglob(
+            os.sep.join([root, 'auxiliary_files', 'ragged_tifs', '*.tif'])):
+        if os.path.isfile(imageFile):
+            shutil.copy(imageFile, raggedMerfishDataDirectory)
+
+    yield
+
+    shutil.rmtree(raggedMerfishDataDirectory)
+
+
+@pytest.fixture(scope='session')
+def ragged_merfish_data(ragged_merfish_files):
+    # fov 0 is full depth everywhere; fov 1, 2, and 3 each have at least one
+    # raw file shorter than the deepest globally-configured z position (see
+    # test_data_organization_ragged.csv / ragged_tifs), so this requires
+    # allowRaggedZStacks to construct without raising.
+    testMERFISHData = dataset.MERFISHDataSet(
+            'ragged_merfish_test',
+            dataOrganizationName='test_data_organization_ragged.csv',
+            codebookNames=['test_codebook.csv'],
+            positionFileName='test_positions_ragged.csv',
+            analysisHome=os.path.join(merlin.ANALYSIS_HOME, '..',
+                                      'test_analysis_ragged'),
+            microscopeParametersName='test_microscope_parameters.json',
+            allowRaggedZStacks=True)
+    yield testMERFISHData
+
+    shutil.rmtree('test_analysis_ragged')
 
 
 @pytest.fixture(scope='function')

@@ -61,6 +61,12 @@ def build_parser():
     parser.add_argument('--no_report',
                         help='flag indicating that the snakemake stats ' +
                         'should not be shared to improve MERlin')
+    parser.add_argument('--allow-ragged-z-stacks', action='store_true',
+                        help='tolerate fovs whose raw files have fewer '
+                        'z frames than the deepest z position configured '
+                        'in the data organization, instead of raising an '
+                        'error (e.g. when acquisition was trimmed to each '
+                        "fov's own tissue depth)")
 
     return parser
 
@@ -128,7 +134,8 @@ def merlin():
         positionFileName=_clean_string_arg(args.positions),
         dataHome=_clean_string_arg(args.data_home),
         analysisHome=_clean_string_arg(args.analysis_home),
-        microscopeParametersName=_clean_string_arg(args.microscope_parameters)
+        microscopeParametersName=_clean_string_arg(args.microscope_parameters),
+        allowRaggedZStacks=args.allow_ragged_z_stacks
     )
     
     parametersHome = m.ANALYSIS_PARAMETERS_HOME

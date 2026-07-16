@@ -1083,7 +1083,8 @@ class MERFISHDataSet(ImageDataSet):
     def __init__(self, dataDirectoryName: str, codebookNames: List[str] = None,
                  dataOrganizationName: str = None, positionFileName: str = None,
                  dataHome: str = None, analysisHome: str = None,
-                 microscopeParametersName: str = None):
+                 microscopeParametersName: str = None,
+                 allowRaggedZStacks: bool = False):
         """Create a MERFISH dataset for the specified raw data.
 
         Args:
@@ -1110,14 +1111,22 @@ class MERFISHDataSet(ImageDataSet):
                     to acquire the images represented by this ImageDataSet
             PiezoParametersName: the name of the piezo parameters
                     file that specifies the correction to z scanning
-            DenoisingHome: the name of the directory that holds the 
+            DenoisingHome: the name of the directory that holds the
                     denoising model
+            allowRaggedZStacks: if True, fovs whose raw files have fewer
+                    frames than the deepest globally-configured z position
+                    (e.g. acquisition was trimmed to each fov's own tissue
+                    depth) are tolerated instead of raising an error; see
+                    DataOrganization and get_z_positions(fov=...). Defaults
+                    to False to preserve behavior for datasets where every
+                    fov shares the same z range.
         """
         super().__init__(dataDirectoryName, dataHome, analysisHome,
                          microscopeParametersName)
 
         self.dataOrganization = dataorganization.DataOrganization(
-                self, dataOrganizationName)
+                self, dataOrganizationName,
+                allowRaggedZStacks=allowRaggedZStacks)
         if codebookNames:
             self.codebooks = [codebook.Codebook(self, name, i)
                               for i, name in enumerate(codebookNames)]
@@ -1244,32 +1253,51 @@ class MERFISHDataSet(ImageDataSet):
         # TODO - this should be implemented using the position of the fov.
         return self.positions.loc[fov]['X'], self.positions.loc[fov]['Y']
 
-    def z_index_to_position(self, zIndex: int) -> float:
-        """Get the z position associated with the provided z index."""
+    def z_index_to_position(self, zIndex: int, fov: int = None) -> float:
+        """Get the z position associated with the provided z index.
 
-        return self.get_z_positions()[zIndex]
+        Args:
+            fov: if provided, the z index is resolved against this fov's
+                    own available z positions (see get_z_positions)
+                    instead of the full dataset-wide z list.
+        """
 
-    def position_to_z_index(self, zPosition: float) -> int:
+        return self.get_z_positions(fov)[zIndex]
+
+    def position_to_z_index(self, zPosition: float, fov: int = None) -> int:
         """Get the z index associated with the specified z position
-        
+
+        Args:
+            fov: if provided, the z position is resolved against this
+                    fov's own available z positions (see get_z_positions)
+                    instead of the full dataset-wide z list.
         Raises:
              Exception: If the provided z position is not specified in this
                 dataset
         """
 
-        zIndex = np.where(self.get_z_positions() == zPosition)[0]
+        # np.array(...) is required here (rather than comparing the plain
+        # list get_z_positions returns) since a Python list compared to a
+        # scalar with == does not broadcast elementwise and np.where on
+        # the resulting scalar False raises ValueError instead of the
+        # intended "not found" Exception below
+        zIndex = np.where(np.array(self.get_z_positions(fov)) == zPosition)[0]
         if len(zIndex) == 0:
             raise Exception('Requested z=%0.2f position not found.' % zPosition)
 
         return zIndex[0]
 
-    def get_z_positions(self) -> List[float]:
+    def get_z_positions(self, fov: int = None) -> List[float]:
         """Get the z positions present in this dataset.
 
+        Args:
+            fov: if provided, the z positions are restricted to those
+                    actually available for this fov. If None (default),
+                    the full, dataset-wide z position list is returned.
         Returns:
-            A sorted list of all unique z positions
+            A sorted list of unique z positions
         """
-        return self.dataOrganization.get_z_positions()
+        return self.dataOrganization.get_z_positions(fov)
 
     def get_fovs(self) -> List[int]:
         return self.dataOrganization.get_fovs()

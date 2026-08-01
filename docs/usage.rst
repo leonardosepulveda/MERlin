@@ -131,6 +131,8 @@ After installation, MERlin can be run from the command line with the input param
 
 Here the MERFISH images contained in the directory `%DATA\_HOME%/testdata/` are processed using the analysis tasks listed in `test\_analysis\_parameters.json` with microscope parameters `STORM5.json`, data organization `Culture\_16bits.csv`, codebook `L26E1_codebook.csv` using 5 cores for each process.
 
+The analysis parameters file (passed with ``-a``) can be written as either JSON or YAML -- MERlin picks the parser based on the file's extension (``.json`` vs. ``.yaml``/``.yml``). Both formats describe the exact same ``analysis_tasks`` list of task dictionaries; YAML is purely a more readable alternative, not a different schema.
+
 Executing on a high performance cluster
 =====================================================
 

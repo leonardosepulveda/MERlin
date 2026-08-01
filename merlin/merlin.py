@@ -6,6 +6,7 @@ import sys
 import snakemake
 import time
 import requests
+import yaml
 from typing import TextIO
 from typing import Dict
 
@@ -29,7 +30,8 @@ def build_parser():
     parser.add_argument('dataset',
                         help='directory where the raw data is stored')
     parser.add_argument('-a', '--analysis-parameters',
-                        help='name of the analysis parameters file to use')
+                        help='name of the analysis parameters file to use '
+                        '(.json or .yaml/.yml, detected by extension)')
     parser.add_argument('-o', '--data-organization',
                         help='name of the data organization file to use')
     parser.add_argument('-c', '--codebook', nargs='+',
@@ -174,10 +176,26 @@ def merlin():
                                snakemakeParameters, not args.no_report)
 
 
+def _load_analysis_parameters(parametersFile: TextIO) -> Dict:
+    """Parse an analysis-parameters recipe from an open file handle.
+
+    Recipes are the same list-of-task-dicts structure ({"analysis_tasks":
+    [...]}) whether written as JSON or YAML -- the two formats share the same
+    mapping/sequence/scalar data model, so this is purely a choice of parser,
+    dispatched on the file's own extension (`.yaml`/`.yml` vs anything else,
+    which is parsed as JSON as before -- this keeps every existing .json
+    recipe and any caller that doesn't set an extension working unchanged).
+    """
+    _, extension = os.path.splitext(parametersFile.name)
+    if extension.lower() in ('.yaml', '.yml'):
+        return yaml.safe_load(parametersFile)
+    return json.load(parametersFile)
+
+
 def generate_analysis_tasks_and_snakefile(dataSet: dataset.MERFISHDataSet,
                                           parametersFile: TextIO) -> str:
     print('Generating analysis tasks from %s' % parametersFile.name)
-    analysisParameters = json.load(parametersFile)
+    analysisParameters = _load_analysis_parameters(parametersFile)
     snakeGenerator = snakewriter.SnakefileGenerator(
         analysisParameters, dataSet, sys.executable)
     snakefilePath = snakeGenerator.generate_workflow()

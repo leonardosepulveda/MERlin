@@ -237,7 +237,7 @@ class CellPoseSegment3D(FeatureSavingAnalysisTask):
         else:
             with self.dataSet.writer_for_analysis_images(self, filename_prefix, fov) as outputTif:
                 for frame in image_stack:
-                        outputTif.save(frame,
+                        outputTif.write(frame,
                                     photometric='MINISBLACK',
                                     contiguous=True)
 
@@ -513,7 +513,7 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
         else:
             with self.dataSet.writer_for_analysis_images(self, filename_prefix, fov) as outputTif:
                 for frame in image_stack:
-                        outputTif.save(frame,
+                        outputTif.write(frame,
                                     photometric='MINISBLACK',
                                     contiguous=True)
 

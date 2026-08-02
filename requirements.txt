@@ -28,7 +28,7 @@ snakemake
 Sphinx
 sphinx-rtd-theme
 tables
-tifffile
+tifffile>=2023.1.23
 urllib3
 xmltodict
 tensorflow

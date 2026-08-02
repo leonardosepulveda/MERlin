@@ -128,7 +128,7 @@ class GenerateMosaic(analysistask.AnalysisTask):
                         imagej = True) as outputTif:
                             mosaic = self._prepare_mosaic_slice(
                                 z, d, micronExtents, alignTask, maximumProjection)
-                            outputTif.save(mosaic, photometric='MINISBLACK', contiguous=True, 
+                            outputTif.write(mosaic, photometric='MINISBLACK', contiguous=True, 
                                         metadata=imageDescription)
 
         else:
@@ -141,7 +141,7 @@ class GenerateMosaic(analysistask.AnalysisTask):
                         print(f'starting data channel {d}, z index {z}.')
                         mosaic = self._prepare_mosaic_slice(
                             z, d, micronExtents, alignTask, maximumProjection)
-                        outputTif.save(mosaic, photometric='MINISBLACK', contiguous=True,
+                        outputTif.write(mosaic, photometric='MINISBLACK', contiguous=True,
                                        metadata=imageDescription)
 
 

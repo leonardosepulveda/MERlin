@@ -162,7 +162,7 @@ class CAREPreprocess(Preprocess):
                         pixelHistogram[bi, :] += np.histogram(
                                 outputImage, bins=histogramBins)[0]
 
-                        outputTif.save(outputImage,photometric='MINISBLACK')
+                        outputTif.write(outputImage,photometric='MINISBLACK')
 
             self._save_pixel_histogram(pixelHistogram, fragmentIndex)
 
@@ -274,7 +274,7 @@ class DeconvolutionPreprocess(Preprocess):
                                 deconvolvedImage, bins=histogramBins)[0]
                         
                         if self.parameters['write_preprocessed_images']:
-                            outputTif.save(deconvolvedImage, photometric='MINISBLACK')
+                            outputTif.write(deconvolvedImage, photometric='MINISBLACK')
 
             self._save_pixel_histogram(pixelHistogram, fragmentIndex)
 
@@ -463,7 +463,7 @@ class DeconvolutionPreprocessDW(Preprocess):
                 
                 for zPosition in self.dataSet.get_z_positions(fragmentIndex):
                         frame = self.dataSet.get_raw_image(dataChannel, fragmentIndex, zPosition)
-                        outputTif.save(frame, photometric='MINISBLACK')
+                        outputTif.write(frame, photometric='MINISBLACK')
 
             # this is the path of the image that was just saved
             inputImagePath = self.get_raw_image_path(dataChannel, fragmentIndex)

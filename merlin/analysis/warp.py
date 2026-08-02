@@ -143,7 +143,7 @@ class Warp(analysistask.ParallelAnalysisTask):
                         transformedImage = transform.warp(
                                 inputImage, t, preserve_range=True) \
                             .astype(inputImage.dtype)
-                        outputTif.save(
+                        outputTif.write(
                                 transformedImage,
                                 photometric='MINISBLACK',
                                 contiguous=True,
@@ -162,7 +162,7 @@ class Warp(analysistask.ParallelAnalysisTask):
                             inputImage, t, preserve_range=True) \
                         .astype(inputImage.dtype)
 
-                    outputTif.save(
+                    outputTif.write(
                             transformedImage, 
                             photometric='MINISBLACK',
                             contiguous=True,
@@ -570,7 +570,7 @@ class FiducialCorrelationWarp3D(FiducialCorrelationWarp):
                         #print('aligning channel {} zpos {}'.format(x, z))
                         transformedImage = self.get_aligned_image(fov, x, 
                                                 self.dataSet.position_to_z_index(z))
-                        outputTif.save(
+                        outputTif.write(
                                 transformedImage,
                                 photometric='MINISBLACK',
                                 metadata=imageDescription)
@@ -590,7 +590,7 @@ class FiducialCorrelationWarp3D(FiducialCorrelationWarp):
                     transformedImage = transform.warp(
                             inputImage, t, preserve_range=True) \
                         .astype(inputImage.dtype)
-                    outputTif.save(
+                    outputTif.write(
                             transformedImage, 
                             photometric='MINISBLACK',
                             metadata=fiducialImageDescription)

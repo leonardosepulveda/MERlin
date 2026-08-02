@@ -3,6 +3,22 @@
 Curated current-state summary. See `prompt_history/` for full provenance of each item
 below; this file only tracks what's true *now* and the open next step.
 
+## tifffile TiffWriter.write() migration (2026-08-01)
+
+New branch `fix/tifffile-writer-api` (off `feature/ragged-z-stacks`, kept deliberately
+independent of the sibling `feature/yaml-analysis-recipes` branch's YAML/snakemake
+work). tifffile removed `TiffWriter.save()` (a deprecated alias for `.write()`)
+between 2025.1.10 and 2025.2.18 -- confirmed empirically by bisecting installed
+versions, same approach as the snakemake investigation. All 12 `outputTif.save(...)`
+call sites across `warp.py`/`decode.py`/`generatemosaic.py`/`optimize.py`/
+`preprocess.py`/`segment.py` renamed to `.write(...)` (identical signature for every
+parameter used: `photometric`, `contiguous`, `metadata`, positional `data` --
+confirmed via `inspect.signature` first). `requirements.txt` pinned to
+`tifffile>=2023.1.23`. Verified with a real write+readback (bypassing snakemake,
+since this branch doesn't include that fix): `FiducialCorrelationWarp` with
+`write_aligned_images=True` produced a real, correctly-shaped, non-empty tiff. See
+`prompt_history/2026_08_01_2248_fix_tifffile_writer_api.md` for full detail.
+
 ## Repo / branch layout
 
 - `origin` = `leonardosepulveda/MERlin` (this fork), `upstream` = `emanuega/MERlin`,

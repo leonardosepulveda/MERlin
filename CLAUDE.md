@@ -141,6 +141,17 @@ project state, also update the relevant `FINDINGS.md` section. Keep
   bash, `Get-Date` on PowerShell) for both the filename and the `date:` field.
   The environment context provides only the date, never the time of day — never
   fabricate the `HH_MM` (see the "No fabrication" rule above).
+- **This depends on non-repo-tracked global config** — `~/.claude/CLAUDE.md`'s
+  "No fabrication" section and the `UserPromptSubmit` hook in `~/.claude/settings.json`
+  that injects `Current local date/time: … (epoch N)` every turn. That global config
+  has already been silently lost once (machine migration), causing fabricated,
+  suspiciously-regular timestamps in a sibling project — see
+  `251225_LT027_saving_time/MERci/prompt_history/
+  2026_08_12_1916_fix_timestamp_fabrication_and_backup_hooks.md` — before a
+  Dropbox-synced backup (`Dropbox/claude-global-backup/`) was set up to catch it
+  going forward. If the hook's injected line is ever missing from context here too,
+  query the clock directly rather than estimating — never reuse a "plausible" value
+  or space entries at a suspiciously round interval.
 - **`elapsed`** (just before `status`): wall-clock from prompt submission to task
   completion. Start = the `epoch N` injected by the `UserPromptSubmit` date/time
   hook for the message that began this request (for a request that spans several

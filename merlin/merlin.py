@@ -35,7 +35,7 @@ def build_parser():
     parser.add_argument('-c', '--codebook', nargs='+',
                         help='name of the codebook to use')
     parser.add_argument('-m', '--microscope-parameters',
-                        help='name of the microscope parameters to use')
+                        help='name of the microscope parameters to use')                  
     parser.add_argument('-p', '--positions',
                         help='name of the position file to use')
     parser.add_argument('-n', '--core-count', type=int,
@@ -54,11 +54,19 @@ def build_parser():
                         help='the data home directory')
     parser.add_argument('-s', '--analysis-home',
                         help='the analysis home directory')
+    parser.add_argument('-q', '--parameters-home',
+                        help='the parameters home directory')
     parser.add_argument('-k', '--snakemake-parameters',
                         help='the name of the snakemake parameters file')
     parser.add_argument('--no_report',
                         help='flag indicating that the snakemake stats ' +
                         'should not be shared to improve MERlin')
+    parser.add_argument('--allow-ragged-z-stacks', action='store_true',
+                        help='tolerate fovs whose raw files have fewer '
+                        'z frames than the deepest z position configured '
+                        'in the data organization, instead of raising an '
+                        'error (e.g. when acquisition was trimmed to each '
+                        "fov's own tissue depth)")
 
     return parser
 
@@ -101,16 +109,35 @@ def merlin():
         configure_environment()
         return
 
+    if args.parameters_home is not None:
+        print('specifying parameter file in arg parser')
+        m.PARAMETERS_HOME = _clean_string_arg(args.parameters_home)
+        m.ANALYSIS_PARAMETERS_HOME = os.sep.join(
+                [m.PARAMETERS_HOME, 'analysis'])
+        m.CODEBOOK_HOME = os.sep.join(
+                [m.PARAMETERS_HOME, 'codebooks'])
+        m.DATA_ORGANIZATION_HOME = os.sep.join(
+                [m.PARAMETERS_HOME, 'dataorganization'])
+        m.POSITION_HOME = os.sep.join(
+                [m.PARAMETERS_HOME, 'positions'])
+        m.MICROSCOPE_PARAMETERS_HOME = os.sep.join(
+                [m.PARAMETERS_HOME, 'microscope'])
+        m.FPKM_HOME = os.sep.join([m.PARAMETERS_HOME, 'fpkm'])
+        m.SNAKEMAKE_PARAMETERS_HOME = os.sep.join(
+            [m.PARAMETERS_HOME, 'snakemake'])
+            
+
     dataSet = dataset.MERFISHDataSet(
         args.dataset,
-        dataOrganizationName=_clean_string_arg(args.data_organization),
         codebookNames=args.codebook,
-        microscopeParametersName=_clean_string_arg(args.microscope_parameters),
+        dataOrganizationName=_clean_string_arg(args.data_organization),
         positionFileName=_clean_string_arg(args.positions),
         dataHome=_clean_string_arg(args.data_home),
-        analysisHome=_clean_string_arg(args.analysis_home)
+        analysisHome=_clean_string_arg(args.analysis_home),
+        microscopeParametersName=_clean_string_arg(args.microscope_parameters),
+        allowRaggedZStacks=args.allow_ragged_z_stacks
     )
-
+    
     parametersHome = m.ANALYSIS_PARAMETERS_HOME
     e = executor.LocalExecutor(coreCount=args.core_count)
     snakefilePath = None
@@ -160,14 +187,17 @@ def generate_analysis_tasks_and_snakefile(dataSet: dataset.MERFISHDataSet,
 
 def run_with_snakemake(
         dataSet: dataset.MERFISHDataSet, snakefilePath: str, coreCount: int,
-        snakemakeParameters: Dict = {}, report: bool = True):
+        snakemakeParameters: Dict = {}, report: bool = False):
     print('Running MERlin pipeline through snakemake')
-    snakemake.snakemake(snakefilePath, cores=coreCount,
+    snakemake.snakemake(snakefilePath, 
+                        cores=coreCount,
                         workdir=dataSet.get_snakemake_path(),
-                        stats=snakefilePath + '.stats', lock=False,
+                        stats=snakefilePath + '.stats', 
+                        lock=False,
+                        latency_wait=10,
                         **snakemakeParameters)
 
-    if report:
+    if False:
         reportTime = int(time.time())
         try:
             with open(snakefilePath + '.stats', 'r') as f:

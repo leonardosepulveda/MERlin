@@ -114,7 +114,7 @@ class SpatialFeature(object):
         transformedList = []
         for b in boundaries:
             reshapedBoundaries = np.reshape(
-                b, (1, b.shape[0], 2)).astype(np.float)
+                b, (1, b.shape[0], 2)).astype(float) # np.float depreciation warning
             transformedBoundaries = cv2.transform(
                 reshapedBoundaries, transformationMatrix)[0, :, :2]
             transformedList.append(transformedBoundaries)
@@ -137,6 +137,29 @@ class SpatialFeature(object):
     def _remove_invalid_boundaries(
             inPolygons: List[geometry.Polygon]) -> List[geometry.Polygon]:
         return [p for p in inPolygons if p.is_valid]
+
+    def make_a_buffered_copy(self, buffer_size: float):
+        '''Make a buffered copy of the SpatialFeature where the
+        boundaries in each Z plane is expanded (positive buffer_size)
+        or shrinked (negative buffer_size) by the buffer_size.
+        '''
+
+        new_boundaryList = []
+        for i in range(len(self._boundaryList)):
+            new_boundaryList.append([])
+            print(f'{i}')
+
+            for pg in self._boundaryList[i]:
+
+                p_b = pg.buffer(buffer_size)
+
+                if p_b.geom_type == 'MultiPolygon':
+                    for p in p_b.geoms:
+                        new_boundaryList[i].append(p)
+                else:
+                    new_boundaryList[i].append(p_b)
+
+        return SpatialFeature(new_boundaryList, self._fov, self._zCoordinates.copy(), self._uniqueID)
 
     def set_fov(self, newFOV: int) -> None:
         """Update the FOV for this spatial feature.
@@ -290,13 +313,23 @@ class SpatialFeature(object):
             a numpy array of booleans containing true in the i'th index if
                 the i'th point provided is in this spatial feature.
         """
+        bounding_box = self.get_bounding_box()
+        
         boundaries = self.get_boundaries()
         positionList[:, 2] = np.round(positionList[:, 2])
 
-        containmentList = np.zeros(positionList.shape[0], dtype=np.bool)
+        containmentList = np.zeros(positionList.shape[0], dtype='bool')
+        
+        if len(bounding_box) != 4:
+            return containmentList
 
         for zIndex in range(len(boundaries)):
-            currentIndexes = np.where(positionList[:, 2] == zIndex)[0]
+            currentIndexes = np.where(np.all([positionList[:, 2] == zIndex,
+                                              bounding_box[0] <= positionList[:, 0],
+                                              bounding_box[1] <= positionList[:, 1],
+                                              bounding_box[2] >= positionList[:, 0],
+                                              bounding_box[3] >= positionList[:, 1]], axis=0))[0]
+            
             currentContainment = [self.contains_point(
                 geometry.Point(x[0], x[1]), zIndex)
                 for x in positionList[currentIndexes]]
@@ -427,6 +460,9 @@ class HDF5SpatialFeatureDB(SpatialFeatureDB):
             np.array(feature.get_bounding_box())
         featureGroup.attrs['volume'] = feature.get_volume()
         featureGroup['z_coordinates'] = feature.get_z_coordinates()
+        
+        # add number of z planes with actual polygons
+        featureGroup.attrs['num_z'] = len([element for element in feature.get_boundaries() if element])
 
         for i, bSet in enumerate(feature.get_boundaries()):
             zBoundaryGroup = featureGroup.create_group('zIndex_' + str(i))
@@ -525,7 +561,7 @@ class HDF5SpatialFeatureDB(SpatialFeatureDB):
         """
         if fov is None:
             finalDF = pandas.concat([self.read_feature_metadata(x)
-                                     for x in self._dataSet.get_fovs()], 0)
+                                     for x in self._dataSet.get_fovs()], axis = 0) # pandas > 2
 
         else:
             try:
@@ -543,6 +579,11 @@ class HDF5SpatialFeatureDB(SpatialFeatureDB):
                     columns = list(np.unique(allAttrKeys))
                     df = pandas.DataFrame(data=allAttrValues, columns=columns)
                     finalDF = df.loc[:, ['fov', 'volume']].copy(deep=True)
+
+                    # try to include num_z if it exists
+                    if 'num_z' in columns:
+                        finalDF['num_z'] = df['num_z']
+
                     finalDF.index = df['id'].str.decode(encoding='utf-8'
                                                         ).values.tolist()
                     boundingBoxDF = pandas.DataFrame(

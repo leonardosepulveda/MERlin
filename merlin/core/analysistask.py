@@ -116,6 +116,7 @@ class AnalysisTask(ABC):
             self._run_analysis()
             self.dataSet.record_analysis_complete(self)
             logger.info('Completed ' + self.get_analysis_name())
+            self._generate_figures_safely()
             self.dataSet.close_logger(self)
         except Exception as e:
             logger.exception(e)
@@ -196,6 +197,45 @@ class AnalysisTask(ABC):
             the parameter dictionary
         """
         return self.parameters
+
+    def _generate_verification_figures(self) -> None:
+        """Generate quick, on-the-fly verification figures for this analysis
+        task, called automatically once the task is complete (see run() /
+        ParallelAnalysisTask.is_complete()).
+
+        The default implementation does nothing. A subclass that wants
+        verification output should override this and call
+        self.dataSet.save_task_figure(self, figure, figureName) for each
+        figure -- each is saved into a single 'figures' folder shared by
+        every analysis task in this data set (sibling to each task's own
+        output folder), as '{taskName}.{figureName}.png', so a run's figures
+        can all be browsed in one place regardless of which task produced
+        them. This is distinct from merlin.plots' PlotEngine/AbstractPlot
+        framework (used by the separate PlotPerformance task), which builds
+        more elaborate plots from several tasks' results together, nested
+        under PlotPerformance's own output folder -- this hook is for a
+        single task's own quick self-check instead.
+
+        Never let a figure fail to generate take down the analysis itself:
+        wrap any figure-specific step that might reasonably fail (e.g. an
+        optional input being empty) in its own try/except so one broken
+        figure does not prevent the others.
+        """
+        pass
+
+    def _generate_figures_safely(self) -> None:
+        """Call _generate_verification_figures, logging (not raising) any
+        exception -- verification figures must never fail the pipeline they
+        are meant to help verify. Only opens a logger (an extra file handle
+        on top of whatever run() already holds open) if there is actually
+        something to report.
+        """
+        try:
+            self._generate_verification_figures()
+        except Exception as e:
+            logger = self.dataSet.get_logger(self)
+            logger.exception(e)
+            self.dataSet.close_logger(self)
 
     def is_error(self):
         """Determines if an error has occurred while running this analysis
@@ -388,6 +428,7 @@ class ParallelAnalysisTask(AnalysisTask):
                     return False
                 else:
                     self.dataSet.record_analysis_complete(self)
+                    self._generate_figures_safely()
                     return True
         else:
             return self.dataSet.check_analysis_done(self, fragmentIndex)

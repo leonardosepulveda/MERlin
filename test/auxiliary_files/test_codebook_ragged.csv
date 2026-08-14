@@ -1,0 +1,4 @@
+name,id,bit1,bit2,bit3,bit4
+GENE1,ENST00000000001.1,1,1,0,0
+GENE2,ENST00000000002.1,0,0,1,1
+Blank-01,nan,1,0,1,0

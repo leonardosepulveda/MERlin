@@ -3,6 +3,7 @@ import json
 import shutil
 import pandas
 import numpy as np
+import scipy as sp
 import tifffile
 import importlib
 import time
@@ -144,6 +145,31 @@ class DataSet(object):
         figure.savefig(savePath + '.png', pad_inches=0)
         figure.savefig(savePath + '.pdf', transparent=True, pad_inches=0)
 
+    def save_task_figure(self, analysisTask: TaskOrName, figure: plt.Figure,
+                         figureName: str) -> None:
+        """Save a quick, on-the-fly verification figure for an analysis task
+        into one shared 'figures' folder at this data set's analysis root
+        (a sibling of every task's own output folder), named
+        '{taskName}.{figureName}.png' -- distinct from save_figure above
+        (used by the separate merlin.plots/PlotPerformance framework), which
+        nests figures under each task's own output folder instead. Meant to
+        be called from AnalysisTask._generate_verification_figures, so every
+        task's own quick self-check figures land in one place regardless of
+        which task produced them.
+
+        Args:
+            analysisTask: the analysis task that generated this figure.
+            figure: the figure handle for the figure to save
+            figureName: the name of the file to store the figure in,
+                    excluding extension
+        """
+        taskName = analysisTask if isinstance(analysisTask, str) \
+            else analysisTask.get_analysis_name()
+        figuresDir = os.sep.join([self.analysisPath, 'figures'])
+        os.makedirs(figuresDir, exist_ok=True)
+        savePath = os.sep.join([figuresDir, '.'.join([taskName, figureName])])
+        figure.savefig(savePath + '.png', dpi=150, bbox_inches='tight')
+
     def figure_exists(self, analysisTask: TaskOrName, figureName: str,
                       subdirectory: str = 'figures') -> bool:
         """Determine if a figure with the specified name has been
@@ -204,7 +230,7 @@ class DataSet(object):
 
     def writer_for_analysis_images(
             self, analysisTask: TaskOrName, imageBaseName: str,
-            imageIndex: int = None, imagej: bool = True) -> tifffile.TiffWriter:
+            imageIndex: int = None, imagej: bool = False, ome: bool = False) -> tifffile.TiffWriter:
         """Get a writer for writing tiff files from an analysis task.
 
         Args:
@@ -212,11 +238,14 @@ class DataSet(object):
             imageBaseName:
             imageIndex:
             imagej:
+            ome: whether to write OME metadata
         Returns:
 
         """
         return tifffile.TiffWriter(self._analysis_image_name(
-            analysisTask, imageBaseName, imageIndex), imagej=imagej)
+            analysisTask, imageBaseName, imageIndex), imagej=imagej, ome=ome, bigtiff=True) 
+            # turned on bigtiff here by default
+            # so must use FIJI to read data...
 
     @staticmethod
     def analysis_tiff_description(sliceCount: int, frameCount: int) -> Dict:
@@ -237,6 +266,15 @@ class DataSet(object):
             return os.sep.join([destPath, imageBaseName+'.tif'])
         else:
             return os.sep.join([destPath, imageBaseName+str(imageIndex)+'.tif'])
+
+    def _analysis_zarr_name(self, analysisTask: TaskOrName,
+                             zarrBaseName: str, index: int) -> str:
+        destPath = self.get_analysis_subdirectory(
+                analysisTask, subdirectory='zarrs')
+        if index is None:
+            return os.sep.join([destPath, zarrBaseName + '.zarr'])
+        else:
+            return os.sep.join([destPath, zarrBaseName + str(index)+'.zarr'])
 
     def _analysis_result_save_path(
             self, resultName: str, analysisTask: TaskOrName,
@@ -267,7 +305,7 @@ class DataSet(object):
             fileList = [os.path.join(basePath, x) for x in fileList]
         return fileList
 
-    def save_graph_as_gpickle(
+    def save_graph_as_pickle(
             self, graph: nx.Graph, resultName: str,
             analysisTask: TaskOrName = None, resultIndex: int = None,
             subdirectory: str = None):
@@ -285,11 +323,18 @@ class DataSet(object):
                 should be saved to or None if the graph should be
                 saved to the root directory for the analysis task.
         """
+        '''
         savePath = self._analysis_result_save_path(
             resultName, analysisTask, resultIndex, subdirectory, '.gpickle')
         nx.readwrite.gpickle.write_gpickle(graph, savePath)
+        '''
+        savePath = self._analysis_result_save_path(
+            resultName, analysisTask, resultIndex, subdirectory, '.pickle')
+        with open(savePath, 'wb') as f:
+            pickle.dump(graph, f, pickle.HIGHEST_PROTOCOL)
 
-    def load_graph_from_gpickle(
+
+    def load_graph_from_pickle(
             self, resultName: str, analysisTask: TaskOrName = None,
             resultIndex: int = None, subdirectory: str = None):
         """ Load a networkx graph from a gpickle objective saved in the analysis
@@ -306,9 +351,18 @@ class DataSet(object):
                 should be saved to or None if the graph should be
                 saved to the root directory for the analysis task.
         """
+        '''
         savePath = self._analysis_result_save_path(
             resultName, analysisTask, resultIndex, subdirectory, '.gpickle')
         return nx.readwrite.gpickle.read_gpickle(savePath)
+        '''
+        savePath = self._analysis_result_save_path(
+            resultName, analysisTask, resultIndex, subdirectory, '.pickle')
+        with open(savePath, 'rb') as f:
+            graph = pickle.load(f)
+        return graph
+
+
 
     def save_dataframe_to_csv(
             self, dataframe: pandas.DataFrame, resultName: str,
@@ -360,6 +414,58 @@ class DataSet(object):
 
         with open(savePath, 'r') as f:
             return pandas.read_csv(f, **kwargs)
+
+    def save_dataframe_to_parquet(
+                self, dataframe: pandas.DataFrame, resultName: str,
+                analysisTask: TaskOrName = None, resultIndex: int = None,
+                subdirectory: str = None, **kwargs) -> None:
+            """Save a pandas data frame to a parquet.
+
+            If a previous pandas data frame has been save with the same resultName,
+            it will be overwritten
+
+            Args:
+                dataframe: the data frame to save
+                resultName: the name of the output file
+                analysisTask: the analysis task that the dataframe should be
+                    saved under. If None, the dataframe is saved to the
+                    data set root.
+                resultIndex: index of the dataframe to save or None if no index
+                    should be specified
+                subdirectory: subdirectory of the analysis task that the dataframe
+                    should be saved to or None if the dataframe should be
+                    saved to the root directory for the analysis task.
+                **kwargs: arguments to pass on to pandas.to_csv
+            """
+            savePath = self._analysis_result_save_path(
+                    resultName, analysisTask, resultIndex, subdirectory, '.parquet')
+
+            #dataframe.to_parquet(savePath, **kwargs) # do we need kwargs
+            dataframe.to_parquet(savePath)
+
+
+    def load_dataframe_from_parquet(
+                self, resultName: str, analysisTask: TaskOrName = None,
+                resultIndex: int = None, subdirectory: str = None,
+                **kwargs) -> Union[pandas.DataFrame, None]:
+            """Load a pandas data frame from a csv file stored in this data set.
+
+            Args:
+                resultName:
+                analysisTask:
+                resultIndex:
+                subdirectory:
+                **kwargs:
+            Returns:
+                the pandas data frame
+            Raises:
+                FileNotFoundError: if the file does not exist
+            """
+            savePath = self._analysis_result_save_path(
+                    resultName, analysisTask, resultIndex, subdirectory, '.parquet') \
+            
+            #return pandas.read_parquet(savePath, **kwargs) # do we need kwargs               
+            return pandas.read_parquet(savePath)
 
     def open_pandas_hdfstore(self, mode: str, resultName: str,
                              analysisName: str, resultIndex: int = None,
@@ -511,11 +617,18 @@ class DataSet(object):
 
     def load_numpy_analysis_result(
             self, resultName: str, analysisName: str, resultIndex: int = None,
-            subdirectory: str = None) -> np.array:
+            subdirectory: str = None, fileExtension: str = '.npy') -> np.array:
 
         savePath = self._analysis_result_save_path(
-                resultName, analysisName, resultIndex, subdirectory, '.npy')
-        return np.load(savePath, allow_pickle=True)
+                resultName, analysisName, resultIndex, subdirectory, fileExtension)
+        
+        if fileExtension == '.npy':
+            return np.load(savePath, allow_pickle=True)
+        # enable sparse matrix loading
+        elif fileExtension == '.npz':
+            return sp.sparse.load_npz(savePath)
+        else:
+            raise Exception(f"unrecognized numpy file extension: {fileExtension}")
 
     def load_numpy_analysis_result_if_available(
             self, resultName: str, analysisName: str, defaultValue,
@@ -891,19 +1004,22 @@ class ImageDataSet(DataSet):
 
     def get_image_file_names(self):
         return sorted(self.rawDataPortal.list_files(
-            extensionList=['.dax', '.tif', '.tiff']))
+            extensionList=['.dax', '.tif', '.tiff', '.zar', '.zarr']))
 
-    def load_image(self, imagePath, frameIndex):
+    def load_image(self, imagePath, frameIndex, transform = True):
         with imagereader.infer_reader(
                 self.rawDataPortal.open_file(imagePath)) as reader:
             imageIn = reader.load_frame(int(frameIndex))
-            if self.transpose:
-                imageIn = np.transpose(imageIn)
-            if self.flipHorizontal:
-                imageIn = np.flip(imageIn, axis=1)
-            if self.flipVertical:
-                imageIn = np.flip(imageIn, axis=0)
-            return imageIn 
+            if transform:
+                if self.transpose:
+                    imageIn = np.transpose(imageIn)
+                if self.flipHorizontal:
+                    imageIn = np.flip(imageIn, axis=1)
+                if self.flipVertical:
+                    imageIn = np.flip(imageIn, axis=0)
+                return imageIn
+            else: # don't apply camera transformation to some images
+                return imageIn
 
     def image_stack_size(self, imagePath):
         """
@@ -969,13 +1085,31 @@ class ImageDataSet(DataSet):
             imagePath).get_sibling_with_extension('.xml')
         return xmltodict.parse(filePortal.read_as_text())
 
+    # for 3D merfish
+    def get_image_stagez_from_off(self, imagePath: str) -> Dict:
+        """ Get the off metadata stored for the specified image.
+            Currently HAL only records the offset at z position = 0
+            This value is repeated down the column
+        Args:
+            imagePath: the path to the image file (.dax or .tif)
+        Returns: stage-z value of the .off file 
+        """
+        filePortal = self.rawDataPortal.open_file(
+            imagePath).get_sibling_with_extension('.off')
+        lines = filePortal.read_as_text().strip().split('\n')
+        columns = lines[0].strip().split(' ')
+        data = [line.strip().split(' ') for line in lines[1:]]
+        return pandas.DataFrame(data,
+                                columns = columns, 
+                                dtype = float)['stage-z'][0] 
 
 class MERFISHDataSet(ImageDataSet):
 
     def __init__(self, dataDirectoryName: str, codebookNames: List[str] = None,
                  dataOrganizationName: str = None, positionFileName: str = None,
                  dataHome: str = None, analysisHome: str = None,
-                 microscopeParametersName: str = None):
+                 microscopeParametersName: str = None,
+                 allowRaggedZStacks: bool = False):
         """Create a MERFISH dataset for the specified raw data.
 
         Args:
@@ -1000,12 +1134,24 @@ class MERFISHDataSet(ImageDataSet):
             microscopeParametersName: the name of the microscope parameters
                     file that specifies properties of the microscope used
                     to acquire the images represented by this ImageDataSet
+            PiezoParametersName: the name of the piezo parameters
+                    file that specifies the correction to z scanning
+            DenoisingHome: the name of the directory that holds the
+                    denoising model
+            allowRaggedZStacks: if True, fovs whose raw files have fewer
+                    frames than the deepest globally-configured z position
+                    (e.g. acquisition was trimmed to each fov's own tissue
+                    depth) are tolerated instead of raising an error; see
+                    DataOrganization and get_z_positions(fov=...). Defaults
+                    to False to preserve behavior for datasets where every
+                    fov shares the same z range.
         """
         super().__init__(dataDirectoryName, dataHome, analysisHome,
                          microscopeParametersName)
 
         self.dataOrganization = dataorganization.DataOrganization(
-                self, dataOrganizationName)
+                self, dataOrganizationName,
+                allowRaggedZStacks=allowRaggedZStacks)
         if codebookNames:
             self.codebooks = [codebook.Codebook(self, name, i)
                               for i, name in enumerate(codebookNames)]
@@ -1132,32 +1278,64 @@ class MERFISHDataSet(ImageDataSet):
         # TODO - this should be implemented using the position of the fov.
         return self.positions.loc[fov]['X'], self.positions.loc[fov]['Y']
 
-    def z_index_to_position(self, zIndex: int) -> float:
-        """Get the z position associated with the provided z index."""
+    def z_index_to_position(self, zIndex: int, fov: int = None) -> float:
+        """Get the z position associated with the provided z index.
 
-        return self.get_z_positions()[zIndex]
+        Args:
+            fov: if provided, the z index is resolved against this fov's
+                    own available z positions (see get_z_positions)
+                    instead of the full dataset-wide z list.
+        """
 
-    def position_to_z_index(self, zPosition: float) -> int:
+        return self.get_z_positions(fov)[zIndex]
+
+    def position_to_z_index(self, zPosition: float, fov: int = None) -> int:
         """Get the z index associated with the specified z position
-        
+
+        Args:
+            fov: if provided, the z position is resolved against this
+                    fov's own available z positions (see get_z_positions)
+                    instead of the full dataset-wide z list.
         Raises:
              Exception: If the provided z position is not specified in this
                 dataset
         """
 
-        zIndex = np.where(self.get_z_positions() == zPosition)[0]
+        # np.array(...) is required here (rather than comparing the plain
+        # list get_z_positions returns) since a Python list compared to a
+        # scalar with == does not broadcast elementwise and np.where on
+        # the resulting scalar False raises ValueError instead of the
+        # intended "not found" Exception below
+        zIndex = np.where(np.array(self.get_z_positions(fov)) == zPosition)[0]
         if len(zIndex) == 0:
             raise Exception('Requested z=%0.2f position not found.' % zPosition)
 
         return zIndex[0]
 
-    def get_z_positions(self) -> List[float]:
+    def get_z_positions(self, fov: int = None) -> List[float]:
         """Get the z positions present in this dataset.
 
+        Args:
+            fov: if provided, the z positions are restricted to those
+                    actually available for this fov. If None (default),
+                    the full, dataset-wide z position list is returned.
         Returns:
-            A sorted list of all unique z positions
+            A sorted list of unique z positions
         """
-        return self.dataOrganization.get_z_positions()
+        return self.dataOrganization.get_z_positions(fov)
+
+    def get_z_positions_segmentation(self, fov: int = None) -> List[float]:
+        """Get the z positions of the segmentation (dapi/polyt) channels
+        present in this dataset.
+
+        Args:
+            fov: if provided, the z positions are restricted to those
+                    actually available for this fov. If None (default),
+                    the full, dataset-wide z position list is returned.
+        Returns:
+            A sorted list of unique z positions
+        """
+        return self.dataOrganization.get_z_positions_segmentation(fov)
 
     def get_fovs(self) -> List[int]:
         return self.dataOrganization.get_fovs()
@@ -1176,6 +1354,30 @@ class MERFISHDataSet(ImageDataSet):
         return self.load_image(
                 self.dataOrganization.get_fiducial_filename(dataChannel, fov),
                 self.dataOrganization.get_fiducial_frame_index(dataChannel))
+
+    ### added for 3D MERFISH
+    #  returns the absolute value of the piezo
+    def get_raw_image_zstage_positions(self, dataChannel, fov):
+        off_init = self.get_image_stagez_from_off(
+            self.dataOrganization.get_image_filename(dataChannel, fov))
+        zoffsets = off_init + np.array(self.get_z_positions())
+        return zoffsets
+
+    #  returns the absolute value of the piezo for the fiducial frame
+    def get_fiducial_image_zstage_positions(self, dataChannel, fov):
+        off_init = self.get_image_stagez_from_off(
+            self.dataOrganization.get_fiducial_filename(dataChannel, fov))
+        zoffsets = off_init + np.array(
+            self.dataOrganization.get_fiducial3D_stack_frame_zPos(
+                dataChannel))
+        return zoffsets
+
+    def get_fiducial3D_stack(self, dataChannel, fov):
+        return np.array([
+            self.load_image(
+            self.dataOrganization.get_fiducial3D_filename(dataChannel, fov),
+            i) for i in self.dataOrganization.get_fiducial3D_stack_frame_indices(dataChannel)])
+    ###
 
     def _import_positions_from_metadata(self):
         positionData = []

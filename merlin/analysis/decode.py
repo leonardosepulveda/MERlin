@@ -2,6 +2,8 @@ import numpy as np
 import pandas
 import os
 import tempfile
+import zarr
+import time
 
 from merlin.core import dataset
 from merlin.core import analysistask
@@ -23,7 +25,14 @@ class BarcodeSavingParallelAnalysisTask(analysistask.ParallelAnalysisTask):
 
     def _reset_analysis(self, fragmentIndex: int = None) -> None:
         super()._reset_analysis(fragmentIndex)
-        self.get_barcode_database().empty_database(fragmentIndex)
+
+        ### testing this for resumable decoding ###
+        if 'resumable_z_decoding' not in self.parameters:
+            self.parameters['resumable_z_decoding'] = False
+            print(f'emptying barcode database for fragment {fragmentIndex}')
+            self.get_barcode_database().empty_database(fragmentIndex)
+        elif self.parameters['resumable_z_decoding'] == True:
+            print(f'keeping barcode database for fragment {fragmentIndex}')
 
     def get_barcode_database(self) -> barcodedb.BarcodeDB:
         """ Get the barcode database this analysis task saves barcodes into.
@@ -47,6 +56,8 @@ class Decode(BarcodeSavingParallelAnalysisTask):
             self.parameters['crop_width'] = 100
         if 'write_decoded_images' not in self.parameters:
             self.parameters['write_decoded_images'] = True
+        if 'write_decoded_FOVs' not in self.parameters:
+            self.parameters['write_decoded_FOVs'] = list(range(self.fragment_count()))
         if 'minimum_area' not in self.parameters:
             self.parameters['minimum_area'] = 0
         if 'distance_threshold' not in self.parameters:
@@ -64,9 +75,24 @@ class Decode(BarcodeSavingParallelAnalysisTask):
                 self.parameters['z_duplicate_zPlane_threshold'] = 1
             if 'z_duplicate_xy_pixel_threshold' not in self.parameters:
                 self.parameters['z_duplicate_xy_pixel_threshold'] = np.sqrt(2)
+        
+        # special case where every FOV was optimized
+        if "single_fov_optimization" not in self.parameters:
+            self.parameters['single_fov_optimization'] = False
+        # only decode in segmentation mask
+        if 'use_segmentation_mask' not in self.parameters:
+            self.parameters['use_segmentation_mask'] = False
+
+        # gpu decoding
+        if 'use_gpu' not in self.parameters:
+            self.parameters['use_gpu'] = False
 
         self.cropWidth = self.parameters['crop_width']
         self.imageSize = dataSet.get_image_dimensions()
+
+        # method for resumable decoding
+        # load the previous barcodes
+        # finds unique z planes then can assume that z plane has been decoded
 
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
@@ -81,7 +107,8 @@ class Decode(BarcodeSavingParallelAnalysisTask):
         dependencies = [self.parameters['preprocess_task'],
                         self.parameters['optimize_task'],
                         self.parameters['global_align_task']]
-
+        if self.parameters['use_segmentation_mask']:
+            dependencies += [self.parameters['use_segmentation_mask']]
         return dependencies
 
     def get_codebook(self) -> Codebook:
@@ -103,40 +130,70 @@ class Decode(BarcodeSavingParallelAnalysisTask):
 
         codebook = self.get_codebook()
         decoder = decoding.PixelBasedDecoder(codebook)
-        scaleFactors = optimizeTask.get_scale_factors()
-        backgrounds = optimizeTask.get_backgrounds()
+
+        # for single FOV optimization
+        if self.parameters['single_fov_optimization']:
+            scaleFactors = optimizeTask.get_scale_factors(fragmentIndex)
+            backgrounds = optimizeTask.get_backgrounds(fragmentIndex)
+        else:
+            scaleFactors = optimizeTask.get_scale_factors()
+            backgrounds = optimizeTask.get_backgrounds()
+        
         chromaticCorrector = optimizeTask.get_chromatic_corrector()
 
-        zPositionCount = len(self.dataSet.get_z_positions())
+        zPositions = self.dataSet.get_z_positions(fragmentIndex)
+        zPositionCount = len(zPositions)
         bitCount = codebook.get_bit_count()
         imageShape = self.dataSet.get_image_dimensions()
-        decodedImages = np.zeros((zPositionCount, *imageShape), dtype=np.int16)
-        magnitudeImages = np.zeros((zPositionCount, *imageShape),
-                                   dtype=np.float32)
-        distances = np.zeros((zPositionCount, *imageShape), dtype=np.float32)
+
+        # get decoded image path for a zarr file
+        # this may be easier way to save
+        zarr_path = self.dataSet._analysis_zarr_name(self, "decoded", fragmentIndex)
+        zarr_out = zarr.open(zarr_path, mode = 'a',
+                          shape = (zPositionCount, 3, *imageShape),
+                          chunks = (1,3,*imageShape),
+                          dtype = np.float32)
+
+        # find what z planes exist in the barcode file already
+        self.decoded_z_planes = self._get_decoded_z_planes(fragmentIndex)
 
         if not decode3d:
-            for zIndex in range(zPositionCount):
-                di, pm, d = self._process_independent_z_slice(
-                    fragmentIndex, zIndex, chromaticCorrector, scaleFactors,
-                    backgrounds, preprocessTask, decoder
-                )
+            #for zIndex in range(zPositions):
+            for zIndex, z in enumerate(zPositions):
 
-                decodedImages[zIndex, :, :] = di
-                magnitudeImages[zIndex, :, :] = pm
-                distances[zIndex, :, :] = d
+                if zIndex in self.decoded_z_planes:
+                    print(f'barcodes in zIndex {zIndex} detected. Skipping plane!')
+                    # checked if the z index is already in the barcode database
+                    # dangerous if trying to redecode with different parameters
+                    # see parameter['resumable_z_decoding']
+                    pass 
+            
+                else:
+                    di, pm, d = self._process_independent_z_slice(
+                        fragmentIndex, zIndex, chromaticCorrector, scaleFactors,
+                        backgrounds, preprocessTask, decoder)
 
-        else:
+                    if self.parameters['write_decoded_images'] and (fragmentIndex in self.parameters['write_decoded_FOVs']):
+                        zarr_out[zIndex,0,:,:] = di
+                        zarr_out[zIndex,1,:,:] = pm
+                        zarr_out[zIndex,2,:,:] = d
+
+        if decode3d:
+            # here is where we would need to save all the planes in memory
+            decodedImages = np.zeros((zPositionCount, *imageShape), dtype= np.int16) # needs to support -1
+            magnitudeImages = np.zeros((zPositionCount, *imageShape), dtype= np.float32)
+            distances = np.zeros((zPositionCount, *imageShape), dtype= np.float32)
+
             with tempfile.TemporaryDirectory() as tempDirectory:
                 if self.parameters['memory_map']:
                     normalizedPixelTraces = np.memmap(
                         os.path.join(tempDirectory, 'pixel_traces.dat'),
-                        mode='w+', dtype=np.float32,
+                        mode='w+', dtype = np.float32,
                         shape=(zPositionCount, bitCount, *imageShape))
                 else:
                     normalizedPixelTraces = np.zeros(
                         (zPositionCount, bitCount, *imageShape),
-                        dtype=np.float32)
+                        dtype = np.float32)
 
                 for zIndex in range(zPositionCount):
                     imageSet = preprocessTask.get_processed_image_set(
@@ -161,38 +218,74 @@ class Decode(BarcodeSavingParallelAnalysisTask):
                     distances, fragmentIndex)
 
                 del normalizedPixelTraces
+                
+                # leave this in case for writing 3d decoding data
+                if self.parameters['write_decoded_images'] and (fragmentIndex in self.parameters['write_decoded_FOVs']):
+                    self._save_decoded_images(
+                        fragmentIndex, zPositionCount, decodedImages, magnitudeImages,
+                        distances)        
 
-        if self.parameters['write_decoded_images']:
-            self._save_decoded_images(
-                fragmentIndex, zPositionCount, decodedImages, magnitudeImages,
-                distances)
 
         if self.parameters['remove_z_duplicated_barcodes']:
             bcDB = self.get_barcode_database()
             bc = self._remove_z_duplicate_barcodes(
-                bcDB.get_barcodes(fov=fragmentIndex))
+                bcDB.get_barcodes(fov=fragmentIndex), fragmentIndex)
             bcDB.empty_database(fragmentIndex)
             bcDB.write_barcodes(bc, fov=fragmentIndex)
 
+    # finding what z planes are already in the barcode file
+    def _get_decoded_z_planes(self, fragmentIndex):
+            if self.parameters['resumable_z_decoding']:
+                    print('resumable decoding enabled!\nbarcode files are not emptied!')
+                    bcDB = self.get_barcode_database()
+                    bcs = bcDB.get_barcodes(fov=fragmentIndex)
+                    decoded_z_planes = bcs.z.unique()
+            else:
+                decoded_z_planes = [] # otherwise set to empty so all z planes are decoded
+            return decoded_z_planes
+
+    # used to load in the segmentation mask
+    def _get_segmentation_mask(self, fovIndex, zIndex):
+        segmentTask = self.dataSet.load_analysis_task(
+            self.parameters['use_segmentation_mask'])
+        return segmentTask._load_mask_image(fovIndex, zIndex)
 
     def _process_independent_z_slice(
             self, fov: int, zIndex: int, chromaticCorrector, scaleFactors,
             backgrounds, preprocessTask, decoder):
 
+        t0 = time.time()
         imageSet = preprocessTask.get_processed_image_set(
             fov, zIndex, chromaticCorrector)
         imageSet = imageSet.reshape(
             (imageSet.shape[0], imageSet.shape[-2], imageSet.shape[-1]))
+        t1 = time.time()
+
+        decodeMask = None
+        if self.parameters['use_segmentation_mask']:
+            decodeMask = self._get_segmentation_mask(fov, zIndex)
 
         di, pm, npt, d = decoder.decode_pixels(
             imageSet, scaleFactors, backgrounds,
             lowPassSigma=self.parameters['lowpass_sigma'],
-            distanceThreshold=self.parameters['distance_threshold'])
+            distanceThreshold=self.parameters['distance_threshold'],
+            decodeMask = decodeMask,
+            use_gpu = self.parameters['use_gpu'])
+        t2 = time.time()
+
         self._extract_and_save_barcodes(
             decoder, di, pm, npt, d, fov, zIndex)
+        t3 = time.time()
+
+        print(f'decoding fov {fov} zslice {zIndex}')
+        print(f'time retrieving fov {fov} zindex {zIndex}: {t1-t0}')
+        print(f'time decoding fov {fov} zindex {zIndex}: {t2-t1}')
+        print(f'time extracting fov {fov} zindex {zIndex}: {t3-t2}')
+        print(f'total time in fov {fov} zindex {zIndex}: {t3-t0}')
 
         return di, pm, d
 
+    # leave this for 3d decoding, currently zarr is used for easier resumable decoding
     def _save_decoded_images(self, fov: int, zPositionCount: int,
                              decodedImages: np.ndarray,
                              magnitudeImages: np.ndarray,
@@ -202,14 +295,17 @@ class Decode(BarcodeSavingParallelAnalysisTask):
             with self.dataSet.writer_for_analysis_images(
                     self, 'decoded', fov) as outputTif:
                 for i in range(zPositionCount):
-                    outputTif.save(decodedImages[i].astype(np.float32),
+                    outputTif.write(decodedImages[i].astype(np.float32),
                                    photometric='MINISBLACK',
+                                   contiguous=True,
                                    metadata=imageDescription)
-                    outputTif.save(magnitudeImages[i].astype(np.float32),
+                    outputTif.write(magnitudeImages[i].astype(np.float32),
                                    photometric='MINISBLACK',
+                                   contiguous=True,
                                    metadata=imageDescription)
-                    outputTif.save(distanceImages[i].astype(np.float32),
+                    outputTif.write(distanceImages[i].astype(np.float32),
                                    photometric='MINISBLACK',
+                                   contiguous=True,
                                    metadata=imageDescription)
 
     def _extract_and_save_barcodes(
@@ -223,15 +319,16 @@ class Decode(BarcodeSavingParallelAnalysisTask):
         minimumArea = self.parameters['minimum_area']
 
         self.get_barcode_database().write_barcodes(
-            pandas.concat([decoder.extract_barcodes_with_index(
-                i, decodedImage, pixelMagnitudes, pixelTraces, distances, fov,
-                self.cropWidth, zIndex, globalTask, minimumArea)
-                for i in range(self.get_codebook().get_barcode_count())]),
-            fov=fov)
+            decoder.extract_barcodes_with_index(
+                decodedImage, pixelMagnitudes, pixelTraces, distances, fov,
+                self.cropWidth, zIndex, globalTask, minimumArea),
+                fov = fov
+                )
 
-    def _remove_z_duplicate_barcodes(self, bc):
+    def _remove_z_duplicate_barcodes(self, bc, fov):
         bc = barcodefilters.remove_zplane_duplicates_all_barcodeids(
             bc, self.parameters['z_duplicate_zPlane_threshold'],
             self.parameters['z_duplicate_xy_pixel_threshold'],
-            self.dataSet.get_z_positions())
+            self.dataSet.get_z_positions(fov))
         return bc
+

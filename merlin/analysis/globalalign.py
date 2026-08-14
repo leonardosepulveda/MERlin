@@ -132,7 +132,7 @@ class SimpleGlobalAlignment(GlobalAlignment):
             return (fovStart[0] + fovCoordinates[0]*micronsPerPixel,
                     fovStart[1] + fovCoordinates[1]*micronsPerPixel)
         elif len(fovCoordinates) == 3:
-            zPositions = self.dataSet.get_z_positions()
+            zPositions = self.dataSet.get_z_positions(fov)
             return (np.interp(fovCoordinates[0], np.arange(len(zPositions)),
                               zPositions),
                     fovStart[0] + fovCoordinates[1]*micronsPerPixel,
@@ -159,7 +159,7 @@ class SimpleGlobalAlignment(GlobalAlignment):
         """
 
         return [x for y in (self.fov_coordinates_to_global(fov, (0, 0)),
-                            self.fov_coordinates_to_global(fov, (2048, 2048)))
+                            self.fov_coordinates_to_global(fov, (2048, 2048))) # this seems like a bug if the image is not 2048x2048
                 for x in y]
 
     def global_coordinates_to_fov(self, fov, globalCoordinates):

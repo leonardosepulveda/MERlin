@@ -3,6 +3,39 @@
 Curated current-state summary. See `prompt_history/` for full provenance of each item
 below; this file only tracks what's true *now* and the open next step.
 
+## LeastSquaresGlobalAlignment: camera/stage position correction (2026-08-13)
+
+New `merlin/util/globalpositions.py` + `merlin.analysis.globalalign.
+LeastSquaresGlobalAlignment` (branch `feature/least-squares-alignment`, stacked on
+`feature/verification-figures`). Ports the "global_lsq" method from the sibling
+`MERci` project (`251225_LT027_saving_time/MERci/src/MERci/acquisition/
+camera_rotation.py`), which a real-data comparison there (`notebooks/tests/
+compare_stitching_correction_methods.ipynb`) found to be the best of several
+candidate corrections for a real, small, highly direction-dependent nominal-vs-true
+fov position error (most likely stage backlash, not a fixed camera rotation -- a
+single global affine transform provably cannot correct it, see
+`fit_global_positions`'s own docstring). Registers every fov against its real
+4-connected neighbours via the fiducial channel, filters outlier registrations (MAD
+threshold), then jointly solves a sparse least-squares system for every fov's
+corrected position (`scipy.sparse.linalg.lsqr`, `atol=btol=1e-12` -- looser default
+tolerances silently under-converge on a dense system, per MERci's own prior finding).
+`CorrelationGlobalAlignment`'s existing stub was left untouched, per explicit
+instruction -- this is a new, separate class, not a rewrite of it. Also implements two
+verification figures (`direction_reliability`, `grid_overlay`, ported from the same
+MERci notebook's sections 7 and 11) via the sibling branch's new per-task figures hook.
+
+Verified: phase-correlation sign convention confirmed via a synthetic known-shift
+test (both x and y independently) before trusting it -- this is the same class of
+bug (a backwards row-crop convention) the sibling MERci project already hit once for
+real. `test/test_globalpositions.py` (9 tests, pure algorithm) and
+`test/test_globalalign.py` (4 tests, including a real `.run()` against the
+`simple_merfish_data` fixture, and confirming both verification-figure PNGs appear)
+all pass. Full suite (`pytest -k "not slowtest"`) repeatedly: 123-130 passed across
+runs (same Windows teardown non-determinism noted below); every failure traces to the
+same two already-documented pre-existing issues, confirmed unrelated to this change.
+See `prompt_history/2026_08_13_1927_implement_least_squares_global_alignment.md` for
+full detail.
+
 ## General per-task verification-figures mechanism (2026-08-14)
 
 Added a new, general hook -- `AnalysisTask._generate_verification_figures()` (no-op

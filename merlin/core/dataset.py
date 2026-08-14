@@ -145,6 +145,31 @@ class DataSet(object):
         figure.savefig(savePath + '.png', pad_inches=0)
         figure.savefig(savePath + '.pdf', transparent=True, pad_inches=0)
 
+    def save_task_figure(self, analysisTask: TaskOrName, figure: plt.Figure,
+                         figureName: str) -> None:
+        """Save a quick, on-the-fly verification figure for an analysis task
+        into one shared 'figures' folder at this data set's analysis root
+        (a sibling of every task's own output folder), named
+        '{taskName}.{figureName}.png' -- distinct from save_figure above
+        (used by the separate merlin.plots/PlotPerformance framework), which
+        nests figures under each task's own output folder instead. Meant to
+        be called from AnalysisTask._generate_verification_figures, so every
+        task's own quick self-check figures land in one place regardless of
+        which task produced them.
+
+        Args:
+            analysisTask: the analysis task that generated this figure.
+            figure: the figure handle for the figure to save
+            figureName: the name of the file to store the figure in,
+                    excluding extension
+        """
+        taskName = analysisTask if isinstance(analysisTask, str) \
+            else analysisTask.get_analysis_name()
+        figuresDir = os.sep.join([self.analysisPath, 'figures'])
+        os.makedirs(figuresDir, exist_ok=True)
+        savePath = os.sep.join([figuresDir, '.'.join([taskName, figureName])])
+        figure.savefig(savePath + '.png', dpi=150, bbox_inches='tight')
+
     def figure_exists(self, analysisTask: TaskOrName, figureName: str,
                       subdirectory: str = 'figures') -> bool:
         """Determine if a figure with the specified name has been

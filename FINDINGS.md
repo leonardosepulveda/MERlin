@@ -3,6 +3,49 @@
 Curated current-state summary. See `prompt_history/` for full provenance of each item
 below; this file only tracks what's true *now* and the open next step.
 
+## General per-task verification-figures mechanism (2026-08-14)
+
+Added a new, general hook -- `AnalysisTask._generate_verification_figures()` (no-op
+default, overridable), called automatically and safely (exceptions logged, never
+raised) exactly once a task completes: from `AnalysisTask.run()` for a plain task, and
+from `ParallelAnalysisTask.is_complete()` (reusing its existing "first caller after the
+last fragment finishes" idiom) for a parallel one. Figures are saved via the new
+`dataset.save_task_figure` into one shared `{analysisPath}/figures/` folder (sibling to
+every task's own output folder), named `{taskName}.{figureName}.png`. This is
+deliberately separate from the existing `merlin.plots`/`PlotEngine` framework
+(`merlin/plots/_base.py`, driven by the standalone `PlotPerformance` task) -- that one
+builds heavier cross-task summary plots nested under `PlotPerformance`'s own folder and
+needs explicit pipeline wiring; this new hook is for a single task's own quick,
+automatic self-check, no wiring needed beyond overriding the method.
+
+Verified via `test/test_analysistask_figures.py` (4 tests, all passing, built on
+`merlin.analysis.testtask`'s existing dummy task classes): default no-op, a figure
+actually appearing after `.run()` completes, a deliberately-raising figure method not
+breaking the task, and a parallel task's figure appearing exactly once, only after its
+LAST fragment (not per-fragment). Full fast suite (`pytest -k "not slowtest"`) re-run
+repeatedly afterward, since this touches the core `AnalysisTask`/`ParallelAnalysisTask`
+base classes every task in the pipeline extends: 114-117 passed across runs (this
+Windows environment's known teardown non-determinism, below, shifts the exact count
+run to run); every failure traces to the same two already-documented pre-existing
+issues (confirmed by re-running one flagged failure, `test_get_analysis_tasks`, alone
+with a clean start -- it passed). See `prompt_history/
+2026_08_14_1218_add_verification_figures_mechanism.md` for full detail.
+
+## Test environment (merlin_env, built 2026-08-14)
+
+A new `merlin_env` (`C:\Users\las262\AppData\Local\miniforge3\envs\merlin_env`) was
+built for running the real test suite on this machine (which had no Python installed
+at all beforehand): minimal `environment.yml` (python=3.12, ipykernel, pip only --
+conda solving the full requirements.txt directly failed on tensorflow/snakemake,
+resolving to ancient python-3.6-only builds) plus pip installs mirroring a real,
+working Harvard-cluster install recipe (torch/torchvision CPU, cellpose, big-fish,
+then `pip install -e .`, with `setuptools==73.0.1` re-pinned after `pip install -e .`
+transitively upgraded it and broke `pkg_resources`). Could not pin
+`snakemake==7.32.4` as that recipe does -- its `datrie` dependency needs MSVC Build
+Tools, not installed on this machine -- so `test_snakemake.py` remains broken here
+(pre-existing, unrelated to this session's changes). `geopandas` also needed (not in
+requirements.txt; matches the older `merlin_test` env's own history below).
+
 ## tifffile TiffWriter.write() migration (2026-08-01)
 
 New branch `fix/tifffile-writer-api` (off `feature/ragged-z-stacks`, kept deliberately

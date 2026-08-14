@@ -1,10 +1,15 @@
 from abc import abstractmethod
+import logging
 import numpy as np
+import pandas as pd
+import matplotlib.patches as mpatches
+from matplotlib import pyplot as plt
 from typing import Tuple
 from typing import List
 from shapely import geometry
 
 from merlin.core import analysistask
+from merlin.util import globalpositions
 
 
 class GlobalAlignment(analysistask.AnalysisTask):
@@ -125,8 +130,18 @@ class SimpleGlobalAlignment(GlobalAlignment):
     def get_dependencies(self):
         return []
 
+    def _get_fov_offset(self, fov: int) -> Tuple[float, float]:
+        """The fov's (x, y) offset in the global coordinate system, in
+        microns. Factored out (rather than calling
+        ``self.dataSet.get_fov_offset`` directly below) so a subclass
+        (e.g. LeastSquaresGlobalAlignment) can substitute a corrected
+        offset while reusing every other coordinate-transform method
+        unchanged.
+        """
+        return self.dataSet.get_fov_offset(fov)
+
     def fov_coordinates_to_global(self, fov, fovCoordinates):
-        fovStart = self.dataSet.get_fov_offset(fov)
+        fovStart = self._get_fov_offset(fov)
         micronsPerPixel = self.dataSet.get_microns_per_pixel()
         if len(fovCoordinates) == 2:
             return (fovStart[0] + fovCoordinates[0]*micronsPerPixel,
@@ -262,3 +277,236 @@ class CorrelationGlobalAlignment(GlobalAlignment):
         fov2 = self.dataSet.get_fiducial_image(0, 1)
 
         return fov1, fov2
+
+
+class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
+
+    """
+    A global alignment that corrects each fov's nominal (stage-reported)
+    position by jointly solving a sparse least-squares system built from
+    real pairwise image-registration measurements between every 4-connected
+    neighbouring fov -- the "global_lsq" method identified, on real
+    several-hundred-fov data, as the most accurate of several candidate
+    correction strategies compared in the sibling MERci project
+    (`251225_LT027_saving_time/MERci/notebooks/tests/
+    compare_stitching_correction_methods.ipynb`; algorithm ported in
+    `merlin.util.globalpositions`). See that module's docstring for why a
+    single global affine transform (this task's `CorrelationGlobalAlignment`
+    sibling was originally sketched as, per its own TODO comment) cannot
+    correct this class of error at all, and why a joint per-fov solve is
+    needed instead.
+
+    Reuses every coordinate-transform method from `SimpleGlobalAlignment`
+    unchanged (`fov_coordinates_to_global`, `fov_to_global_transform`,
+    `get_global_extent`, etc.) by overriding only `_get_fov_offset` to
+    return the corrected position once `_run_analysis` has computed it.
+    """
+
+    def __init__(self, dataSet, parameters=None, analysisName=None):
+        super().__init__(dataSet, parameters, analysisName)
+        self._correctedPositions = None
+
+        if 'fiducial_data_channel' not in self.parameters:
+            self.parameters['fiducial_data_channel'] = 0
+        if 'overlap_fraction' not in self.parameters:
+            # None -> inferred in _run_analysis from the measured grid step
+            # size vs. the fov's own width, same convention the real-data
+            # comparison this method is ported from used.
+            self.parameters['overlap_fraction'] = None
+        if 'tolerance_fraction' not in self.parameters:
+            self.parameters['tolerance_fraction'] = 0.25
+        if 'mad_threshold' not in self.parameters:
+            self.parameters['mad_threshold'] = 5.0
+        if 'upsample_factor' not in self.parameters:
+            self.parameters['upsample_factor'] = 100
+        if 'lsqr_atol' not in self.parameters:
+            self.parameters['lsqr_atol'] = 1e-12
+        if 'lsqr_btol' not in self.parameters:
+            self.parameters['lsqr_btol'] = 1e-12
+
+    def get_estimated_memory(self):
+        return 1000
+
+    def get_estimated_time(self):
+        return 60
+
+    def get_dependencies(self):
+        return []
+
+    def _get_fov_offset(self, fov: int) -> Tuple[float, float]:
+        return self._load_corrected_positions()[fov]
+
+    def _load_corrected_positions(self) -> dict:
+        if self._correctedPositions is None:
+            positionsDF = self.dataSet.load_dataframe_from_csv(
+                'corrected_positions', self)
+            self._correctedPositions = {
+                int(row.fov): (float(row.x), float(row.y))
+                for row in positionsDF.itertuples()
+            }
+        return self._correctedPositions
+
+    def _run_analysis(self):
+        fovs = self.dataSet.get_fovs()
+        nominalPositions = {f: tuple(self.dataSet.get_fov_offset(f))
+                            for f in fovs}
+        micronsPerPixel = self.dataSet.get_microns_per_pixel()
+        frameWidthUm = self.dataSet.get_image_dimensions()[0] * micronsPerPixel
+
+        stepSizeUm = globalpositions.estimate_step_size_um(nominalPositions)
+        overlapFraction = self.parameters['overlap_fraction']
+        if overlapFraction is None:
+            overlapFraction = max(
+                0.0, 1.0 - stepSizeUm / frameWidthUm) if frameWidthUm > 0 else 0.0
+
+        fiducialChannel = self.parameters['fiducial_data_channel']
+
+        def load_frame(fov):
+            return self.dataSet.get_fiducial_image(fiducialChannel, fov)
+
+        correspondences = globalpositions.sample_neighbor_correspondences(
+            fov_ids=fovs, positions=nominalPositions, load_frame=load_frame,
+            step_size_um=stepSizeUm, pixel_size_um=micronsPerPixel,
+            overlap_fraction=overlapFraction,
+            tolerance_fraction=self.parameters['tolerance_fraction'],
+            upsample_factor=self.parameters['upsample_factor'])
+
+        kept, rejected = globalpositions.filter_correspondence_outliers(
+            correspondences, mad_threshold=self.parameters['mad_threshold'])
+
+        correction = globalpositions.fit_global_positions(
+            kept, nominalPositions,
+            lsqr_atol=self.parameters['lsqr_atol'],
+            lsqr_btol=self.parameters['lsqr_btol'])
+
+        # Merge over the full nominal grid as a fallback for any fov outside
+        # the solved component(s) -- e.g. an isolated fov with no surviving
+        # neighbour correspondence.
+        correctedPositions = {**nominalPositions, **correction.positions}
+
+        self.dataSet.save_dataframe_to_csv(
+            pd.DataFrame([
+                {'fov': f, 'x': correctedPositions[f][0], 'y': correctedPositions[f][1]}
+                for f in fovs
+            ]),
+            'corrected_positions', self)
+
+        if correspondences:
+            keptKeys = {(c.anchor_fov, c.neighbor_fov, c.direction) for c in kept}
+            self.dataSet.save_dataframe_to_csv(
+                pd.DataFrame([
+                    {'anchor_fov': c.anchor_fov, 'neighbor_fov': c.neighbor_fov,
+                     'direction': c.direction,
+                     'nominal_x': c.nominal_xy[0], 'nominal_y': c.nominal_xy[1],
+                     'measured_x': c.measured_xy[0], 'measured_y': c.measured_xy[1],
+                     'error': c.error,
+                     'kept': (c.anchor_fov, c.neighbor_fov, c.direction) in keptKeys}
+                    for c in correspondences
+                ]),
+                'neighbor_correspondences', self)
+
+        self.dataSet.save_json_analysis_result(
+            {'n_correspondences': len(correspondences), 'n_kept': len(kept),
+             'n_rejected': len(rejected), 'n_components': correction.n_components,
+             'residual_rms_um': correction.residual_rms_um,
+             'step_size_um': stepSizeUm, 'overlap_fraction': overlapFraction},
+            'correction_summary', self.analysisName)
+
+    def _generate_verification_figures(self) -> None:
+        # Each plot is independently guarded -- e.g. an isolated fov with no
+        # surviving neighbour correspondence at all still gets a grid-overlay
+        # figure even though the direction-reliability one has nothing to show.
+        for plotMethod in (self._plot_direction_reliability, self._plot_grid_overlay):
+            try:
+                plotMethod()
+            except Exception:
+                logging.getLogger(self.analysisName).exception(
+                    'Failed to generate a %s verification figure' % plotMethod.__name__)
+
+    def _plot_direction_reliability(self) -> None:
+        """Per-direction deviation scatter -- ``measured_xy - nominal_xy``
+        for every KEPT correspondence, colored by direction. A tight cluster
+        for a direction means that direction's registration is reproducible;
+        mirrors the real-data comparison in the sibling MERci project's
+        `notebooks/tests/compare_stitching_correction_methods.ipynb` (section
+        7), which is what first showed this dataset's error is a real,
+        per-direction bias rather than noise.
+        """
+        correspondenceDF = self.dataSet.load_dataframe_from_csv(
+            'neighbor_correspondences', self)
+        kept = correspondenceDF[correspondenceDF['kept']]
+        if kept.empty:
+            return
+
+        dx = kept['measured_x'] - kept['nominal_x']
+        dy = kept['measured_y'] - kept['nominal_y']
+        directionColors = {'+x': 'tab:orange', '-x': 'tab:green',
+                           '+y': 'tab:blue', '-y': 'tab:red'}
+
+        fig, ax = plt.subplots(figsize=(6, 6))
+        for direction, color in directionColors.items():
+            mask = (kept['direction'] == direction).to_numpy()
+            if mask.any():
+                ax.scatter(dx[mask], dy[mask], s=14, alpha=0.6, color=color,
+                          label=direction)
+        ax.axhline(0, color='0.85', lw=0.8, zorder=0)
+        ax.axvline(0, color='0.85', lw=0.8, zorder=0)
+        ax.set_aspect('equal')
+        ax.set_xlabel('dx = measured - nominal (microns)')
+        ax.set_ylabel('dy = measured - nominal (microns)')
+        ax.set_title('%s: per-direction deviation (%i kept correspondences)'
+                     % (self.analysisName, len(kept)))
+        ax.legend()
+        self.dataSet.save_task_figure(self, fig, 'direction_reliability')
+        plt.close(fig)
+
+    def _plot_grid_overlay(self) -> None:
+        """Overlay each fov's corrected boundary on its original (nominal)
+        boundary, at true physical scale -- mirrors the real-data comparison
+        in the sibling MERci project's `notebooks/tests/
+        compare_stitching_correction_methods.ipynb` (section 11), where a
+        visible gap between the gray (original) and colored (corrected)
+        squares IS the real, physical size of the correction.
+        """
+        fovs = self.dataSet.get_fovs()
+        nominalPositions = {f: tuple(self.dataSet.get_fov_offset(f)) for f in fovs}
+        correctedPositions = self._load_corrected_positions()
+        micronsPerPixel = self.dataSet.get_microns_per_pixel()
+        frameWidthUm = self.dataSet.get_image_dimensions()[0] * micronsPerPixel
+        half = frameWidthUm / 2
+
+        nominalXY = np.array([nominalPositions[f] for f in fovs])
+        correctedXY = np.array([correctedPositions[f] for f in fovs])
+        shiftUm = np.hypot(correctedXY[:, 0] - nominalXY[:, 0],
+                           correctedXY[:, 1] - nominalXY[:, 1])
+        margin = frameWidthUm * 2
+
+        fig, ax = plt.subplots(figsize=(8, 8))
+        for x, y in nominalXY:
+            ax.add_patch(mpatches.Rectangle(
+                (x - half, y - half), frameWidthUm, frameWidthUm,
+                fill=False, edgecolor='0.75', linewidth=0.6, zorder=1))
+        for x, y in correctedXY:
+            ax.add_patch(mpatches.Rectangle(
+                (x - half, y - half), frameWidthUm, frameWidthUm,
+                fill=False, edgecolor='tab:green', linewidth=0.6, zorder=2))
+
+        ax.set_xlim(nominalXY[:, 0].min() - margin, nominalXY[:, 0].max() + margin)
+        # Inverted, matching the reference plot's image-like display
+        # convention (row 0 / smallest y at the top) -- a display choice
+        # only, not a correctness one (unlike crop_overlap's row convention).
+        ax.set_ylim(nominalXY[:, 1].max() + margin, nominalXY[:, 1].min() - margin)
+        ax.set_aspect('equal')
+        ax.set_xlabel('x (microns)')
+        ax.set_ylabel('y (microns)')
+        ax.legend(handles=[
+            mpatches.Patch(facecolor='none', edgecolor='0.75',
+                          label='original (nominal) fov boundary'),
+            mpatches.Patch(facecolor='none', edgecolor='tab:green',
+                          label='corrected fov boundary'),
+        ], loc='upper right')
+        ax.set_title(
+            '%s: corrected vs. nominal fov grid (mean shift=%.3f um, max=%.3f um)'
+            % (self.analysisName, shiftUm.mean(), shiftUm.max()))
+        self.dataSet.save_task_figure(self, fig, 'grid_overlay')
+        plt.close(fig)

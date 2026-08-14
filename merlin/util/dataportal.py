@@ -96,8 +96,23 @@ class LocalDataPortal(DataPortal):
             return LocalFilePortal(os.path.join(self._basePath, fileName))
 
     def list_files(self, extensionList=None):
-        allFiles = [os.path.join(self._basePath, currentFile)
-                    for currentFile in os.listdir(self._basePath)]
+        # Recurse into subdirectories (e.g. per-round folders like
+        # data/cells/, data/hybs/H01/) rather than os.listdir's single level,
+        # but treat a directory whose name already matches extensionList
+        # (e.g. a .zarr store, itself a directory on disk) as a leaf file
+        # instead of descending into its internal chunk structure.
+        allFiles = []
+        for root, dirs, files in os.walk(self._basePath):
+            prunedDirs = []
+            for currentDir in dirs:
+                fullDirPath = os.path.join(root, currentDir)
+                if extensionList and any(
+                        currentDir.endswith(ext) for ext in extensionList):
+                    allFiles.append(fullDirPath)
+                else:
+                    prunedDirs.append(currentDir)
+            dirs[:] = prunedDirs
+            allFiles.extend(os.path.join(root, f) for f in files)
         return self._filter_file_list(allFiles, extensionList)
 
 

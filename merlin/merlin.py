@@ -144,8 +144,10 @@ def merlin():
     if args.analysis_parameters:
         # This is run in all cases that analysis parameters are provided
         # so that new analysis tasks are generated to match the new parameters
-        with open(os.sep.join(
-                [parametersHome, args.analysis_parameters]), 'r') as f:
+        analysisParametersPath = args.analysis_parameters \
+                if os.path.exists(args.analysis_parameters) \
+                else os.sep.join([parametersHome, args.analysis_parameters])
+        with open(analysisParametersPath, 'r') as f:
             snakefilePath = generate_analysis_tasks_and_snakefile(
                 dataSet, f)
 
@@ -166,8 +168,11 @@ def merlin():
         elif snakefilePath:
             snakemakeParameters = {}
             if args.snakemake_parameters:
-                with open(os.sep.join([m.SNAKEMAKE_PARAMETERS_HOME,
-                                      args.snakemake_parameters])) as f:
+                snakemakeParametersPath = args.snakemake_parameters \
+                        if os.path.exists(args.snakemake_parameters) \
+                        else os.sep.join([m.SNAKEMAKE_PARAMETERS_HOME,
+                                          args.snakemake_parameters])
+                with open(snakemakeParametersPath) as f:
                     snakemakeParameters = json.load(f)
 
             run_with_snakemake(dataSet, snakefilePath, args.core_count,

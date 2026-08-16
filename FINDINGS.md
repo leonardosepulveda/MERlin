@@ -3,6 +3,37 @@
 Curated current-state summary. See `prompt_history/` for full provenance of each item
 below; this file only tracks what's true *now* and the open next step.
 
+## SumSignal channel_names parameter (2026-08-16)
+
+Added an optional `channel_names` parameter to `merlin.analysis.sequential.
+SumSignal` (branch `feature/sumsignal-channel-names`, off `master`), mirroring
+`SmfishSignal`'s existing `channel_names` pattern: when set, restricts which
+sequential (non-barcode) channels get summed to that subset; when absent
+(default), behavior is unchanged (all sequential channels, as before). This
+lets an experiment with multiple sequential channels (e.g. γ-H2AX, CENPA)
+assign `SumSignal`/`SmfishSignal` independently per channel -- the motivating
+case is in `prompt_history/2026_08_16_1433.txt`. Validated fail-fast in
+`__init__` against `get_sequential_rounds()`'s actual gene names, raising
+`analysistask.InvalidParameterException` naming any unrecognized entries (no
+silent empty/wrong output). New `SumSignal._select_channels()` helper does the
+actual filtering, called from `_run_analysis` right after
+`get_sequential_rounds()`; nothing else in the task changed. `SmfishSignal`
+and `get_sequential_rounds()` itself were deliberately left untouched, per
+explicit instruction. A MERci-side follow-up (threading a
+`sum_signal_channel_names` option into `MerlinAnalysisSpec`) is noted as
+out-of-scope future work, not done this session.
+
+Verified via new `test/test_sequential.py` (3 tests: default selects
+everything unchanged, an explicit subset filters correctly against the
+`simple_merfish_data` fixture's real `DAPI`/`polyT` sequential channels, an
+invalid entry raises at construction). Full fast suite
+(`pytest -k "not slowtest"`) re-run afterward: 134 passed; every
+failure/error traces to already-documented pre-existing issues below
+(`test_snakemake.py`, Windows-teardown `PermissionError`s, one intermittent
+zarr-write flake that passed cleanly on rerun) -- none related to this
+change. See `prompt_history/2026_08_16_1505_add_sumsignal_channel_names.md`
+for full detail.
+
 ## LeastSquaresGlobalAlignment: camera/stage position correction (2026-08-13)
 
 New `merlin/util/globalpositions.py` + `merlin.analysis.globalalign.

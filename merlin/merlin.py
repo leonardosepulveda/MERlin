@@ -3,11 +3,13 @@ import cProfile
 import os
 import json
 import sys
-import snakemake
-import time
-import requests
+from pathlib import Path
 from typing import TextIO
 from typing import Dict
+
+from snakemake.api import SnakemakeApi
+from snakemake.settings.types import (
+    ExecutionSettings, OutputSettings, ResourceSettings)
 
 import merlin as m
 from merlin.core import dataset
@@ -57,10 +59,10 @@ def build_parser():
     parser.add_argument('-q', '--parameters-home',
                         help='the parameters home directory')
     parser.add_argument('-k', '--snakemake-parameters',
-                        help='the name of the snakemake parameters file')
-    parser.add_argument('--no_report',
-                        help='flag indicating that the snakemake stats ' +
-                        'should not be shared to improve MERlin')
+                        help='the name of the snakemake parameters file '
+                        '(cluster/remote execution settings; not yet '
+                        'supported on the current snakemake version, see '
+                        'run_with_snakemake)')
     parser.add_argument('--allow-ragged-z-stacks', action='store_true',
                         help='tolerate fovs whose raw files have fewer '
                         'z frames than the deepest z position configured '
@@ -171,7 +173,7 @@ def merlin():
                     snakemakeParameters = json.load(f)
 
             run_with_snakemake(dataSet, snakefilePath, args.core_count,
-                               snakemakeParameters, not args.no_report)
+                               snakemakeParameters)
 
 
 def generate_analysis_tasks_and_snakefile(dataSet: dataset.MERFISHDataSet,
@@ -187,55 +189,37 @@ def generate_analysis_tasks_and_snakefile(dataSet: dataset.MERFISHDataSet,
 
 def run_with_snakemake(
         dataSet: dataset.MERFISHDataSet, snakefilePath: str, coreCount: int,
-        snakemakeParameters: Dict = {}, report: bool = False):
+        snakemakeParameters: Dict = {}):
+    """Execute a generated Snakefile locally through snakemake's Python API.
+
+    Only local execution is supported. `snakemakeParameters` (from
+    -k/--snakemake-parameters) previously carried a generic `cluster:`
+    sbatch command-template string for remote/cluster submission, using
+    snakemake's pre-8.0 API; snakemake 8.0 removed that generic
+    cluster-submission mechanism in favor of a separate executor-plugin
+    system (e.g. snakemake-executor-plugin-slurm) with its own resource
+    model, which is a real, untested-here migration of its own -- so a
+    non-empty snakemakeParameters is rejected explicitly rather than
+    silently mishandled.
+    """
+    if snakemakeParameters:
+        raise NotImplementedError(
+            'Cluster/remote snakemake execution via -k/--snakemake-'
+            'parameters is not supported with the current snakemake '
+            'version: snakemake 8.0 replaced the generic `cluster:` '
+            'command-template mechanism this parameters file format '
+            'assumed with a separate executor-plugin system. Run without '
+            '-k for local execution, or port the cluster path to an '
+            'executor plugin first.')
+
     print('Running MERlin pipeline through snakemake')
-    snakemake.snakemake(snakefilePath, 
-                        cores=coreCount,
-                        workdir=dataSet.get_snakemake_path(),
-                        stats=snakefilePath + '.stats', 
-                        lock=False,
-                        latency_wait=10,
-                        **snakemakeParameters)
-
-    if False:
-        reportTime = int(time.time())
-        try:
-            with open(snakefilePath + '.stats', 'r') as f:
-                requests.post('http://merlin.georgeemanuel.com/post',
-                              files={
-                                  'file': (
-                                      '.'.join(
-                                          ['snakestats',
-                                           dataSet.dataSetName,
-                                           str(reportTime)]) + '.csv',
-                                      f)},
-                              timeout=10)
-        except requests.exceptions.RequestException:
-            pass
-
-        analysisParameters = {
-            t: dataSet.load_analysis_task(t).get_parameters()
-            for t in dataSet.get_analysis_tasks()}
-        datasetMeta = {
-            'image_width': dataSet.get_image_dimensions()[0],
-            'image_height': dataSet.get_image_dimensions()[1],
-            'barcode_length': dataSet.get_codebook().get_bit_count(),
-            'barcode_count': dataSet.get_codebook().get_barcode_count(),
-            'fov_count': len(dataSet.get_fovs()),
-            'z_count': len(dataSet.get_z_positions()),
-            'sequential_count': len(dataSet.get_data_organization()
-                                    .get_sequential_rounds()),
-            'dataset_name': dataSet.dataSetName,
-            'report_time': reportTime,
-            'analysis_parameters': analysisParameters
-        }
-        try:
-            requests.post('http://merlin.georgeemanuel.com/post',
-                          files={'file': ('.'.join(
-                              [dataSet.dataSetName,
-                               str(reportTime)])
-                                          + '.json',
-                                          json.dumps(datasetMeta))},
-                          timeout=10)
-        except requests.exceptions.RequestException:
-            pass
+    with SnakemakeApi(OutputSettings()) as snakemakeApi:
+        workflowApi = snakemakeApi.workflow(
+            resource_settings=ResourceSettings(cores=coreCount),
+            snakefile=Path(snakefilePath),
+            workdir=Path(dataSet.get_snakemake_path()))
+        dagApi = workflowApi.dag(dag_settings=None)
+        dagApi.execute_workflow(
+            executor='local',
+            execution_settings=ExecutionSettings(
+                lock=False, latency_wait=10))

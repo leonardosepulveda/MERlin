@@ -1,8 +1,28 @@
-import snakemake
 import os
 import shutil
+from pathlib import Path
+
+from snakemake.api import SnakemakeApi
+from snakemake.settings.types import ExecutionSettings, OutputSettings, \
+    ResourceSettings
 
 from merlin.util import snakewriter
+
+
+def _run_snakefile_locally(snakefilePath):
+    # Mirrors merlin.merlin.run_with_snakemake's local-execution call --
+    # see that function's docstring for why the pre-8.0
+    # snakemake.snakemake(...) flat call no longer works.
+    with SnakemakeApi(OutputSettings()) as snakemakeApi:
+        workflowApi = snakemakeApi.workflow(
+            resource_settings=ResourceSettings(cores=1),
+            snakefile=Path(snakefilePath),
+            workdir=Path(os.getcwd()))
+        dagApi = workflowApi.dag(dag_settings=None)
+        dagApi.execute_workflow(
+            executor='local',
+            execution_settings=ExecutionSettings(lock=False,
+                                                  latency_wait=10))
 
 
 def test_run_single_task(simple_merfish_task):
@@ -14,7 +34,7 @@ def test_run_single_task(simple_merfish_task):
                       + snakeRule.full_output() + '\n\n')
         outFile.write(snakeRule.as_string())
 
-    snakemake.snakemake('temp.Snakefile')
+    _run_snakefile_locally('temp.Snakefile')
     os.remove('temp.Snakefile')
     shutil.rmtree('.snakemake')
 
@@ -32,7 +52,7 @@ def test_snakemake_generator_one_task(simple_merfish_data):
     workflow = generator.generate_workflow()
     outputTask = simple_merfish_data.load_analysis_task('SimpleAnalysisTask')
     assert not outputTask.is_complete()
-    snakemake.snakemake(workflow)
+    _run_snakefile_locally(workflow)
     assert outputTask.is_complete()
 
     shutil.rmtree('.snakemake')
@@ -62,7 +82,7 @@ def test_snakemake_generator_task_chain(simple_merfish_data):
     assert not outputTask1.is_complete()
     assert not outputTask2.is_complete()
     assert not outputTask3.is_complete()
-    snakemake.snakemake(workflow)
+    _run_snakefile_locally(workflow)
     assert outputTask1.is_complete()
     assert outputTask2.is_complete()
     assert outputTask3.is_complete()

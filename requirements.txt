@@ -24,7 +24,7 @@ scipy
 seaborn
 setuptools
 shapely>=2.0
-snakemake
+snakemake>=8.0
 Sphinx
 sphinx-rtd-theme
 tables

@@ -1034,12 +1034,14 @@ class ImageDataSet(DataSet):
             return reader.film_size()
 
     def _import_microscope_parameters(self, microscopeParametersName):
-        sourcePath = os.sep.join([merlin.MICROSCOPE_PARAMETERS_HOME,
+        sourcePath = microscopeParametersName \
+                if os.path.exists(microscopeParametersName) \
+                else os.sep.join([merlin.MICROSCOPE_PARAMETERS_HOME,
                 microscopeParametersName])
         destPath = os.sep.join(
                 [self.analysisPath, 'microscope_parameters.json'])
 
-        shutil.copyfile(sourcePath, destPath) 
+        shutil.copyfile(sourcePath, destPath)
 
     def _load_microscope_parameters(self): 
         path = os.sep.join(
@@ -1399,10 +1401,11 @@ class MERFISHDataSet(ImageDataSet):
             positionPath, header=None, names=['X', 'Y'])
 
     def _import_positions(self, positionFileName):
-        sourcePath = os.sep.join([merlin.POSITION_HOME, positionFileName])
+        sourcePath = positionFileName if os.path.exists(positionFileName) \
+                else os.sep.join([merlin.POSITION_HOME, positionFileName])
         destPath = os.sep.join([self.analysisPath, 'positions.csv'])
-            
-        shutil.copyfile(sourcePath, destPath)    
+
+        shutil.copyfile(sourcePath, destPath)
 
     def _convert_parameter_list(self, listIn, castFunction, delimiter=';'):
         return [castFunction(x) for x in listIn.split(delimiter) if len(x)>0]

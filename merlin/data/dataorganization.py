@@ -446,9 +446,17 @@ class DataOrganization(object):
         return os.path.join(self._dataSet.dataHome, self._dataSet.dataSetName,
                             filemapPath)
 
-    def _truncate_file_path(self, path) -> None:
-        head, tail = os.path.split(path)
-        return tail
+    def _truncate_file_path(self, path) -> str:
+        # Store the path relative to the raw data directory rather than
+        # just the bare filename, so that files in per-round subfolders
+        # (e.g. data/hybs/H01/) are preserved rather than collapsed to a
+        # name that no longer resolves back to the right file. Paths
+        # already relative (e.g. loaded from an older cached filemap) are
+        # left as-is.
+        rawDataPath = self._dataSet.rawDataPath
+        if path == rawDataPath or path.startswith(rawDataPath + os.sep):
+            return os.path.relpath(path, rawDataPath)
+        return path
 
     def _map_image_files(self) -> None:
         # TODO: This doesn't map the fiducial image types and currently assumes

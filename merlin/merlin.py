@@ -4,6 +4,7 @@ import os
 import json
 import sys
 from pathlib import Path
+import yaml
 from typing import TextIO
 from typing import Dict
 
@@ -31,7 +32,8 @@ def build_parser():
     parser.add_argument('dataset',
                         help='directory where the raw data is stored')
     parser.add_argument('-a', '--analysis-parameters',
-                        help='name of the analysis parameters file to use')
+                        help='name of the analysis parameters file to use '
+                        '(.json or .yaml/.yml, detected by extension)')
     parser.add_argument('-o', '--data-organization',
                         help='name of the data organization file to use')
     parser.add_argument('-c', '--codebook', nargs='+',
@@ -146,8 +148,10 @@ def merlin():
     if args.analysis_parameters:
         # This is run in all cases that analysis parameters are provided
         # so that new analysis tasks are generated to match the new parameters
-        with open(os.sep.join(
-                [parametersHome, args.analysis_parameters]), 'r') as f:
+        analysisParametersPath = args.analysis_parameters \
+                if os.path.exists(args.analysis_parameters) \
+                else os.sep.join([parametersHome, args.analysis_parameters])
+        with open(analysisParametersPath, 'r') as f:
             snakefilePath = generate_analysis_tasks_and_snakefile(
                 dataSet, f)
 
@@ -168,18 +172,37 @@ def merlin():
         elif snakefilePath:
             snakemakeParameters = {}
             if args.snakemake_parameters:
-                with open(os.sep.join([m.SNAKEMAKE_PARAMETERS_HOME,
-                                      args.snakemake_parameters])) as f:
+                snakemakeParametersPath = args.snakemake_parameters \
+                        if os.path.exists(args.snakemake_parameters) \
+                        else os.sep.join([m.SNAKEMAKE_PARAMETERS_HOME,
+                                          args.snakemake_parameters])
+                with open(snakemakeParametersPath) as f:
                     snakemakeParameters = json.load(f)
 
             run_with_snakemake(dataSet, snakefilePath, args.core_count,
                                snakemakeParameters)
 
 
+def _load_analysis_parameters(parametersFile: TextIO) -> Dict:
+    """Parse an analysis-parameters recipe from an open file handle.
+
+    Recipes are the same list-of-task-dicts structure ({"analysis_tasks":
+    [...]}) whether written as JSON or YAML -- the two formats share the same
+    mapping/sequence/scalar data model, so this is purely a choice of parser,
+    dispatched on the file's own extension (`.yaml`/`.yml` vs anything else,
+    which is parsed as JSON as before -- this keeps every existing .json
+    recipe and any caller that doesn't set an extension working unchanged).
+    """
+    _, extension = os.path.splitext(parametersFile.name)
+    if extension.lower() in ('.yaml', '.yml'):
+        return yaml.safe_load(parametersFile)
+    return json.load(parametersFile)
+
+
 def generate_analysis_tasks_and_snakefile(dataSet: dataset.MERFISHDataSet,
                                           parametersFile: TextIO) -> str:
     print('Generating analysis tasks from %s' % parametersFile.name)
-    analysisParameters = json.load(parametersFile)
+    analysisParameters = _load_analysis_parameters(parametersFile)
     snakeGenerator = snakewriter.SnakefileGenerator(
         analysisParameters, dataSet, sys.executable)
     snakefilePath = snakeGenerator.generate_workflow()

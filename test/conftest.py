@@ -77,6 +77,11 @@ def base_files():
             [merlin.ANALYSIS_PARAMETERS_HOME, 'test_analysis_parameters.json']))
     shutil.copyfile(
         os.sep.join(
+            [root, 'auxiliary_files', 'test_analysis_parameters.yaml']),
+        os.sep.join(
+            [merlin.ANALYSIS_PARAMETERS_HOME, 'test_analysis_parameters.yaml']))
+    shutil.copyfile(
+        os.sep.join(
             [root, 'auxiliary_files', 'test_microscope_parameters.json']),
         os.sep.join(
             [merlin.MICROSCOPE_PARAMETERS_HOME,

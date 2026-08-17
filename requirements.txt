@@ -16,6 +16,7 @@ pyqt5
 pytest
 pytest-cov
 python-dotenv
+pyyaml
 requests
 rtree
 scikit-image

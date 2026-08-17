@@ -22,7 +22,7 @@ scikit-image
 scikit-learn
 scipy
 seaborn
-setuptools
+setuptools==83.0.0
 shapely>=2.0
 snakemake
 Sphinx

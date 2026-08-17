@@ -3,6 +3,59 @@
 Curated current-state summary. See `prompt_history/` for full provenance of each item
 below; this file only tracks what's true *now* and the open next step.
 
+## Three independent branches: YAML recipes, snakemake>=8, setuptools 83 (2026-08-16)
+
+Per explicit "each must be written as a separate branch" instruction, split what had
+previously been implemented as two commits on one mixed branch, plus a new dependabot
+fix, into three clean branches -- all off `master`, none merged or pushed:
+
+- `feature/yaml-analysis-recipes` -- YAML analysis-recipe support (`.yaml`/`.yml`
+  alongside existing `.json`), single clean cherry-pick of the prior investigation's
+  implementation commit. 3/3 targeted tests pass; 121/121 broader non-slow suite passes
+  (excludes `test_snakemake.py` -- untouched on this branch, needs its own migration --
+  and the pre-existing geopandas-gap/slowtest exclusions below).
+- `feature/snakemake-v8-migration` -- `merlin.py`'s `run_with_snakemake` ported to the
+  `snakemake>=8` builder API (`SnakemakeApi`/`workflow()`/`dag()`/`execute_workflow()`),
+  `requirements.txt` pinned to `snakemake>=8.0`. Reconstructed as an independent diff
+  (not a cherry-pick, since the original commit's test-file portion depended on the YAML
+  branch's fixture file) via `git apply --3way`, one manual conflict resolved (an import
+  line that assumed YAML's `import yaml` was already present). Verified against a real,
+  freshly-installed snakemake 9.25.1 in an isolated venv: all 5 `test_snakemake.py`
+  tests pass (real subprocess-spawned tasks actually completing), 123/123 broader suite.
+- `fix/setuptools-upgrade` -- `requirements.txt` pinned `setuptools==83.0.0` (dependabot
+  suggestion); `merlin.version()` switched from `pkg_resources.get_distribution(...)` to
+  `importlib.metadata.version(...)`, since setuptools 83 no longer bundles
+  `pkg_resources` (confirmed: a venv with only 83.0.0 installed has no `pkg_resources`
+  of its own). Verified `merlin.version()` returns the correct `0.1.6` under a real
+  setuptools-83.0.0-only venv; 118/118 broader suite plus all 5 `test_snakemake.py`
+  tests (old pre-migration API, against this branch's own untouched `snakemake==7.32.4`
+  base) pass.
+
+The old mixed branch (YAML commit + snakemake-migration commit together) was renamed to
+`archive/yaml-and-snakemake-mixed` rather than deleted, in case any of its history is
+wanted later.
+
+**Verification environment**: RC cluster conda env `merlin_cc_env`
+(`/n/holylabs/zhuang_lab/Lab/lsepulvedaduran/conda/envs/merlin_cc_env`, Python 3.12,
+pinned to `snakemake==7.32.4`/`setuptools==73.0.1` per its own prior real-run-tested
+state) was never modified directly. Instead, two isolated venvs were built on top of it
+with `python -m venv --system-site-packages` (inheriting its heavy deps -- tensorflow,
+cellpose, etc. -- for free) and only `snakemake>=8`/`setuptools==83.0.0` overridden
+locally per venv, then `pip install -e . --no-deps` per branch. Both venvs left in the
+Claude session scratchpad, not `merlin_cc_env` itself.
+
+**Known pre-existing gaps, unrelated to this work**: `merlin_cc_env` has no `geopandas`
+(`test_ragged_z_pipeline.py` excluded from every run above for this reason). This repo's
+working tree also had unrelated uncommitted changes (absolute-path support for
+`-m`/`-p` in `dataset.py`, a `snakemake<8.0` pin in `requirements.txt`) predating this
+request -- left untouched, restored via `git stash`/`git stash pop` around the branch
+work rather than discarded.
+
+**Next step**: awaiting user inspection of the three branches before merging any of them
+into `master` (not done automatically, per the request's own "commit and merge with main
+after inspection" phrasing) or pushing to `origin` (standing "confirm before push"
+agreement).
+
 ## SumSignal channel_names parameter (2026-08-16)
 
 Added an optional `channel_names` parameter to `merlin.analysis.sequential.

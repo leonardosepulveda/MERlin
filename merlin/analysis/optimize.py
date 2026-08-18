@@ -354,6 +354,7 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
             previousCorrector = aberration.RigidChromaticCorrector(
                 previousTransformations, self.get_reference_color())
             codebook = self.get_codebook()
+            bitNames = codebook.get_bit_names()
             dataOrganization = self.dataSet.get_data_organization()
 
             barcodes = self.get_barcode_database().get_barcodes()
@@ -395,9 +396,11 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
                             for p in itertools.combinations(
                                     enumerate(onBits), 2):
                                 c1 = dataOrganization.get_data_channel_color(
-                                    p[0][1])
+                                    dataOrganization.get_data_channel_for_bit(
+                                        bitNames[p[0][1]]))
                                 c2 = dataOrganization.get_data_channel_color(
-                                    p[1][1])
+                                    dataOrganization.get_data_channel_for_bit(
+                                        bitNames[p[1][1]]))
 
                                 if c1 < c2:
                                     colorPairDisplacements[c1][c2].append(

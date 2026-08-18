@@ -95,6 +95,312 @@ since this branch doesn't include that fix): `FiducialCorrelationWarp` with
 `write_aligned_images=True` produced a real, correctly-shaped, non-empty tiff. See
 `prompt_history/2026_08_01_2248_fix_tifffile_writer_api.md` for full detail.
 
+## snakemake >=8 migration: cluster-execution port (feature/snakemake-v8-migration)
+
+**Implemented 2026-08-17, awaiting the user's own real-SLURM verification
+before commit/merge/push to master.** Branch merged up to date with master
+first (brought in the yaml-analysis-recipes, setuptools, and filemap-fix
+commits cleanly — only `merlin/merlin.py`/`requirements.txt` conflicted, both
+trivial import/pin conflicts).
+
+- `-k`/cluster execution now works via `snakemake-executor-plugin-slurm`
+  (`executor='slurm'` in `merlin.merlin.run_with_snakemake`) instead of
+  raising `NotImplementedError`. `requirements.txt` pins
+  `snakemake>=8.0` + adds `snakemake-executor-plugin-slurm` (installed here:
+  snakemake 9.25.1 / plugin 2.8.0).
+- Design intent from the prior scoping turn was followed as planned: the
+  existing `cluster_resource_allocation_*.json`/`-k` JSON **shapes are
+  unchanged** (no MERci-side changes needed) — translation to the
+  executor-plugin's per-rule `resources:` model happens internally in
+  `merlin/util/snakewriter.py` (`_translate_cluster_resources`,
+  `_parse_slurm_time_to_minutes`), applied per-rule (including the
+  `...Done` check rules) via `SnakemakeRule._cluster_resources_for_rule`,
+  which merges `__default__` with any rule-name-keyed override exactly like
+  old snakemake's `--cluster-config` did (confirmed: a `...Done` rule with
+  no JSON entry of its own correctly falls back to `__default__`, not to its
+  parent task's override).
+- Key mapping implemented (verified against the actually-installed
+  `snakemake_executor_plugin_slurm` 2.8.0 source, not just docs — one detail
+  differed from the prior turn's scoping notes): `mem`→`mem_mb`,
+  `partition`→`slurm_partition`, `account`→`slurm_account`, `time`
+  (`[D-]H:MM:SS`)→`runtime` (minutes, rounded up), `constraint`/`gres` same
+  key (omitted when empty/falsy), `exclude`→`slurm_extra="--exclude=..."`.
+  **`requeue` is not a per-rule resource in this plugin version** (no
+  `slurm_requeue` key exists) — it's the executor-wide
+  `ExecutorSettings.requeue` flag, so `run_with_snakemake` reads
+  `clusterConfig['__default__']['requeue']` once and passes it globally,
+  not per-rule. Top-level `-k` JSON's `nodes`→`ResourceSettings(nodes=...)`
+  (max concurrent SLURM jobs; `coreCount`/`-n` stays on `ResourceSettings
+  .cores`, the local-rules budget — confirmed via `snakemake.cli` source
+  that `--jobs`/`nodes` and `--cores` are genuinely distinct in
+  cluster/cloud mode, unlike local mode where `--jobs` aliases `--cores`).
+  `restart_times`→`ExecutionSettings(retries=...)`. `out`/`err` are gone,
+  replaced by `SlurmExecutorSettings(logdir=...)` under the dataset's
+  snakemake path.
+- `merlin.py`'s `-k`/cluster_config JSON is now loaded **before** snakefile
+  generation (was only loaded at run time) so `SnakefileGenerator` can bake
+  per-task resources into the generated rules at generation time.
+- Tests: 6 new tests added to `test/test_snakemake.py` (pure resource/time
+  translation, a `SnakemakeRule.as_string()` resources-block check with
+  `__default__`-fallback, and a `SnakefileGenerator` integration test that
+  embeds resources *and* still executes locally) — all pass, plus the
+  original 5 local-execution tests unchanged. Additionally ran the real CLI
+  end-to-end with `--generate-only` against the *actual* production
+  `parameters_BC553_sample_02.json` / `cluster_resource_allocation_
+  BC553_sample_02.json` / 19-task `merlin_analysis_BC553_sample_02.json`
+  against the 20-FOV test experiment below — confirmed by inspecting the
+  generated Snakefile that real per-task resources (e.g.
+  `FiducialCorrelationWarp`: `mem_mb=1000, ..., gres='gpu:0'`) and the
+  `__default__`-fallback for `...Done` rules came out correctly, and that
+  all 20 FOVs were correctly detected (`expand(..., g=list(range(20)))`).
+- **Real SLURM submission (2026-08-17, user-run) found and fixed a real
+  bug**: every job crashed with `sbatch: error: gres_job_state_validate:
+  --ntasks-per-tres needs either a GRES GPU specification or a node/ntask
+  specification`. Root cause: `snakemake_executor_plugin_slurm` treats any
+  `gres` resource containing the substring `"gpu"` as a GPU job
+  *regardless of count* and unconditionally adds `--ntasks-per-gpu=1`,
+  which `sbatch` rejects when paired with the real `cluster_resource_
+  allocation` JSON's `__default__.gres: "gpu:0"` (a harmless no-op under
+  the old sbatch-template mechanism, applied to every task including
+  non-GPU ones). Fixed: `_translate_cluster_resources` now omits `gres`
+  entirely when its count is zero, still passing through real requests
+  (e.g. `CellPoseSegmentSAM`'s `gpu:1`) unchanged. New regression test
+  `test_translate_cluster_resources_omits_zero_gres`. Full detail:
+  `prompt_history/2026_08_17_1753_fix_zero_gres_slurm_crash.md`.
+- Near-miss during testing, worth flagging: attempting a supposedly-inert
+  snakemake dry-run (`OutputSettings(dryrun=True)`) via the builder API
+  against the real 19-task pipeline actually **executed for real** (local
+  executor, no confirmation) before being caught and killed ~17/600 steps
+  in (only cheap `FiducialCorrelationWarp` alignment had run; no
+  decode/segmentation reached). `dryrun` on `OutputSettings` alone does not
+  suppress execution in this API version — the CLI's `--dry-run` apparently
+  wires further plumbing this ad hoc script didn't reproduce. The ~3.6GB of
+  accidental output was deleted and the 20-FOV test experiment restored to
+  its documented clean state (no `merlin/` subfolder). If a real dry-run
+  check via the builder API is needed again, don't trust `OutputSettings
+  (dryrun=True)` alone without first confirming what CLI's `--dry-run`
+  actually sets.
+- An external fork's fix (BrewerLabSDU/MERlin_epigen-UCSD) was evaluated and
+  rejected: it repurposes `ConfigSettings.config` (a `--config`-equivalent
+  no-op for MERlin's Snakefiles, verified via grep) and silently falls back
+  to running everything locally instead of submitting real distributed SLURM
+  jobs — worse than the current loud error.
+- Full key-mapping table and MERci handoff:
+  `prompt_history/2026_08_17_1618_scope_slurm_port_yaml_question_merci_handoff_test_experiment.md`.
+  MERci-side prep requested via a handoff prompt there (cross-project
+  changes are never made directly from this repo — see `CLAUDE.md`'s
+  "Cross-project boundary"); no MERci JSON-shape changes are needed by this
+  implementation, confirming that handoff's scope was correctly limited to
+  investigation.
+- The 20-FOV test experiment for the real SLURM smoke test:
+  `/n/holylfs05/LABS/zhuang_lab/Lab/shared/projects/breast_cancer/experiments/BC553_sample_02_test/epi/`
+  (symlinked raw data, new positions file; a submit-ready `merlin/` config
+  tree — real per-task resource values, `nodes` scaled to 20, `-x` dropped,
+  see its own `README.md` — was added 2026-08-17).
+- **Second real submission (job 39874098, gres fix applied) got past
+  `FiducialCorrelationWarp` cleanly, then hit a second real failure --
+  unrelated to the snakemake port** -- in `DeconvolutionPreprocess`:
+  `ValueError: can only convert an array of size 1 to a Python scalar` from
+  `DataOrganization.get_data_channel_for_bit` (`merlin/data/
+  dataorganization.py:178`). Root cause: this experiment's
+  `data_organization_MF3_BC553_sample_02.csv` names bits `b1-RS0015`,
+  `b2-RS0083`, ... (`readoutName` column) while its codebook
+  (`C3v1_codebook.csv`) names the same bits `RS0015`, `RS0083`, ... (no
+  `bN-` prefix, from `codebook.get_bit_names()` = column headers) --
+  `get_data_channel_for_bit` does an exact-string match, so it always finds
+  zero rows and `.item()` on the empty result raises. This code path only
+  runs when `save_pixel_histogram: true` (set in this experiment's real
+  19-task analysis-parameters JSON, copied unchanged from production).
+  Confirmed **not test-experiment-specific**: production's own
+  `BC553_sample_02/epi/merlin/dataorganization/data_organization_MF3_
+  BC553_sample_02.csv` has the identical `bN-`-prefixed `readoutName`
+  convention, and production's analysis JSON sets the same
+  `save_pixel_histogram: true`. Production's own
+  `data/DeconvolutionPreprocess/` has no output and no matching error in
+  its logs -- this parameter combination appears never to have actually
+  been exercised there either (task graph likely never reached that far),
+  so this is a real, pre-existing bit-naming mismatch, not something
+  introduced by the snakemake migration or by hand-assembling the test
+  experiment. Job cancelled (`scancel 39874098`, deterministic failure --
+  every one of the 20 FOVs hit it identically, retries can't fix it). Full
+  detail:
+  `prompt_history/2026_08_17_1807_investigate_deconvolutionpreprocess_bitname_mismatch.md`.
+  **Resolved (2026-08-18, user call): the dataorg file's `bN-` prefix is
+  wrong** -- it was created by MERci and doesn't match the bare bit names
+  MERlin's codebooks use. Fixed by stripping `^b\d+-` from the test
+  experiment's `readoutName` column (backup kept as `.bak_bN_prefix`
+  alongside it); verified all 16 of the real codebook's runtime bit names
+  (from `C3v1_codebook.csv`'s `bit_names` line) are now present. Production's
+  own copy of this dataorg CSV has the identical bug (unfixed -- out of
+  scope for "this time"). A handoff was written directly into MERci's own
+  `prompt_history/` (`251225_LT027_saving_time/MERci/prompt_history/
+  2026_08_18_1359_fix_dataorg_readoutname_bn_prefix.md`) so the generator
+  itself (`src/MERci/acquisition/data_organization.py`, `readoutName`
+  copied verbatim from the `readouts` table's `"Name"` column) stops
+  emitting the `bN-` prefix going forward -- see
+  `prompt_history/2026_08_18_1400_resubmit_job_direct_merci_handoff_global_rule.md`
+  (supersedes the in-this-repo-only handoff approach from
+  `2026_08_18_1328_fix_test_dataorg_bN_prefix_and_merci_handoff.md`; a new
+  global rule, `~/.claude/rules/cross-repo-handoff.md`, now governs this).
+  **Resubmitted with the fix: job `40079595`** (2026-08-18) -- confirmed
+  the fix works: 19/20 `DeconvolutionPreprocess` fragments completed before
+  the driver hit `NODE_FAIL` (node `holy8a24201`, a cluster hardware/
+  scheduler failure, not a code bug). MERci's own session independently
+  confirmed+refined the fix on their side (`readoutName` now built from
+  `readouts["Probe name"]` instead of `readouts["Name"]` -- see their
+  `prompt_history/2026_08_18_1359_...md`, `status: done`); production's own
+  dataorg CSV is still unfixed/out of scope pending user go-ahead.
+  **Second finding from that same resubmission**: fragment 17 had a stale
+  `DeconvolutionPreprocess_17.error` marker left over from the *old*,
+  pre-fix, cancelled job (`39874098`) -- `.error` markers are sticky
+  (`analysistask.py`/`dataset.py`'s `is_error()` is a plain file-existence
+  check, no staleness logic), so it would never have retried on its own.
+  Backed up (`.bak_stale_prefix_bug`, not deleted) and resubmitted:
+  job **40082610**. Full detail:
+  `prompt_history/2026_08_18_1550_node_fail_resubmit_stale_error_marker.md`.
+  **That job was user-cancelled (2026-08-18 15:50)** after hitting a third,
+  unrelated real bug -- see the "Optimize02 chromatic-correction" entry
+  below. Not yet resubmitted again; pending user confirmation of that fix.
+
+## Optimize02 chromatic-correction KeyError bug (2026-08-18, feature/slurm-job-naming-verbosity)
+
+- Job 40082610 (see above) got past `DeconvolutionPreprocess`/
+  `FiducialCorrelationWarp`/`Optimize01` and then most `Optimize02`
+  fragments crashed with `KeyError: '560'` in
+  `_get_chromatic_transformations` (`merlin/analysis/optimize.py`).
+- Root cause: that function keys `colorPairDisplacements` by data-channel
+  *color* (from `_get_used_colors()`, which correctly maps bit position ->
+  bit name -> data channel -> color), but then computed each barcode's
+  actual color pair via `dataOrganization.get_data_channel_color(onBit)`
+  -- passing the raw bit *position* (0..N-1, an index into
+  `codebook.get_bit_names()`) directly into a function that expects a
+  *data channel* index. Since the data-organization table has more rows
+  than there are bits (DAPI/fiducial/etc. channels interleaved), this
+  silently read an unrelated row's color instead of raising immediately,
+  and only failed once that wrong color wasn't a key in
+  `colorPairDisplacements`.
+- Pre-existing bug in the inherited (colleague's) branch, unrelated to the
+  snakemake-v8 migration or this session's other fixes; only triggers when
+  `optimize_chromatic_correction: true` (set for every `Optimize0N` round
+  in this experiment's analysis-parameters JSON).
+- **Fixed**: map bit position -> bit name (`codebook.get_bit_names()`) ->
+  data channel (`get_data_channel_for_bit`) -> color, matching the pattern
+  `_get_used_colors()` already uses correctly.
+- **Committed, pushed, and merged to master** (branch
+  `fix/optimize02-chromatic-color-keyerror`, commit `d0a07d1`, merged
+  `f65e268`; kept on origin per this repo's existing fix/* convention).
+  `feature/slurm-job-naming-verbosity` merged master back in to pick it up.
+  Full detail:
+  `prompt_history/2026_08_18_1633_diagnose_optimize02_crash_slurm_naming_verbosity_branch.md`,
+  `prompt_history/2026_08_18_1646_commit_push_merge_color_fix_branch.md`.
+  **Resubmitted with the fix, after clearing stale `.error` markers left
+  over from the earlier cancelled/crashed runs: job `40113193`
+  (2026-08-18 16:57).** **Completed successfully** -- `COMPLETED`,
+  `ExitCode 0:0`, 506/506 steps (100%), ran 16:57:36-18:29:11 (1h31m), no
+  errors in its own log. Confirms the `Optimize02` chromatic-correction fix
+  works end-to-end on the real 20-FOV test experiment. Note: the driver's
+  cumulative `.err`/`.out` files (one file per script, appended across every
+  resubmission) still contain `Error in rule .../WorkflowError` text from
+  the earlier failed attempts -- a naive `grep`/tail of the whole file will
+  match those stale lines; only content after the run's own
+  `Snakefile generated at .../<timestamp>.Snakefile` marker (or the matching
+  `Complete log(s): .../<timestamp>.snakemake.log` line) belongs to that
+  submission.
+
+## SLURM job naming / driver-log verbosity (feature/slurm-job-naming-verbosity, 2026-08-18)
+
+User request: per-rule/per-fragment SLURM job names
+(`{experiment prefix}-{task initials}-{fov}`), a `task_initials()`
+abbreviation function, and a terser driver-log job-submission message.
+
+- **Per-rule/per-fragment `-J` job names are not possible**:
+  `snakemake_executor_plugin_slurm` hardcodes the SLURM job name to one
+  shared per-run UUID (needed for its own `sacct --name=<uuid>`/
+  `squeue --name` status polling) and explicitly rejects `--job-name`/`-J`
+  via `slurm_extra` (`validation.py::get_forbidden_slurm_options`).
+  **Already available today, zero code changes**: the plugin unconditionally
+  sets `sbatch --comment rule_<RuleName>[_wildcards_<fragment>]` -- confirmed
+  live via `sacct -o JobID,Comment` against a real fragment. Add `Comment`
+  to a `sacct -o` format string to get exactly this per-rule/per-fragment
+  info.
+- Implemented what's achievable: `job_name_prefix` (default `'merlin'`), a
+  new key in the `-k`/snakemake-parameters JSON, wired to
+  `SlurmExecutorSettings(jobname_prefix=...)` in `merlin.py`'s
+  `run_with_snakemake` -- this is the one per-run (not per-rule) knob the
+  plugin actually exposes.
+- `task_initials(taskName, length=3)` implemented and tested
+  (`merlin/util/naming.py`, `test/test_naming.py`) per the given
+  algorithm/examples. **User call (2026-08-18): rely on `sacct -o Comment`
+  as-is rather than renaming Snakemake rules** -- so `task_initials()` is
+  built and available but has no call site in this codebase yet.
+  - Also flagged: the worked example `SimpleGlobalAlignment -> SinGloAli`
+    doesn't match the stated algorithm (would be `SimGloAli`) -- implemented
+    per the stated algorithm, not silently matched to the example.
+- Driver-log verbosity: added `_SlurmSubmissionLogFilter` (`merlin.py`),
+  attached only on the SLURM execution path, reformatting the submission
+  message into the requested indented 3-line block and substituting the
+  run's snakemake-path prefix with `$OUTPUT_DIR` (printed once at the start
+  of the run). Verified against the real message format.
+- **Expanded (2026-08-18) into `_SlurmDriverLogFilter`**, prompted by real
+  driver-log confusion: snakemake's submission message ("Job N has been
+  submitted with SLURM jobid J") and its later completion message
+  ("Finished jobid: N (Rule: R)") both call the number `jobid`, but N is
+  snakemake's own internal per-DAG-node counter (`job.jobid`, confirmed at
+  `snakemake/scheduling/job_scheduler.py:483/488` and
+  `snakemake_executor_plugin_slurm/__init__.py:1189` -- both read the same
+  attribute) while J is the real SLURM id, appearing nowhere in the finish
+  message. Fixed by having the filter remember `slurm_id`/`Rule`/`Fragment`
+  (the latter two recovered from the submission log path, which
+  `snakewriter` already lays out as `slurm_logs/rule_<Rule>/[<Fragment>/]
+  <slurm_id>.log`) keyed by N at submission time, then reusing that on the
+  matching finish line:
+  `Submitted jobid: N (slurm_id: J) (Rule: R) (Fragment: F)` /
+  `Finished jobid: N (slurm_id: J) (Rule: R) (Fragment: F)` (Fragment
+  omitted for non-per-fragment rules; a finish line with no prior
+  submission record, e.g. the local `all` rule, is left unchanged rather
+  than guessed at). Also reformats the startup `Command: ...` line to one
+  flag per line (split on ` -X`/` --X` token boundaries), by overwriting
+  the `cmd` field snakemake's `workflow_started` event already carries as a
+  separate record attribute (`workflow.py:297`) -- not string-matched from
+  message text, so it can't misfire on unrelated log lines.
+  **Deliberately NOT done**: putting the finish line's timestamp on the
+  same line as the message text (`[ts] Finished jobid: ...` all on one
+  line) -- unlike the submission message (a plain untagged log call, so the
+  filter fully controls its rendering), the finish message's timestamp is
+  hardcoded by snakemake's own formatter (`format_job_finished`) as a
+  separate line *before* whatever text the filter supplies, and merging
+  the two would require overriding the record's internal `event` tag to
+  reroute it through a different, undocumented formatter path -- more
+  fragile than anything else built here, and would incidentally bypass
+  snakemake's own `--quiet` filtering for that message. **User call:
+  keep the timestamp on its own line for both messages** (matches today's
+  behavior; content enrichment is all that changed). Verified against
+  the real message formats and with new unit tests, `test/test_merlin.py`
+  (5 tests, all passing) -- log-path parsing (with/without fragment),
+  submission/finish correlation, the no-prior-submission fallback, and the
+  command reformat.
+- MERci handoff written directly into MERci's own `prompt_history/
+  2026_08_18_1632_add_short_experiment_name_for_slurm_job_prefix.md` (short
+  experiment-name function for `job_name_prefix`, from 2 example mappings).
+- Nothing committed; branch `feature/slurm-job-naming-verbosity`.
+
+## Pending: port the `-x`/`--analysis-name` flag into this repo
+
+`BC553_sample_02`'s real slurm script uses `-x "output"` (decouples analysis
+output location from the raw-data path), which this repo's `merlin.py` does
+not implement — confirmed via grep, no `-x`/`analysisName` anywhere here.
+The real implementation exists but is **uncommitted, never pushed**, in a
+different local clone of the same origin: `~/Software/merlin_cc/MERlin`
+(checked out at `1fae07e`), added directly from a MERci session on
+2026-08-14 (MERci `prompt_history/2026_08_14_1815_fix_merlin_data_organization_and_output_path.md`)
+— exactly the untracked-cross-project-edit pattern `CLAUDE.md`'s
+"Cross-project boundary" section now exists to prevent. Small diff (~25
+lines, `merlin.py` + `dataset.py`; the dataorganization.py piece in that
+same working tree is already superseded by this repo's own `adc0482`).
+Full detail: `prompt_history/2026_08_17_1741_investigate_x_flag_origin.md`.
+Not yet ported — deferred at the user's request ("we can work on that after
+this is done").
+
 ## Repo / branch layout
 
 - `origin` = `leonardosepulveda/MERlin` (this fork), `upstream` = `emanuega/MERlin`,

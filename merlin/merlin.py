@@ -1,8 +1,11 @@
 import argparse
 import cProfile
+import logging
 import os
 import json
+import re
 import sys
+import time
 from pathlib import Path
 import yaml
 from typing import TextIO
@@ -11,6 +14,9 @@ from typing import Dict
 from snakemake.api import SnakemakeApi
 from snakemake.settings.types import (
     ExecutionSettings, OutputSettings, ResourceSettings)
+from snakemake_executor_plugin_slurm import (
+    ExecutorSettings as SlurmExecutorSettings)
+from snakemake_interface_logger_plugins.common import LogEvent
 
 import merlin as m
 from merlin.core import dataset
@@ -61,10 +67,9 @@ def build_parser():
     parser.add_argument('-q', '--parameters-home',
                         help='the parameters home directory')
     parser.add_argument('-k', '--snakemake-parameters',
-                        help='the name of the snakemake parameters file '
-                        '(cluster/remote execution settings; not yet '
-                        'supported on the current snakemake version, see '
-                        'run_with_snakemake)')
+                        help='the name of the snakemake parameters file, '
+                        'for distributed execution on a SLURM cluster via '
+                        'snakemake-executor-plugin-slurm')
     parser.add_argument('--allow-ragged-z-stacks', action='store_true',
                         help='tolerate fovs whose raw files have fewer '
                         'z frames than the deepest z position configured '
@@ -144,6 +149,24 @@ def merlin():
     
     parametersHome = m.ANALYSIS_PARAMETERS_HOME
     e = executor.LocalExecutor(coreCount=args.core_count)
+
+    # Loaded ahead of snakefile generation (rather than only when actually
+    # running) because clusterConfig's per-task resource overrides need to
+    # be baked into each rule's `resources:` block at generation time -- see
+    # snakewriter.SnakefileGenerator.
+    snakemakeParameters = {}
+    clusterConfig = None
+    if args.snakemake_parameters:
+        snakemakeParametersPath = args.snakemake_parameters \
+                if os.path.exists(args.snakemake_parameters) \
+                else os.sep.join([m.SNAKEMAKE_PARAMETERS_HOME,
+                                  args.snakemake_parameters])
+        with open(snakemakeParametersPath) as f:
+            snakemakeParameters = json.load(f)
+        if snakemakeParameters.get('cluster_config'):
+            with open(snakemakeParameters['cluster_config']) as f:
+                clusterConfig = json.load(f)
+
     snakefilePath = None
     if args.analysis_parameters:
         # This is run in all cases that analysis parameters are provided
@@ -153,7 +176,7 @@ def merlin():
                 else os.sep.join([parametersHome, args.analysis_parameters])
         with open(analysisParametersPath, 'r') as f:
             snakefilePath = generate_analysis_tasks_and_snakefile(
-                dataSet, f)
+                dataSet, f, clusterConfig)
 
     if not args.generate_only:
         if args.analysis_task:
@@ -170,17 +193,8 @@ def merlin():
                 print('Running %s' % args.analysis_task)
                 e.run(task, index=args.fragment_index)
         elif snakefilePath:
-            snakemakeParameters = {}
-            if args.snakemake_parameters:
-                snakemakeParametersPath = args.snakemake_parameters \
-                        if os.path.exists(args.snakemake_parameters) \
-                        else os.sep.join([m.SNAKEMAKE_PARAMETERS_HOME,
-                                          args.snakemake_parameters])
-                with open(snakemakeParametersPath) as f:
-                    snakemakeParameters = json.load(f)
-
             run_with_snakemake(dataSet, snakefilePath, args.core_count,
-                               snakemakeParameters)
+                               snakemakeParameters, clusterConfig)
 
 
 def _load_analysis_parameters(parametersFile: TextIO) -> Dict:
@@ -199,50 +213,152 @@ def _load_analysis_parameters(parametersFile: TextIO) -> Dict:
     return json.load(parametersFile)
 
 
-def generate_analysis_tasks_and_snakefile(dataSet: dataset.MERFISHDataSet,
-                                          parametersFile: TextIO) -> str:
+def generate_analysis_tasks_and_snakefile(
+        dataSet: dataset.MERFISHDataSet, parametersFile: TextIO,
+        clusterConfig: Dict = None) -> str:
     print('Generating analysis tasks from %s' % parametersFile.name)
     analysisParameters = _load_analysis_parameters(parametersFile)
     snakeGenerator = snakewriter.SnakefileGenerator(
-        analysisParameters, dataSet, sys.executable)
+        analysisParameters, dataSet, sys.executable, clusterConfig)
     snakefilePath = snakeGenerator.generate_workflow()
     print('Snakefile generated at %s' % snakefilePath)
     return snakefilePath
 
 
+class _SlurmDriverLogFilter(logging.Filter):
+    """Reformats several snakemake/snakemake-executor-plugin-slurm driver
+    log messages so the driver's log is easier to scan by eye:
+
+    - The one-line job-submission message ('Job N has been submitted with
+      SLURM jobid J (log: ...).') is rewritten as
+      'Submitted jobid: N (slurm_id: J) (Rule: R) (Fragment: F)', with the
+      rule name and fragment number recovered from the log path (which
+      snakewriter lays out as .../slurm_logs/rule_<R>/[<F>/]<J>.log) --
+      Fragment is omitted for rules that don't run per-fragment.
+    - The matching 'Finished jobid: N (Rule: R)' message (emitted later,
+      once the job completes) is enriched with the same slurm_id/Fragment,
+      looked up by N from the submission message above.
+    - The startup 'Command: ...' line is reformatted to one flag per line.
+
+    In all cases, the common output-directory prefix is abbreviated as
+    '$OUTPUT_DIR'.
+    """
+
+    _SUBMIT_RE = re.compile(
+        r'^Job (?P<jobid>\S+) has been submitted with SLURM jobid '
+        r'(?P<slurm_jobid>\S+) \(log: (?P<log>.+)\)\.$')
+    _FINISH_RE = re.compile(
+        r'^Finished jobid: (?P<jobid>\S+) \(Rule: (?P<rule>.+)\)$')
+    _LOGPATH_RE = re.compile(
+        r'slurm_logs/rule_(?P<rule>[^/]+)/(?:(?P<fragment>\d+)/)?'
+        r'(?P<slurmid>\d+)\.log$')
+    _FLAG_RE = re.compile(r'(?=\s-{1,2}[A-Za-z])')
+
+    def __init__(self, outputDir):
+        super().__init__()
+        self._outputDir = str(outputDir)
+        self._jobinfo = {}
+
+    @staticmethod
+    def _tag(rule: str, fragment: str) -> str:
+        tag = ' (Rule: %s)' % rule
+        if fragment is not None:
+            tag += ' (Fragment: %s)' % fragment
+        return tag
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if getattr(record, 'event', None) == LogEvent.WORKFLOW_STARTED \
+                and hasattr(record, 'cmd'):
+            flags = [t.strip() for t in
+                     self._FLAG_RE.split(record.cmd) if t.strip()]
+            record.cmd = '\n' + flags[0] + '\n' + \
+                '\n'.join('\t%s' % f for f in flags[1:])
+            return True
+
+        submitMatch = self._SUBMIT_RE.match(record.getMessage())
+        if submitMatch:
+            log = submitMatch.group('log').replace(
+                self._outputDir, '$OUTPUT_DIR')
+            logMatch = self._LOGPATH_RE.search(log)
+            rule = logMatch.group('rule') if logMatch else '?'
+            fragment = logMatch.group('fragment') if logMatch else None
+            jobid = submitMatch.group('jobid')
+            slurmJobid = submitMatch.group('slurm_jobid')
+            self._jobinfo[jobid] = (slurmJobid, rule, fragment)
+            record.msg = (
+                '[%s]\nSubmitted jobid: %s (slurm_id: %s)%s'
+                % (time.asctime(time.localtime(record.created)), jobid,
+                   slurmJobid, self._tag(rule, fragment)))
+            record.args = None
+            return True
+
+        finishMatch = self._FINISH_RE.match(record.getMessage())
+        if finishMatch:
+            jobid = finishMatch.group('jobid')
+            info = self._jobinfo.get(jobid)
+            if info:
+                slurmJobid, rule, fragment = info
+                record.msg = (
+                    'Finished jobid: %s (slurm_id: %s)%s'
+                    % (jobid, slurmJobid, self._tag(rule, fragment)))
+                record.args = None
+        return True
+
+
 def run_with_snakemake(
         dataSet: dataset.MERFISHDataSet, snakefilePath: str, coreCount: int,
-        snakemakeParameters: Dict = {}):
-    """Execute a generated Snakefile locally through snakemake's Python API.
+        snakemakeParameters: Dict = {}, clusterConfig: Dict = None):
+    """Execute a generated Snakefile through snakemake's Python API, either
+    locally (the default) or, when snakemakeParameters (-k/
+    --snakemake-parameters) is provided, distributed across a SLURM cluster
+    via snakemake-executor-plugin-slurm.
 
-    Only local execution is supported. `snakemakeParameters` (from
-    -k/--snakemake-parameters) previously carried a generic `cluster:`
-    sbatch command-template string for remote/cluster submission, using
-    snakemake's pre-8.0 API; snakemake 8.0 removed that generic
-    cluster-submission mechanism in favor of a separate executor-plugin
-    system (e.g. snakemake-executor-plugin-slurm) with its own resource
-    model, which is a real, untested-here migration of its own -- so a
-    non-empty snakemakeParameters is rejected explicitly rather than
-    silently mishandled.
+    snakemake 8.0 removed the pre-8.0 generic `cluster:` sbatch
+    command-template mechanism that snakemakeParameters/clusterConfig's JSON
+    shapes originally targeted. Rather than change those JSON shapes (kept
+    unchanged so existing -k/cluster_config files still work), the
+    translation to the executor-plugin's per-rule `resources:` model happens
+    internally: clusterConfig's per-task resource overrides are baked into
+    the generated Snakefile's rules (see snakewriter.SnakefileGenerator),
+    and snakemakeParameters' top-level `nodes`/`restart_times` plus
+    clusterConfig's `__default__.requeue` are translated below into the
+    equivalent executor/resource settings. snakemakeParameters'
+    `job_name_prefix` (default 'merlin') becomes the SLURM job-name prefix
+    (snakemake-executor-plugin-slurm always uses a per-run UUID as the job
+    name itself, to support its own `sacct`/`squeue --name`-based status
+    polling, so this prefix is the only per-run customization the plugin
+    exposes -- it does not vary per rule/fragment).
     """
-    if snakemakeParameters:
-        raise NotImplementedError(
-            'Cluster/remote snakemake execution via -k/--snakemake-'
-            'parameters is not supported with the current snakemake '
-            'version: snakemake 8.0 replaced the generic `cluster:` '
-            'command-template mechanism this parameters file format '
-            'assumed with a separate executor-plugin system. Run without '
-            '-k for local execution, or port the cluster path to an '
-            'executor plugin first.')
-
     print('Running MERlin pipeline through snakemake')
+    if snakemakeParameters:
+        executorName = 'slurm'
+        executionSettings = ExecutionSettings(
+            lock=False, latency_wait=10,
+            retries=snakemakeParameters.get('restart_times', 0))
+        resourceSettings = ResourceSettings(
+            cores=coreCount, nodes=snakemakeParameters.get('nodes'))
+        defaultResources = (clusterConfig or {}).get('__default__', {})
+        executorSettings = SlurmExecutorSettings(
+            requeue=bool(defaultResources.get('requeue', False)),
+            jobname_prefix=snakemakeParameters.get(
+                'job_name_prefix', 'merlin'),
+            logdir=Path(dataSet.get_snakemake_path()) / 'slurm_logs')
+        print('$OUTPUT_DIR = %s' % dataSet.get_snakemake_path())
+        logging.getLogger('snakemake.logging').addFilter(
+            _SlurmDriverLogFilter(dataSet.get_snakemake_path()))
+    else:
+        executorName = 'local'
+        executionSettings = ExecutionSettings(lock=False, latency_wait=10)
+        resourceSettings = ResourceSettings(cores=coreCount)
+        executorSettings = None
+
     with SnakemakeApi(OutputSettings()) as snakemakeApi:
         workflowApi = snakemakeApi.workflow(
-            resource_settings=ResourceSettings(cores=coreCount),
+            resource_settings=resourceSettings,
             snakefile=Path(snakefilePath),
             workdir=Path(dataSet.get_snakemake_path()))
         dagApi = workflowApi.dag(dag_settings=None)
         dagApi.execute_workflow(
-            executor='local',
-            execution_settings=ExecutionSettings(
-                lock=False, latency_wait=10))
+            executor=executorName,
+            execution_settings=executionSettings,
+            executor_settings=executorSettings)

@@ -382,7 +382,13 @@ abbreviation function, and a terser driver-log job-submission message.
 - MERci handoff written directly into MERci's own `prompt_history/
   2026_08_18_1632_add_short_experiment_name_for_slurm_job_prefix.md` (short
   experiment-name function for `job_name_prefix`, from 2 example mappings).
-- Nothing committed; branch `feature/slurm-job-naming-verbosity`.
+- **Committed, pushed, and merged to master** (commit `ab30e51`, branch
+  `feature/slurm-job-naming-verbosity` pushed to origin; merged `--no-ff`
+  into `master` as `cf99f63`, pushed). Full suite re-verified on the merge
+  commit before pushing: 134 passed, same 6 pre-existing
+  `test_snakemake.py` local-execution failures (confirmed via `git stash`
+  against the prior commit -- unchanged by this change). `cache/` (local
+  reference material, untracked) deliberately left out of the commit.
 
 ## Pending: port the `-x`/`--analysis-name` flag into this repo
 

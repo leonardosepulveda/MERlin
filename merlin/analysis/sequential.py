@@ -41,6 +41,23 @@ class SumSignal(analysistask.ParallelAnalysisTask):
                 % (self.analysisName, self.parameters['z_index'],
                    len(self.dataSet.get_z_positions())))
 
+        # optional subset of sequential channels to sum; None means all of
+        # them (matches the pre-existing, backward-compatible behavior)
+        if 'channel_names' not in self.parameters:
+            self.parameters['channel_names'] = None
+
+        if self.parameters['channel_names'] is not None:
+            _, sequentialGeneNames = self.dataSet.get_data_organization()\
+                .get_sequential_rounds()
+            invalidChannels = [c for c in self.parameters['channel_names']
+                                if c not in sequentialGeneNames]
+            if invalidChannels:
+                raise analysistask.InvalidParameterException(
+                    'Invalid channel_names specified for %s: %s not found '
+                    'among sequential channels %s'
+                    % (self.analysisName, invalidChannels,
+                       sequentialGeneNames))
+
         self.highpass = str(self.parameters['apply_highpass']).upper() == 'TRUE'
         self.alignTask = self.dataSet.load_analysis_task(
             self.parameters['global_align_task'])
@@ -58,6 +75,16 @@ class SumSignal(analysistask.ParallelAnalysisTask):
         return [self.parameters['warp_task'],
                 self.parameters['segment_task'],
                 self.parameters['global_align_task']]
+
+    def _select_channels(self, channels, geneNames):
+        """Filter the channels/geneNames pair returned by
+        get_sequential_rounds() down to the 'channel_names' subset, if one
+        was specified; otherwise return them unchanged."""
+        if self.parameters['channel_names'] is None:
+            return channels, geneNames
+        selected = [(ch, name) for ch, name in zip(channels, geneNames)
+                    if name in self.parameters['channel_names']]
+        return [ch for ch, _ in selected], [name for _, name in selected]
 
     def _extract_signal(self, cells, inputImage, zIndex) -> pandas.DataFrame:
         cellCoords = []
@@ -146,6 +173,7 @@ class SumSignal(analysistask.ParallelAnalysisTask):
                    zIndex))
         channels, geneNames = self.dataSet.get_data_organization()\
             .get_sequential_rounds()
+        channels, geneNames = self._select_channels(channels, geneNames)
 
         fovSignal = self._get_sum_signal(fragmentIndex, channels, zIndex)
         normSignal = fovSignal.iloc[:, :-1].div(fovSignal.loc[:, 'Pixels'], 0)

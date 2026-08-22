@@ -3,6 +3,41 @@
 Curated current-state summary. See `prompt_history/` for full provenance of each item
 below; this file only tracks what's true *now* and the open next step.
 
+## SumSignal channel_names merged; sequential.py's missing deps fixed (2026-08-22)
+
+`feature/sumsignal-channel-names` merged `--no-ff` into `master` (pushed).
+`archive/yaml-and-snakemake-mixed` (superseded by the three-branch split
+below) deleted, local-only, never pushed.
+
+Verifying the merge surfaced that `merlin/analysis/sequential.py` has two
+module-level imports never added to `requirements.txt` -- `geopandas`
+(colocalization spatial joins) and `bigfish.detection` (PyPI package
+`big-fish`, smFISH spot detection) -- both from commit `46bb2431`
+(2025-11-06). This blocks importing the *whole* module, not just the
+colocalization/smFISH code, in any env missing either package (e.g.
+`merlin_cc_env`, which lacked both). Fixed on new branch
+`fix/geopandas-missing-dependency` (both added to `requirements.txt`;
+branch created, verified, **not yet merged to master**). Installed both
+into `merlin_cc_env` directly (`geopandas==1.1.4`, `big-fish==0.6.2`);
+`test_sequential.py` now passes (was failing at collection). Full fast
+suite from a clean fixture state: 148 passed; remaining 8
+failed/10 errors are pre-existing and unrelated (`test_snakemake.py`
+local-execution `WorkflowError`s, `test_core.py`/`test_dataset.py`
+`OSError: Directory not empty` teardown flakiness -- the Linux analog of
+this file's documented Windows teardown issue; none touch `sequential.py`
+or either new package).
+
+**Correction to the "Pending -x/--analysis-name flag" note below**:
+`merlin_cc_env`'s editable install does *not* resolve to
+`~/Software/merlin_cc/MERlin` -- confirmed by reading the env's own
+`__editable___merlin_0_1_6_finder.py`, whose `MAPPING` points `merlin` at
+this repo (`260715_LT059_merlin_update/MERlin`) directly. The
+`~/Software/merlin_cc/MERlin` clone is real and still holds that
+uncommitted `-x` WIP (untouched, on `master`@`1fae07e`, 17 commits behind
+but cleanly fast-forwardable), but it is not what `merlin_cc_env` actually
+runs -- don't assume package installs into `merlin_cc_env` need a
+corresponding change there.
+
 ## Three independent branches: YAML recipes, snakemake>=8, setuptools 83 (2026-08-16)
 
 Per explicit "each must be written as a separate branch" instruction, split what had

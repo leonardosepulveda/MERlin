@@ -151,6 +151,62 @@ def test_fit_global_positions_empty_input():
     assert correction.residual_rms_um == 0.0
 
 
+def test_compute_overlap_correlations_matches_at_correct_shift():
+    """Correlation should be near-perfect once *positions* correctly
+    accounts for the true relative shift between the two fovs, and
+    strictly worse if *positions* is left at the (wrong) nominal offset
+    instead -- mirrors `test_register_neighbor_pair_sign_convention`'s own
+    synthetic-shift setup.
+    """
+    rng = np.random.default_rng(1)
+    pixelSizeUm = 0.1
+    stepUm = 6.0
+    frameWidth = 60
+    overlapFraction = 0.5
+    trueShiftPx = 3
+    nOverlap = int(round(frameWidth * overlapFraction))
+    neighborStartCol = frameWidth - nOverlap + trueShiftPx
+
+    world = rng.random((frameWidth, frameWidth + frameWidth))
+    frames = {0: world[:, :frameWidth],
+             1: world[:, neighborStartCol:neighborStartCol + frameWidth]}
+
+    nominal = {0: (0.0, 0.0), 1: (stepUm, 0.0)}
+    trueShiftUm = trueShiftPx * pixelSizeUm
+    correctPositions = {0: (0.0, 0.0), 1: (stepUm + trueShiftUm, 0.0)}
+    correspondence = globalpositions.NeighborCorrespondence(
+        0, 1, '+x', nominal[1], (nominal[1][0] + trueShiftUm, 0.0), 0.01)
+
+    correctCorrelations = globalpositions.compute_overlap_correlations(
+        [correspondence], correctPositions, nominal, frames.__getitem__,
+        pixel_size_um=pixelSizeUm, overlap_fraction=overlapFraction)
+    wrongCorrelations = globalpositions.compute_overlap_correlations(
+        [correspondence], nominal, nominal, frames.__getitem__,
+        pixel_size_um=pixelSizeUm, overlap_fraction=overlapFraction)
+
+    # Not exactly 1.0 even at the correct shift: the shift-compensated crop's
+    # trailing edge (trueShiftPx of its nOverlap columns) has no real data to
+    # interpolate from (`ndi_shift`'s `mode='nearest'` pads it instead) -- a
+    # real, expected boundary effect, not a bug. The uncorrected (wrong)
+    # position leaves two independent random crops, which correlate at ~0.
+    assert correctCorrelations[(0, 1, '+x')] > 0.85
+    assert wrongCorrelations[(0, 1, '+x')] == pytest.approx(0.0, abs=0.1)
+    assert wrongCorrelations[(0, 1, '+x')] < correctCorrelations[(0, 1, '+x')]
+
+
+def test_compute_overlap_correlations_degenerate_crop_returns_zero_not_nan():
+    frames = {0: np.zeros((10, 10)), 1: np.zeros((10, 10))}
+    nominal = {0: (0.0, 0.0), 1: (5.0, 0.0)}
+    correspondence = globalpositions.NeighborCorrespondence(
+        0, 1, '+x', nominal[1], nominal[1], 0.0)
+
+    correlations = globalpositions.compute_overlap_correlations(
+        [correspondence], nominal, nominal, frames.__getitem__,
+        pixel_size_um=1.0, overlap_fraction=0.5)
+
+    assert correlations[(0, 1, '+x')] == 0.0
+
+
 def test_fit_global_positions_disconnected_components_solved_independently():
     nominal = {0: (0.0, 0.0), 1: (100.0, 0.0), 10: (500.0, 500.0), 11: (600.0, 500.0)}
     correspondences = [

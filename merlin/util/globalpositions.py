@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
+from scipy.ndimage import shift as ndi_shift
 from scipy.sparse import lil_matrix
 from scipy.sparse.linalg import lsqr
 from scipy.spatial import KDTree
@@ -509,3 +510,73 @@ def fit_global_positions(
         positions=positions, anchor_fovs=anchorFovs, n_fovs_solved=len(positions),
         n_correspondences=nCorr, n_components=len(components), residual_rms_um=residualRmsUm,
     )
+
+
+def compute_overlap_correlations(
+    correspondences:   List[NeighborCorrespondence],
+    positions:         Dict[int, Tuple[float, float]],
+    nominal_positions: Dict[int, Tuple[float, float]],
+    load_frame:        Callable[[int], np.ndarray],
+    pixel_size_um:     float,
+    overlap_fraction:  float,
+) -> Dict[Tuple[int, int, str], float]:
+    """
+    Pearson correlation between each correspondence's anchor/neighbour
+    overlap-band crop, evaluated AT *positions* -- typically the FINAL,
+    corrected positions from :func:`fit_global_positions` -- rather than at
+    whatever shift `register_neighbor_pair`'s own phase correlation happened
+    to measure for that one pair. Since the joint least-squares solve uses
+    every fov's correspondences at once, its implied relative offset for a
+    given pair can differ from that one pair's own raw measurement -- this
+    is how well adjacent fovs' real image content actually agrees once
+    every position has been jointly solved.
+
+    Ported from the sibling MERci project's
+    `acquisition.camera_rotation.overlap_correlation`, which used this exact
+    metric (mean overlap correlation across the whole grid) to pick the
+    best of several candidate correction strategies on real data -- see
+    this module's own docstring.
+
+    Returns ``{(anchor_fov, neighbor_fov, direction): correlation}``. A
+    degenerate (zero-variance) crop scores ``0.0``, not ``NaN`` -- a
+    zero-variance crop has no real correlation to report, and ``NaN``
+    would silently corrupt any downstream mean/plot.
+    """
+    frameCache: Dict[int, np.ndarray] = {}
+
+    def _get_frame(fov: int) -> np.ndarray:
+        if fov not in frameCache:
+            frameCache[fov] = load_frame(fov)
+        return frameCache[fov]
+
+    directionToDxDy = {label: (dx, dy) for label, dx, dy in _DIRECTIONS}
+    correlations: Dict[Tuple[int, int, str], float] = {}
+    for c in correspondences:
+        dx, dy = directionToDxDy[c.direction]
+        anchorCrop, neighborCrop = crop_overlap(
+            _get_frame(c.anchor_fov), _get_frame(c.neighbor_fov), dx, dy, overlap_fraction)
+        anchorCrop = anchorCrop.astype(np.float64)
+        neighborCrop = neighborCrop.astype(np.float64)
+
+        # The extra shift implied by *positions* beyond the nominal-grid
+        # alignment `crop_overlap` already assumes -- same convention
+        # `register_neighbor_pair` uses to turn a measured pixel shift into
+        # a position, just inverted here to turn a position back into a
+        # shift to apply to the crop before correlating.
+        nominalOffset = np.subtract(
+            nominal_positions[c.neighbor_fov], nominal_positions[c.anchor_fov])
+        finalOffset = np.subtract(positions[c.neighbor_fov], positions[c.anchor_fov])
+        extraShiftUm = finalOffset - nominalOffset
+        if extraShiftUm[0] != 0.0 or extraShiftUm[1] != 0.0:
+            neighborCrop = ndi_shift(
+                neighborCrop,
+                shift=(extraShiftUm[1] / pixel_size_um, extraShiftUm[0] / pixel_size_um),
+                order=1, mode='nearest')
+
+        anchorFlat, neighborFlat = anchorCrop.ravel(), neighborCrop.ravel()
+        if anchorFlat.std() == 0.0 or neighborFlat.std() == 0.0:
+            correlations[(c.anchor_fov, c.neighbor_fov, c.direction)] = 0.0
+        else:
+            correlations[(c.anchor_fov, c.neighbor_fov, c.direction)] = float(
+                np.corrcoef(anchorFlat, neighborFlat)[0, 1])
+    return correlations

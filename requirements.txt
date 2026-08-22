@@ -1,7 +1,9 @@
+big-fish
 boto3
 cellpose>=4.0
 cython
 docutils
+geopandas
 google-cloud-storage
 h5py
 matplotlib

@@ -155,6 +155,44 @@ same two already-documented pre-existing issues, confirmed unrelated to this cha
 See `prompt_history/2026_08_13_1927_implement_least_squares_global_alignment.md` for
 full detail.
 
+**Update (2026-08-22): non-rectangular-grid neighbor-search fix.** A cross-repo
+handoff from MERci (`251225_LT027_saving_time/MERci/cache/
+prompt_merlin_verify_nonrectangular_grid.md`) flagged that MERci's own new
+"irregular" (non-rectangular, independently-phase-shifted-band) FOV grid API
+broke any tool assuming one global grid step + fixed cardinal-direction
+neighbor offsets (measured on real data: cross-band neighbors found 12-491/572
+times vs. 424-476/572 within-band, across a swept tolerance) -- and that
+`globalpositions.py` implements exactly that pattern (it was ported from this
+same area of MERci's code). Verified by reading the code directly: confirmed
+`find_grid_neighbor` did match a candidate against an exact target point
+(`anchor + (dx,dy) * one dataset-wide median step`, `tolerance_fraction=0.25`),
+which would systematically miss/mistolerance a cross-band neighbor the same
+way. Independently re-checked the handoff's other claims
+(`generatemosaic.py`'s absolute-offset tile placement, `dataset.py`'s
+FOV-id-keyed `_load_positions`, `spatialfeature.py`'s rtree/shapely cell-overlap
+partitioning) -- all unaffected, confirmed rather than taken on faith. A grep
+sweep found no other rectangular-grid assumption elsewhere in MERlin.
+
+Fixed: `find_grid_neighbor` now classifies each candidate by which axis/sign of
+its displacement from the anchor dominates, then accepts the closest candidate
+in that direction if it's within `tolerance_fraction` of the anchor's own local
+step (its own nearest-neighbor distance), not a dataset-wide one -- this needs
+no shared step or phase between regions. `sample_neighbor_correspondences` no
+longer takes a `step_size_um` argument (derived locally per anchor now); its
+one call site in `globalalign.py` was updated accordingly (the module's
+separate, unrelated `stepSizeUm` global-median use for `overlap_fraction`
+estimation was untouched). Added
+`test_find_grid_neighbor_on_phase_shifted_bands` (two independently
+phase-shifted scan-band columns, mirroring MERci's layout) demonstrating the
+old algorithm would reject the true cross-band neighbor while the new one
+finds it. Full targeted suite (`test_globalpositions.py`,
+`test_globalalign.py`, including `LeastSquaresGlobalAlignment`'s own
+integration tests) passes; unrelated `test_dataset.py`/`test_snakemake.py`/
+`test_core.py` failures confirmed pre-existing (identical on unmodified
+master). Committed on branch `fix/nonrectangular-grid-neighbor-search`, not
+yet merged -- awaiting explicit go-ahead. See
+`prompt_history/2026_08_22_1906_verify_nonrectangular_grid_neighbor_search.md`.
+
 ## General per-task verification-figures mechanism (2026-08-14)
 
 Added a new, general hook -- `AnalysisTask._generate_verification_figures()` (no-op

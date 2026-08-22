@@ -9,12 +9,32 @@ def test_find_grid_neighbor():
         0: (0.0, 0.0), 1: (100.0, 0.0), 2: (-100.0, 0.0),
         3: (0.0, 100.0), 4: (0.0, -100.0), 5: (300.0, 300.0),
     }
-    assert globalpositions.find_grid_neighbor(0, positions, 1.0, 0.0, 100.0, 0.25) == 1
-    assert globalpositions.find_grid_neighbor(0, positions, -1.0, 0.0, 100.0, 0.25) == 2
-    assert globalpositions.find_grid_neighbor(0, positions, 0.0, 1.0, 100.0, 0.25) == 3
-    assert globalpositions.find_grid_neighbor(0, positions, 0.0, -1.0, 100.0, 0.25) == 4
+    assert globalpositions.find_grid_neighbor(0, positions, 1.0, 0.0, 0.25) == 1
+    assert globalpositions.find_grid_neighbor(0, positions, -1.0, 0.0, 0.25) == 2
+    assert globalpositions.find_grid_neighbor(0, positions, 0.0, 1.0, 0.25) == 3
+    assert globalpositions.find_grid_neighbor(0, positions, 0.0, -1.0, 0.25) == 4
     # fov 5 is isolated (far from any grid step away) -- no match expected
-    assert globalpositions.find_grid_neighbor(5, positions, 1.0, 0.0, 100.0, 0.25) is None
+    assert globalpositions.find_grid_neighbor(5, positions, 1.0, 0.0, 0.25) is None
+
+
+def test_find_grid_neighbor_on_phase_shifted_bands():
+    """Non-rectangular grid: two scan bands (columns) independently
+    phase-shifted along y, as in MERci's irregular-grid layout. A single
+    dataset-wide step + exact-offset match (the old algorithm) misses the
+    true cross-band neighbour here: column A's own within-band step is 100,
+    so the +x target from (0, 0) sits at (100, 0) -- 50um away from column
+    B's actual closest fov at (100, 50), outside a 0.25 * 100 = 25um
+    tolerance. The dominant-axis/local-step algorithm finds it anyway,
+    because it never needs the two bands to share a common step or phase.
+    """
+    positions = {
+        0: (0.0, 0.0), 1: (0.0, 100.0), 2: (0.0, 200.0), 3: (0.0, 300.0),
+        10: (100.0, 50.0), 11: (100.0, 150.0), 12: (100.0, 250.0),
+    }
+    assert globalpositions.find_grid_neighbor(0, positions, 1.0, 0.0, 0.25) == 10
+    assert globalpositions.find_grid_neighbor(1, positions, 1.0, 0.0, 0.25) == 10
+    assert globalpositions.find_grid_neighbor(2, positions, 1.0, 0.0, 0.25) == 11
+    assert globalpositions.find_grid_neighbor(10, positions, -1.0, 0.0, 0.25) == 0
 
 
 def test_estimate_step_size_um():

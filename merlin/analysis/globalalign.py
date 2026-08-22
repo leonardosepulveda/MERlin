@@ -366,7 +366,7 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
 
         correspondences = globalpositions.sample_neighbor_correspondences(
             fov_ids=fovs, positions=nominalPositions, load_frame=load_frame,
-            step_size_um=stepSizeUm, pixel_size_um=micronsPerPixel,
+            pixel_size_um=micronsPerPixel,
             overlap_fraction=overlapFraction,
             tolerance_fraction=self.parameters['tolerance_fraction'],
             upsample_factor=self.parameters['upsample_factor'])

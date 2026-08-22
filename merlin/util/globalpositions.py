@@ -87,28 +87,57 @@ def find_grid_neighbor(
     positions:          Dict[int, Tuple[float, float]],
     dx:                 float,
     dy:                 float,
-    step_size_um:       float,
     tolerance_fraction: float = 0.25,
 ) -> Optional[int]:
-    """Find the fov (if any) sitting at *anchor_fov*'s nominal position
-    plus ``(dx, dy) * step_size_um``, within
-    ``tolerance_fraction * step_size_um`` of that expected position.
+    """Find the fov (if any) sitting in the ``(dx, dy)`` direction from
+    *anchor_fov*'s own nominal position -- the closest other fov whose
+    displacement from the anchor is dominated by that axis and has the
+    matching sign, rather than the fov closest to a target point at exactly
+    ``anchor + (dx, dy) * (one dataset-wide step size)``.
 
-    Returns ``None`` if no other fov is within tolerance (e.g. the anchor
-    sits on the grid's exterior on this side).
+    This matters on a non-rectangular grid where different regions have
+    their own true step or phase along one axis (e.g. independently
+    phase-shifted scan bands): a cross-region neighbour's real offset from
+    the anchor isn't ``(dx, dy) * (one dataset-wide step)``, so matching
+    against that exact target point systematically misses/mistolerances
+    exactly those neighbours (confirmed on real data by the sibling MERci
+    project -- see this module's own docstring).
+
+    ``tolerance_fraction`` still guards against picking a real but distant
+    fov when the anchor has no true neighbour on this side (e.g. it sits on
+    the grid's exterior): the best directional candidate is only accepted
+    if its distance from the anchor is within ``tolerance_fraction`` of the
+    anchor's own local step size, i.e. its distance to its single nearest
+    neighbour in ANY direction (not a dataset-wide step size).
+
+    Returns ``None`` if no fov qualifies.
     """
-    if step_size_um <= 0:
-        return None
     candidateIds = [f for f in positions if f != anchor_fov]
     if not candidateIds:
         return None
 
     anchorXY = np.array(positions[anchor_fov], dtype=float)
-    targetXY = anchorXY + np.array([dx, dy]) * step_size_um
-    coords = np.array([positions[f] for f in candidateIds], dtype=float)
-    distance, index = KDTree(coords).query(targetXY)
-    if distance <= tolerance_fraction * step_size_um:
-        return candidateIds[index]
+    displacements = np.array([positions[f] for f in candidateIds], dtype=float) - anchorXY
+    distances = np.hypot(displacements[:, 0], displacements[:, 1])
+    localStepUm = float(np.min(distances))
+    if localStepUm <= 0:
+        return None
+
+    if dx != 0:
+        matchesDirection = (
+            (np.abs(displacements[:, 0]) >= np.abs(displacements[:, 1]))
+            & (np.sign(displacements[:, 0]) == np.sign(dx)))
+    else:
+        matchesDirection = (
+            (np.abs(displacements[:, 1]) > np.abs(displacements[:, 0]))
+            & (np.sign(displacements[:, 1]) == np.sign(dy)))
+
+    eligible = np.where(matchesDirection)[0]
+    if len(eligible) == 0:
+        return None
+    best = eligible[np.argmin(distances[eligible])]
+    if distances[best] <= (1.0 + tolerance_fraction) * localStepUm:
+        return candidateIds[best]
     return None
 
 
@@ -190,7 +219,6 @@ def sample_neighbor_correspondences(
     fov_ids:            List[int],
     positions:          Dict[int, Tuple[float, float]],
     load_frame:         Callable[[int], np.ndarray],
-    step_size_um:       float,
     pixel_size_um:      float,
     overlap_fraction:   float,
     tolerance_fraction: float = 0.25,
@@ -215,7 +243,10 @@ def sample_neighbor_correspondences(
                   registration image for one fov (results are cached per
                   fov id, since a neighbour can also be sampled as another
                   anchor's neighbour)
-    step_size_um, pixel_size_um, overlap_fraction : grid/camera geometry
+    pixel_size_um, overlap_fraction : grid/camera geometry (see
+                  `find_grid_neighbor` for how each anchor's own local step
+                  size is derived from *positions* directly, rather than
+                  taken as a dataset-wide value)
     """
     frameCache: Dict[int, np.ndarray] = {}
 
@@ -229,7 +260,7 @@ def sample_neighbor_correspondences(
         anchorImg = _get_frame(anchorFov)
         for direction, dx, dy in _DIRECTIONS:
             neighborFov = find_grid_neighbor(
-                anchorFov, positions, dx, dy, step_size_um, tolerance_fraction)
+                anchorFov, positions, dx, dy, tolerance_fraction)
             if neighborFov is None:
                 continue
             neighborImg = _get_frame(neighborFov)

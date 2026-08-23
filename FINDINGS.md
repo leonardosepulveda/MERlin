@@ -3,6 +3,35 @@
 Curated current-state summary. See `prompt_history/` for full provenance of each item
 below; this file only tracks what's true *now* and the open next step.
 
+## FiducialCorrelationWarp: drift_qc verification figure (2026-08-23)
+
+Added a `drift_qc` verification figure to `FiducialCorrelationWarp`
+(`merlin/analysis/warp.py`), using the same `_generate_verification_figures`
+hook (see "General per-task verification-figures mechanism" below) that
+`LeastSquaresGlobalAlignment` already uses. One 3-panel figure per data set,
+built from `get_transformation(fov)` across every fov and data channel: (1)
+x/y shift scatter colored by data channel on square symmetric axes, (2)
+shift-distance histogram with median marked, (3) a fov x data-channel
+heatmap of distance minus median -- both axis limits outlier-resistant via a
+new `_robust_max` helper. `FiducialCorrelationWarp3D` inherits this
+unchanged (same inherited `get_transformation`/`_save_transformations` path
+for its 2D registration).
+
+Design mirrors the sibling `260614_LT058_fishtank_debug` project's `fishtank
+plot-drift` QC feature (`plot_drift.py`, submitted as `jweissmanlab/fishtank`
+PR #14 `add-drift-qc`, still awaiting maintainer review there) -- same
+3-panel layout, adapted from fishtank's "round" to MERlin's "data channel"
+and labeled *shift* rather than *drift* to sidestep that project's raw
+phase-correlation sign-convention ambiguity.
+
+Verified against a synthetic fake dataSet/task (15 fovs x 6 data channels,
+no real image data needed). `pytest -k "not slowtest"` before/after on a
+clean fixture state showed the same pre-existing flaky failure class
+(`test_analysis/` teardown `OSError`s, `test_snakemake.py` `WorkflowError`s
+-- both already documented elsewhere in this file); none touch `warp.py`.
+Committed on new branch `feature/fiducial-drift-qc-figure`; not yet
+merged/pushed.
+
 ## SumSignal channel_names merged; sequential.py's missing deps fixed (2026-08-22)
 
 `feature/sumsignal-channel-names` merged `--no-ff` into `master` (pushed).

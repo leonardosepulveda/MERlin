@@ -17,7 +17,10 @@ module-level imports never added to `requirements.txt` -- `geopandas`
 colocalization/smFISH code, in any env missing either package (e.g.
 `merlin_cc_env`, which lacked both). Fixed on new branch
 `fix/geopandas-missing-dependency` (both added to `requirements.txt`;
-branch created, verified, **not yet merged to master**). Installed both
+branch created, verified). **Update (2026-08-23): merged into `master` and
+pushed to `origin/master`** (confirmed via `git merge-base --is-ancestor
+fix/geopandas-missing-dependency origin/master`) -- this note's original
+"not yet merged" status was stale. Installed both
 into `merlin_cc_env` directly (`geopandas==1.1.4`, `big-fish==0.6.2`);
 `test_sequential.py` now passes (was failing at collection). Full fast
 suite from a clean fixture state: 148 passed; remaining 8
@@ -86,10 +89,15 @@ working tree also had unrelated uncommitted changes (absolute-path support for
 request -- left untouched, restored via `git stash`/`git stash pop` around the branch
 work rather than discarded.
 
-**Next step**: awaiting user inspection of the three branches before merging any of them
-into `master` (not done automatically, per the request's own "commit and merge with main
-after inspection" phrasing) or pushing to `origin` (standing "confirm before push"
-agreement).
+**Update (2026-08-23): all three merged into `master`/`origin/master`.**
+`feature/yaml-analysis-recipes` via an explicit merge commit (`b69ad4d`);
+`fix/setuptools-upgrade`'s commit (`99d0a5f`) landed directly on master's
+mainline (fast-forward, no separate merge commit); `feature/snakemake-v8-
+migration`'s core commit (`bedd65f`) is in master's history, subsumed into
+the later `feature/slurm-job-naming-verbosity` work that built on top of it
+and was merged (`cf99f63`/`036188d`). Confirmed directly via
+`git merge-base --is-ancestor <branch> origin/master` for all three, not
+assumed from this note.
 
 ## SumSignal channel_names parameter (2026-08-16)
 
@@ -189,9 +197,20 @@ finds it. Full targeted suite (`test_globalpositions.py`,
 `test_globalalign.py`, including `LeastSquaresGlobalAlignment`'s own
 integration tests) passes; unrelated `test_dataset.py`/`test_snakemake.py`/
 `test_core.py` failures confirmed pre-existing (identical on unmodified
-master). Committed on branch `fix/nonrectangular-grid-neighbor-search`, not
-yet merged -- awaiting explicit go-ahead. See
+master). Committed on branch `fix/nonrectangular-grid-neighbor-search`.
+**Update (2026-08-23): merged into `master` and pushed to `origin/master`**
+(confirmed via `git merge-base --is-ancestor
+fix/nonrectangular-grid-neighbor-search origin/master`) -- this note's
+original "not yet merged" status was stale. See
 `prompt_history/2026_08_22_1906_verify_nonrectangular_grid_neighbor_search.md`.
+
+**Update (2026-08-23): overlap-correlation verification figures merged.**
+`feature/overlap-correlation-figures` (two new `LeastSquaresGlobalAlignment`
+verification figures -- `overlap_correlation_grid`,
+`overlap_correlation_histogram` -- see `prompt_history/
+2026_08_22_1928_add_overlap_correlation_figures.md`) pushed to `origin`,
+merged `--no-ff` into `master` (commit `c242d6c`), master pushed. 16/16
+targeted tests re-verified passing on master post-merge before pushing.
 
 ## General per-task verification-figures mechanism (2026-08-14)
 

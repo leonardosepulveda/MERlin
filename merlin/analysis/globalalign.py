@@ -393,6 +393,12 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
 
         if correspondences:
             keptKeys = {(c.anchor_fov, c.neighbor_fov, c.direction) for c in kept}
+            # Only kept correspondences fed the correction fit, so only
+            # those are meaningful to score against the FINAL positions;
+            # rejected ones get no correlation (NaN).
+            correlations = globalpositions.compute_overlap_correlations(
+                kept, correctedPositions, nominalPositions, load_frame,
+                pixel_size_um=micronsPerPixel, overlap_fraction=overlapFraction)
             self.dataSet.save_dataframe_to_csv(
                 pd.DataFrame([
                     {'anchor_fov': c.anchor_fov, 'neighbor_fov': c.neighbor_fov,
@@ -400,7 +406,9 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
                      'nominal_x': c.nominal_xy[0], 'nominal_y': c.nominal_xy[1],
                      'measured_x': c.measured_xy[0], 'measured_y': c.measured_xy[1],
                      'error': c.error,
-                     'kept': (c.anchor_fov, c.neighbor_fov, c.direction) in keptKeys}
+                     'kept': (c.anchor_fov, c.neighbor_fov, c.direction) in keptKeys,
+                     'correlation': correlations.get(
+                         (c.anchor_fov, c.neighbor_fov, c.direction), np.nan)}
                     for c in correspondences
                 ]),
                 'neighbor_correspondences', self)
@@ -416,7 +424,9 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
         # Each plot is independently guarded -- e.g. an isolated fov with no
         # surviving neighbour correspondence at all still gets a grid-overlay
         # figure even though the direction-reliability one has nothing to show.
-        for plotMethod in (self._plot_direction_reliability, self._plot_grid_overlay):
+        for plotMethod in (self._plot_direction_reliability, self._plot_grid_overlay,
+                           self._plot_overlap_correlation_grid,
+                           self._plot_overlap_correlation_histogram):
             try:
                 plotMethod()
             except Exception:
@@ -509,4 +519,90 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
             '%s: corrected vs. nominal fov grid (mean shift=%.3f um, max=%.3f um)'
             % (self.analysisName, shiftUm.mean(), shiftUm.max()))
         self.dataSet.save_task_figure(self, fig, 'grid_overlay')
+        plt.close(fig)
+
+    def _load_overlap_correlation_edges(self) -> pd.DataFrame:
+        """Kept correspondences' `correlation` column, collapsed to one row
+        per physical edge. An interior fov's edge is measured -- and
+        correlated -- once from each side (see
+        `globalpositions.sample_neighbor_correspondences`'s own docstring),
+        so without this collapse the same edge would be drawn/counted
+        twice; averaging the (usually 2, occasionally 1) directions'
+        correlation for a shared edge keeps one value per physical overlap.
+        """
+        correspondenceDF = self.dataSet.load_dataframe_from_csv(
+            'neighbor_correspondences', self)
+        kept = correspondenceDF[correspondenceDF['kept']]
+        if kept.empty:
+            return kept
+        fovA = np.minimum(kept['anchor_fov'], kept['neighbor_fov'])
+        fovB = np.maximum(kept['anchor_fov'], kept['neighbor_fov'])
+        edgeDF = kept.assign(fov_a=fovA, fov_b=fovB)
+        return edgeDF.groupby(['fov_a', 'fov_b'], as_index=False)['correlation'].mean()
+
+    def _plot_overlap_correlation_grid(self) -> None:
+        """The corrected grid only (no nominal comparison, unlike
+        `grid_overlay`), with a line between every pair of neighbouring
+        fovs colored by the Pearson correlation of their overlap region AT
+        the corrected positions -- a low-correlation edge is a direct,
+        visual flag that the correction (or the underlying registration)
+        may be wrong there, independent of the shift-magnitude diagnostics
+        the other two figures show.
+        """
+        edgeDF = self._load_overlap_correlation_edges()
+        if edgeDF.empty:
+            return
+
+        correctedPositions = self._load_corrected_positions()
+        fovs = self.dataSet.get_fovs()
+        micronsPerPixel = self.dataSet.get_microns_per_pixel()
+        frameWidthUm = self.dataSet.get_image_dimensions()[0] * micronsPerPixel
+        half = frameWidthUm / 2
+        correctedXY = np.array([correctedPositions[f] for f in fovs])
+        margin = frameWidthUm * 2
+
+        fig, ax = plt.subplots(figsize=(8, 8))
+        for x, y in correctedXY:
+            ax.add_patch(mpatches.Rectangle(
+                (x - half, y - half), frameWidthUm, frameWidthUm,
+                fill=False, edgecolor='0.75', linewidth=0.6, zorder=1))
+
+        cmap = plt.get_cmap('RdYlGn')
+        norm = plt.Normalize(vmin=min(0.0, edgeDF['correlation'].min()), vmax=1.0)
+        for row in edgeDF.itertuples():
+            xa, ya = correctedPositions[row.fov_a]
+            xb, yb = correctedPositions[row.fov_b]
+            ax.plot([xa, xb], [ya, yb], color=cmap(norm(row.correlation)),
+                    linewidth=1.5, zorder=2)
+
+        ax.set_xlim(correctedXY[:, 0].min() - margin, correctedXY[:, 0].max() + margin)
+        # Same inverted-y, image-like display convention as grid_overlay.
+        ax.set_ylim(correctedXY[:, 1].max() + margin, correctedXY[:, 1].min() - margin)
+        ax.set_aspect('equal')
+        ax.set_xlabel('x (microns)')
+        ax.set_ylabel('y (microns)')
+        ax.set_title('%s: corrected grid, neighbor overlap correlation (%i edges)'
+                     % (self.analysisName, len(edgeDF)))
+        scalarMappable = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+        scalarMappable.set_array([])
+        fig.colorbar(scalarMappable, ax=ax, label='overlap correlation')
+        self.dataSet.save_task_figure(self, fig, 'overlap_correlation_grid')
+        plt.close(fig)
+
+    def _plot_overlap_correlation_histogram(self) -> None:
+        """Histogram of the same per-edge overlap correlations drawn as
+        lines in `overlap_correlation_grid` -- summarizes the whole grid's
+        overlap agreement into one distribution.
+        """
+        edgeDF = self._load_overlap_correlation_edges()
+        if edgeDF.empty:
+            return
+
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.hist(edgeDF['correlation'], bins=30, color='tab:blue', edgecolor='white')
+        ax.set_xlabel('overlap correlation')
+        ax.set_ylabel('number of neighbor edges')
+        ax.set_title('%s: overlap correlation distribution (%i edges, mean=%.3f)'
+                     % (self.analysisName, len(edgeDF), edgeDF['correlation'].mean()))
+        self.dataSet.save_task_figure(self, fig, 'overlap_correlation_histogram')
         plt.close(fig)

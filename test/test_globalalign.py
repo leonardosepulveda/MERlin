@@ -81,7 +81,8 @@ def test_least_squares_global_alignment_generates_verification_figures(
     assert task.is_complete()
 
     figuresDir = os.sep.join([simple_merfish_data.analysisPath, 'figures'])
-    for figureName in ('direction_reliability', 'grid_overlay'):
+    for figureName in ('direction_reliability', 'grid_overlay',
+                       'overlap_correlation_grid', 'overlap_correlation_histogram'):
         figurePath = os.sep.join(
             [figuresDir, '.'.join([task.analysisName, figureName]) + '.png'])
         assert os.path.exists(figurePath), figurePath

@@ -15,31 +15,85 @@ class GenerateMosaic(analysistask.AnalysisTask):
     """
     An analysis task that generates mosaic images by compiling different
     field of views.
+
+    This merges what used to be two separate tasks (GenerateMosaic and
+    GenerateMosaicSimple -- the latter is now a thin, deprecated alias of
+    this class, see below) into one. Each fov is placed by resampling its
+    own (small) tile to the mosaic resolution and slicing it directly into
+    the mosaic array -- GenerateMosaicSimple's faster approach, versus the
+    old GenerateMosaic's per-fov cv2.warpAffine into the full mosaic-sized
+    canvas -- while fov positions still come from the configured
+    global_align_task's fov_to_global_transform, so a corrected, non-regular
+    fov grid (e.g. from LeastSquaresGlobalAlignment) is placed correctly.
+
+    This fast placement only handles translation/scale transforms (see
+    _is_axis_aligned); it does not support a global_align_task whose
+    fov_to_global_transform includes rotation or shear (none of the
+    currently implemented ones do -- CorrelationGlobalAlignment, the one
+    sketched with rotation in mind, is unimplemented).
     """
 
     def __init__(self, dataSet, parameters=None, analysisName=None):
         super().__init__(dataSet, parameters, analysisName)
 
-        if 'microns_per_pixel' not in self.parameters:
-            self.parameters['microns_per_pixel'] = 3
+        if 'downsample' in self.parameters and 'microns_per_pixel' in self.parameters:
+            raise ValueError(
+                "GenerateMosaic parameters cannot specify both "
+                "'microns_per_pixel' and 'downsample' -- they are two ways "
+                "of setting the same mosaic resolution.")
+
+        if 'downsample' in self.parameters:
+            downsample = self.parameters['downsample']
+            if not isinstance(downsample, int):
+                raise ValueError('The downsample parameter must be an integer.')
+            if downsample != 1 and downsample % 2 != 0:
+                raise ValueError(
+                    'The downsample parameter must be 1 or an even integer.')
+            self.mosaicMicronsPerPixel = \
+                self.dataSet.get_microns_per_pixel() * downsample
+        else:
+            if 'microns_per_pixel' not in self.parameters:
+                self.parameters['microns_per_pixel'] = 3
+            if self.parameters['microns_per_pixel'] == 'full_resolution':
+                self.mosaicMicronsPerPixel = self.dataSet.get_microns_per_pixel()
+            else:
+                self.mosaicMicronsPerPixel = self.parameters['microns_per_pixel']
+
         if 'fov_crop_width' not in self.parameters:
             self.parameters['fov_crop_width'] = 0
-        if 'separate_files' not in self.parameters:
-            self.parameters['separate_files'] = False
         if 'draw_fov_labels' not in self.parameters:
             self.parameters['draw_fov_labels'] = False
 
-        if self.parameters['microns_per_pixel'] == 'full_resolution':
-            self.mosaicMicronsPerPixel = self.dataSet.get_microns_per_pixel()
-        else:
-            self.mosaicMicronsPerPixel = self.parameters['microns_per_pixel']
+        if 'output_format' not in self.parameters:
+            self.parameters['output_format'] = 'imagej'
+        if self.parameters['output_format'] not in ('imagej', 'ome'):
+            raise ValueError("output_format must be 'imagej' or 'ome'.")
+
+        if self.parameters['output_format'] == 'ome':
+            # OME output is always written one channel/z per file (pyramid
+            # subresolutions are per-image), so it implies separate_files.
+            if self.parameters.get('separate_files') is False:
+                raise ValueError(
+                    "separate_files=False is not supported with "
+                    "output_format='ome'.")
+            self.parameters['separate_files'] = True
+        elif 'separate_files' not in self.parameters:
+            self.parameters['separate_files'] = False
+
+        if 'write_pyramidal_tiff' not in self.parameters:
+            self.parameters['write_pyramidal_tiff'] = False
+        if 'pyramidal_levels' not in self.parameters:
+            self.parameters['pyramidal_levels'] = 4
+        if self.parameters['write_pyramidal_tiff'] \
+                and self.parameters['output_format'] != 'ome':
+            raise ValueError("write_pyramidal_tiff requires output_format='ome'.")
 
     def get_estimated_memory(self):
         return 10000
 
     def get_estimated_time(self):
         return 30
-    
+
     def get_dependencies(self):
         return [self.parameters['global_align_task'],
                 self.parameters['warp_task']]
@@ -71,64 +125,163 @@ class GenerateMosaic(analysistask.AnalysisTask):
                  [0, s*1, -s*micronExtents[1]],
                  [0, 0, 1]])
 
-    def _transform_image_to_mosaic(
-            self, inputImage: np.ndarray, fov: int, alignTask,
-            micronExtents: ExtentTuple, mosaicDimensions: Tuple[int, int])\
-            -> np.ndarray:
-        transform = \
-                np.matmul(self._micron_to_mosaic_transform(micronExtents),
-                          alignTask.fov_to_global_transform(fov))
-        return cv2.warpAffine(
-                inputImage, transform[:2, :], mosaicDimensions)
+    @staticmethod
+    def _is_axis_aligned(transform: np.ndarray, tolerance: float = 1e-6) -> bool:
+        """True if transform's linear part is pure scaling (no rotation or
+        shear), so a fov can be placed by resampling and translating its
+        tile directly instead of warping it into the full mosaic canvas.
+        """
+        offDiagonal = max(abs(transform[0, 1]), abs(transform[1, 0]))
+        diagonal = max(abs(transform[0, 0]), abs(transform[1, 1]))
+        return offDiagonal <= tolerance * diagonal
 
-    def _run_analysis(self):
+    @staticmethod
+    def _accumulate(mosaicSum: np.ndarray, mosaicCount: np.ndarray,
+                    tile: np.ndarray, x0: int, y0: int) -> None:
+        ySlice = slice(y0, y0 + tile.shape[0])
+        xSlice = slice(x0, x0 + tile.shape[1])
+        mosaicSum[ySlice, xSlice] += tile
+        mosaicCount[ySlice, xSlice][tile > 0] += 1
 
-        alignTask = self.dataSet.load_analysis_task(
-                self.parameters['global_align_task'])
-        micronExtents = alignTask.get_global_extent()
-        self.dataSet.save_numpy_txt_analysis_result(
-            self._micron_to_mosaic_transform(micronExtents),
-            'micron_to_mosaic_pixel_transform', self)
+    def _resolve_data_channels(self, dataOrganization):
+        if 'data_channels' not in self.parameters:
+            return dataOrganization.get_data_channels()
+        channels = self.parameters['data_channels']
+        if isinstance(channels, str):
+            return [dataOrganization.get_data_channel_index(channels)]
+        if isinstance(channels, int):
+            return [channels]
+        return [dataOrganization.get_data_channel_index(x)
+                if isinstance(x, str) else x for x in channels]
 
-        dataOrganization = self.dataSet.get_data_organization()
-        if 'data_channels' in self.parameters:
-            if isinstance(self.parameters['data_channels'], str):
-                dataChannels = [dataOrganization.get_data_channel_index(
-                    self.parameters['data_channels'])]
-            elif isinstance(self.parameters['data_channels'], int):
-                dataChannels = [self.parameters['data_channels']]
+    def _resolve_z_indexes(self):
+        if 'z_index' not in self.parameters:
+            return False, range(len(self.dataSet.get_z_positions()))
+        zIndex = self.parameters['z_index']
+        if zIndex == 'maximum_projection':
+            return True, [0]
+        if isinstance(zIndex, list):
+            return False, zIndex
+        if isinstance(zIndex, int):
+            return False, [zIndex]
+
+    def _get_chromatic_corrector(self):
+        if 'optimize_task' in self.parameters:
+            return self.dataSet.load_analysis_task(
+                self.parameters['optimize_task']).get_chromatic_corrector()
+        return None
+
+    def _postprocess_tile(self, rawImage: np.ndarray, fov: int) -> np.ndarray:
+        cropWidth = self.parameters['fov_crop_width']
+        if cropWidth > 0:
+            rawImage[:cropWidth, :] = 0
+            rawImage[-cropWidth:, :] = 0
+            rawImage[:, :cropWidth] = 0
+            rawImage[:, -cropWidth:] = 0
+
+        if self.parameters['draw_fov_labels']:
+            rawImage = cv2.putText(
+                rawImage, str(fov),
+                (int(0.2*rawImage.shape[0]), int(0.2*rawImage.shape[1])),
+                0, 10, (65000, 65000, 65000), 20)
+
+        downsampleScale = \
+            self.dataSet.get_microns_per_pixel() / self.mosaicMicronsPerPixel
+        if downsampleScale != 1:
+            rawImage = skimage.transform.rescale(
+                rawImage, downsampleScale, anti_aliasing=True,
+                preserve_range=True)
+
+        return rawImage
+
+    def load_tile(self, fov: int, zIndex: int, dataChannel: int) -> np.ndarray:
+        """Load, crop, label, and resample a single fov/z/channel tile to
+        the mosaic resolution, without placing it. Used directly for a
+        single z index, and (with the z gate skipped) as the last step for
+        a maximum-projected tile in _build_mosaic.
+        """
+        chromaticCorrector = self._get_chromatic_corrector()
+
+        if zIndex < len(self.dataSet.get_z_positions(fov)):
+            rawImage = self.warpTask.get_aligned_image(
+                fov, dataChannel, zIndex, chromaticCorrector)
+        else:
+            # this fov has no data at this depth (ragged z-stack) -- a blank
+            # tile keeps the placement/averaging below unchanged, since an
+            # all-zero contribution is already treated as "not imaged here"
+            rawImage = np.zeros(
+                self.dataSet.get_image_dimensions(), dtype=np.uint16)
+
+        return self._postprocess_tile(rawImage, fov)
+
+    def _build_mosaic(self, alignTask, micronToMosaicTransform: np.ndarray,
+                      mosaicShape: Tuple[int, int], dataChannel: int,
+                      zIndex: int, maximumProjection: bool) -> np.ndarray:
+        mosaicSum = np.zeros(mosaicShape, dtype=np.float32)
+        mosaicCount = np.zeros(mosaicShape, dtype=np.uint8)
+
+        fovs = self.dataSet.get_fovs()
+        sampleTransform = np.matmul(
+            micronToMosaicTransform, alignTask.fov_to_global_transform(fovs[0]))
+        if not self._is_axis_aligned(sampleTransform):
+            raise NotImplementedError(
+                "GenerateMosaic's tile-based placement only supports "
+                "translation/scale global alignments (e.g. "
+                "SimpleGlobalAlignment, LeastSquaresGlobalAlignment); '%s' "
+                "returns a rotated or sheared fov_to_global_transform, which "
+                "merging GenerateMosaicSimple's faster placement into "
+                "GenerateMosaic dropped support for."
+                % self.parameters['global_align_task'])
+
+        for fov in fovs:
+            if maximumProjection:
+                fovZCount = len(self.dataSet.get_z_positions(fov))
+                chromaticCorrector = self._get_chromatic_corrector()
+                rawImage = np.max(
+                    [self.warpTask.get_aligned_image(
+                        fov, dataChannel, z, chromaticCorrector)
+                     for z in range(fovZCount)], axis=0)
+                tile = self._postprocess_tile(rawImage, fov)
             else:
-                dataChannels = [dataOrganization.get_data_channel_index(x)
-                                if isinstance(x, str) else x
-                                for x in self.parameters['data_channels']]
-        else:
-            dataChannels = dataOrganization.get_data_channels()
+                tile = self.load_tile(fov, zIndex, dataChannel)
 
-        maximumProjection = False
-        if 'z_index' in self.parameters:
-            if self.parameters['z_index'] == 'maximum_projection':
-                maximumProjection = True
-                zIndexes = [0]
-            if isinstance(self.parameters['z_index'], list):
-                zIndexes = self.parameters['z_index']
-            if isinstance(self.parameters['z_index'], int):
-                zIndexes = [self.parameters['z_index']]
-        else:
-            zIndexes = range(len(self.dataSet.get_z_positions()))
+            transform = np.matmul(
+                micronToMosaicTransform, alignTask.fov_to_global_transform(fov))
+            originX, originY = transform[0, 2], transform[1, 2]
+            baseX, baseY = int(np.floor(originX)), int(np.floor(originY))
+            nudgeX, nudgeY = originX - baseX, originY - baseY
+            if nudgeX != 0 or nudgeY != 0:
+                # sub-pixel correction so a fractional fov position doesn't
+                # get rounded away
+                tform = skimage.transform.AffineTransform(
+                    translation=(nudgeX, nudgeY))
+                tile = skimage.transform.warp(
+                    tile, tform.inverse, order=1, mode='constant', cval=0,
+                    preserve_range=True)
 
-        print('generating mosaic for \nchannels: {}\nz indexes: {}'.format(dataChannels, zIndexes))
+            self._accumulate(mosaicSum, mosaicCount, tile, baseX, baseY)
 
+        # average overlapping fovs; a pixel imaged by only one fov is
+        # unaffected since mosaicCount is 1 there
+        divisionMask = mosaicCount > 0
+        mosaicSum[divisionMask] = mosaicSum[divisionMask] / mosaicCount[divisionMask]
+        return mosaicSum.astype(np.uint16)
+
+    def _write_imagej_mosaics(self, alignTask, micronToMosaicTransform,
+                              mosaicShape, dataOrganization, dataChannels,
+                              zIndexes, maximumProjection):
         if self.parameters['separate_files']:
             imageDescription = self.dataSet.analysis_tiff_description(1, 1)
             for d in dataChannels:
                 for z in zIndexes:
                     with self.dataSet.writer_for_analysis_images(
-                        self, 
+                        self,
                         'mosaic_%s_%i' % (dataOrganization.get_data_channel_name(d), z),
                         imagej = True) as outputTif:
-                            mosaic = self._prepare_mosaic_slice(
-                                z, d, micronExtents, alignTask, maximumProjection)
-                            outputTif.write(mosaic, photometric='MINISBLACK', contiguous=True, 
+                            mosaic = self._build_mosaic(
+                                alignTask, micronToMosaicTransform, mosaicShape,
+                                d, z, maximumProjection)
+                            outputTif.write(mosaic, photometric='MINISBLACK', contiguous=True,
                                         metadata=imageDescription)
 
         else:
@@ -139,283 +292,43 @@ class GenerateMosaic(analysistask.AnalysisTask):
                 for d in dataChannels:
                     for z in zIndexes:
                         print(f'starting data channel {d}, z index {z}.')
-                        mosaic = self._prepare_mosaic_slice(
-                            z, d, micronExtents, alignTask, maximumProjection)
+                        mosaic = self._build_mosaic(
+                            alignTask, micronToMosaicTransform, mosaicShape,
+                            d, z, maximumProjection)
                         outputTif.write(mosaic, photometric='MINISBLACK', contiguous=True,
                                        metadata=imageDescription)
 
-
-    def _prepare_mosaic_slice(self, zIndex, dataChannel, micronExtents,
-                              alignTask, maximumProjection):
-        warpTask = self.dataSet.load_analysis_task(
-            self.parameters['warp_task'])
-
-        chromaticCorrector = None
-        if 'optimize_task' in self.parameters:
-            chromaticCorrector = self.dataSet.load_analysis_task(
-                self.parameters['optimize_task']).get_chromatic_corrector()
-
-        cropWidth = self.parameters['fov_crop_width']
-        mosaicDimensions = tuple(self._micron_to_mosaic_pixel(
-                micronExtents[-2:], micronExtents))
-
-        mosaic = np.zeros(np.flip(mosaicDimensions, axis=0), dtype=np.uint16)
-
-        for f in self.dataSet.get_fovs():
-            fovZCount = len(self.dataSet.get_z_positions(f))
-            if maximumProjection:
-                # only project over the z's this fov actually has (ragged
-                # z-stacks may give it fewer than the global z count)
-                inputImage = np.max([warpTask.get_aligned_image(
-                    f, dataChannel, z, chromaticCorrector)
-                    for z in range(fovZCount)],
-                    axis=0)
-            elif zIndex < fovZCount:
-                inputImage = warpTask.get_aligned_image(
-                    f, dataChannel, zIndex, chromaticCorrector)
-            else:
-                # this fov has no data at this depth (ragged z-stack) --
-                # contribute a blank tile so it doesn't skew the
-                # coverage/division-mask accounting below, which already
-                # treats an all-zero contribution as "not imaged here"
-                inputImage = np.zeros(
-                    self.dataSet.get_image_dimensions(), dtype=np.uint16)
-
-            if cropWidth > 0:
-                inputImage[:cropWidth, :] = 0
-                inputImage[inputImage.shape[0] - cropWidth:, :] = 0
-                inputImage[:, :cropWidth] = 0
-                inputImage[:, inputImage.shape[0] - cropWidth:] = 0
-
-            if self.parameters['draw_fov_labels']:
-                inputImage = cv2.putText(inputImage, str(f),
-                                         (int(0.2*inputImage.shape[0]),
-                                          int(0.2*inputImage.shape[1])),
-                                         0, 10, (65000, 65000, 65000), 20)
-
-            transformedImage = self._transform_image_to_mosaic(
-                inputImage, f, alignTask, micronExtents,
-                mosaicDimensions)
-
-            divisionMask = np.bitwise_and(
-                transformedImage > 0, mosaic > 0)
-            cv2.add(mosaic, transformedImage, dst=mosaic,
-                    mask=np.array(
-                        transformedImage > 0).astype(np.uint8))
-            dividedMosaic = cv2.divide(mosaic, 2)
-            mosaic[divisionMask] = dividedMosaic[divisionMask]
-
-        return mosaic
-
-
-class GenerateMosaicSimple(analysistask.AnalysisTask):
-
-    """
-    An analysis task that generates mosaic images by compiling different
-    field of views.
-    Take a different and hopefully faster approach to generating the mosaic.
-    """
-
-    def __init__(self, dataSet, parameters=None, analysisName=None):
-        super().__init__(dataSet, parameters, analysisName)
-
-        # downsample factor for the mosaic generation
-        # this is the only way to control the size of the mosaic.
-        # keep it to 1 for full resolution or even integers for simple downsampling
-        if 'downsample' not in self.parameters:
-            self.parameters['downsample'] = 1
-
-        if not isinstance(self.parameters['downsample'], int):
-            raise ValueError('The downsample parameter must be an integer.')
-        if  self.parameters['downsample']!=1  and self.parameters['downsample']%2 != 0:
-            raise ValueError('The downsample parameter must be 1 or an even integer.')
-
-        if 'fov_crop_width' not in self.parameters:
-            self.parameters['fov_crop_width'] = 100 # usually this is correct for 10% overlap of 2048 camera
-
-        if 'write_pyramidal_tiff' not in self.parameters:
-            self.parameters['write_pyramidal_tiff'] = False # may need updated tifffile
-        if 'pyramidal_levels' not in self.parameters:
-            self.parameters['pyramidal_levels'] = 4
- 
-        self.mosaicMicronsPerPixel = self.dataSet.get_microns_per_pixel() * self.parameters['downsample']
-        self.positions = np.array(self.dataSet.get_stage_positions())
-        self.tile_dim = np.array(self.dataSet.get_image_dimensions())
-
-    def get_estimated_memory(self):
-        return 10000
-
-    def get_estimated_time(self):
-        return 30
-    
-    def get_dependencies(self):
-        return [self.parameters['global_align_task'],
-                self.parameters['warp_task']]
-
-    def get_mosaic(self) -> np.ndarray:
-        """Get the mosaic generated by this analysis task.
-
-        Returns:
-            a 5-dimensional array containing the mosaic. The images are arranged
-            as [channel, zIndex, 1, x, y]. The order of the channels is as
-            specified in the provided parameters file or in the data
-            organization if no data channels are specified.
-        """
-        return self.dataSet.get_analysis_image_set(self, 'mosaic')
-    
-    def fov_coordinates_to_mosaic_pixel(self, fov):
-            fov_x_um, fov_y_um  = self.dataSet.get_fov_offset(fov) # this returns X Y in microns
-            
-            # find the minimum position to zero the mosaic
-            xmin_um, ymin_um = np.amin(self.positions, axis = 0)
-
-            # zero the current position
-            fov_x_um = fov_x_um - xmin_um
-            fov_y_um = fov_y_um - ymin_um
-
-            # convert to mosaic pixel coordinates
-            fov_x_pix = int(fov_x_um//self.mosaicMicronsPerPixel)
-            fov_y_pix = int(fov_y_um//self.mosaicMicronsPerPixel)
-
-            # calculate a nudge to the position to account for non-integer pixel positions
-            fov_x_pix_nudge = fov_x_um/self.mosaicMicronsPerPixel - fov_x_pix
-            fov_y_pix_nudge = fov_y_um/self.mosaicMicronsPerPixel - fov_y_pix
-
-            return fov_x_pix, fov_y_pix, fov_x_pix_nudge, fov_y_pix_nudge
-
-    def intialize_mosaic(self):
-        xmin_um, ymin_um = np.amin(self.positions, axis = 0)
-        xmax_um, ymax_um = np.amax(self.positions + self.tile_dim * self.mosaicMicronsPerPixel, axis = 0)
-        mosaicy = np.ceil((ymax_um - ymin_um) / self.mosaicMicronsPerPixel).astype(int)
-        mosaicx = np.ceil((xmax_um - xmin_um) / self.mosaicMicronsPerPixel).astype(int)
-
-        self.mosaic = np.zeros((mosaicy, mosaicx), dtype = np.float32) # start as float32 to avoid overflow during summation
-        self.mask = np.zeros((mosaicy, mosaicx), dtype = np.uint8)
-
-    def load_tile(self, fov, zIndex, dataChannel):
-
-        chromaticCorrector = None
-        if 'optimize_task' in self.parameters:
-            chromaticCorrector = self.dataSet.load_analysis_task(
-                self.parameters['optimize_task']).get_chromatic_corrector()
-
-        if zIndex < len(self.dataSet.get_z_positions(fov)):
-            inputImage = self.warpTask.get_aligned_image(
-                fov, dataChannel, zIndex, chromaticCorrector)
-        else:
-            # this fov has no data at this depth (ragged z-stack) --
-            # contribute a blank tile; the downsample/warp/crop pipeline
-            # below runs unchanged so the tile shape stays consistent, and
-            # prepare_mosaic's tile_mask = tile > 0 already treats an
-            # all-zero tile as "not imaged here"
-            inputImage = np.zeros(
-                self.dataSet.get_image_dimensions(), dtype=np.uint16)
-
-        if self.parameters['downsample'] != 1:
-            inputImage = skimage.transform.rescale(
-                inputImage,
-                1/self.parameters['downsample'],
-                anti_aliasing=True,
-                preserve_range=True)
-
-        # calculate a slight correction to the image position to account for non-integer pixel positions
-        _,_, xnudge, ynudge = self.fov_coordinates_to_mosaic_pixel(fov)
-        
-        tform = skimage.transform.AffineTransform(translation=(xnudge, ynudge))
-
-        inputImage = skimage.transform.warp(
-            inputImage,
-            tform.inverse,
-            order=1,                
-            mode='constant',       # how to fill areas that move out of bounds
-            cval=0,               # fill value for constant mode
-            preserve_range=True)
-
-        cropWidth = self.parameters['fov_crop_width']
-        if cropWidth > 0:
-            inputImage[:cropWidth, :] = 0
-            inputImage[-cropWidth:, :] = 0
-            inputImage[:, :cropWidth] = 0
-            inputImage[:, -cropWidth:] = 0
-
-        return inputImage
-
-    def prepare_mosaic(self, zIndex, dataChannel):
-        self.intialize_mosaic()
-        #print("starting mosaic preparation", flush=True)
-        for fov in self.dataSet.get_fovs():
-            #print(f'{fov}', end=' ', flush=True)
-            tile = self.load_tile(fov, zIndex, dataChannel)
-            fov_x_pix, fov_y_pix, _, _ = self.fov_coordinates_to_mosaic_pixel(fov)
-            # place the tile into the mosaic
-            self.mosaic[fov_y_pix:fov_y_pix+tile.shape[0], fov_x_pix:fov_x_pix+tile.shape[1]] += tile
-
-            # mask keeps track of how many tiles contribute to each pixel
-            tile_mask = tile > 0
-            self.mask[fov_y_pix:fov_y_pix+tile.shape[0], fov_x_pix:fov_x_pix+tile.shape[1]][tile_mask] += 1
-        
-        # normalize by the mask to account for overlaps
-        # for now this just a simple average...
-        divisionMask = self.mask > 0
-        self.mosaic[divisionMask] = self.mosaic[divisionMask] / self.mask[divisionMask]
-        self.mosaic = self.mosaic.astype(np.uint16)  # convert back to uint16
-
-    def _run_analysis(self):
-
-        self.warpTask = self.dataSet.load_analysis_task(self.parameters['warp_task'])
-
-        dataOrganization = self.dataSet.get_data_organization()
-
-        if 'data_channels' in self.parameters:
-            if isinstance(self.parameters['data_channels'], str):
-                dataChannels = [dataOrganization.get_data_channel_index(
-                    self.parameters['data_channels'])]
-            elif isinstance(self.parameters['data_channels'], int):
-                dataChannels = [self.parameters['data_channels']]
-            else:
-                dataChannels = [dataOrganization.get_data_channel_index(x)
-                                if isinstance(x, str) else x
-                                for x in self.parameters['data_channels']]
-        else:
-            dataChannels = dataOrganization.get_data_channels()
-
-        if 'z_index' in self.parameters:
-            if isinstance(self.parameters['z_index'], list):
-                zIndexes = self.parameters['z_index']
-            if isinstance(self.parameters['z_index'], int):
-                zIndexes = [self.parameters['z_index']]
-        else:
-            zIndexes = range(len(self.dataSet.get_z_positions()))
-
-        print('generating mosaic for \nchannels: {}\nz indexes: {}'.format(dataChannels, zIndexes))
-
+    def _write_ome_mosaics(self, alignTask, micronToMosaicTransform,
+                          mosaicShape, dataOrganization, dataChannels,
+                          zIndexes, maximumProjection):
         for d in dataChannels:
             dataChannelName = dataOrganization.get_data_channel_name(d)
             for z in zIndexes:
-                
-                print(f'starting data channel {d}, z index {z}.', flush=True) # try to make to get this to stdout immediately
+
+                print(f'starting data channel {d}, z index {z}.', flush=True)
                 mosaic_name = f'mosaic_{dataChannelName}_{z}'
                 with self.dataSet.writer_for_analysis_images(self, mosaic_name,
                     imagej=False, ome=True) as outputTif:
-                        
+
                         t0 = time.time()
-                        self.prepare_mosaic(z, d)
+                        mosaic = self._build_mosaic(
+                            alignTask, micronToMosaicTransform, mosaicShape,
+                            d, z, maximumProjection)
                         t1 = time.time()
                         print(f'channel {d}, z index {z} mosaic prepared in {t1 - t0:.2f} seconds.', flush=True)
 
-                        # prep some metadata and options
-                        metadata = {'axes': 'YX'}                                
+                        metadata = {'axes': 'YX'}
                         options = dict(
                             photometric='MINISBLACK',
                             tile=(256, 256),
-                            compression='lzw', # faster than zip compression? pip install imagecodecs?
+                            compression='lzw',
                             contiguous=True
                         )
 
                         if self.parameters['write_pyramidal_tiff']:
                             subresolutions = int(self.parameters['pyramidal_levels'])
 
-                            outputTif.write(self.mosaic[:, :],
+                            outputTif.write(mosaic[:, :],
                                         subifds=subresolutions,
                                         metadata=metadata,
                                         **options)
@@ -424,22 +337,65 @@ class GenerateMosaicSimple(analysistask.AnalysisTask):
                                 print(f'writing channel {d}, z index {z} mosaic level {level}', flush=True)
                                 mag = 2 ** (level + 1)
                                 outputTif.write(
-                                    self.mosaic[::mag, ::mag],
+                                    mosaic[::mag, ::mag],
                                     subfiletype=1,
                                     **options,
                                 )
-                            # Add a thumbnail image as a separate series for QuPath as an associated image
-                            #thumbnail = (self.mosaic[::8, ::8] >> 2).astype('uint8')
-                            #outputTif.write(thumbnail, metadata={'Name': 'thumbnail'})
-                        
-                        else: # just write once
-                            outputTif.write(self.mosaic[:, :],
+
+                        else:
+                            outputTif.write(mosaic[:, :],
                                 metadata=metadata,
                                 **options)
-                            
+
                         t2 = time.time()
                         print(f'channel {d}, z index {z} mosaic written in {t2 - t1:.2f} seconds.', flush=True)
 
-                        # free some mem just in case...
-                        del self.mosaic
-                        del self.mask
+    def _run_analysis(self):
+
+        alignTask = self.dataSet.load_analysis_task(
+                self.parameters['global_align_task'])
+        self.warpTask = self.dataSet.load_analysis_task(
+                self.parameters['warp_task'])
+
+        micronExtents = alignTask.get_global_extent()
+        micronToMosaicTransform = self._micron_to_mosaic_transform(micronExtents)
+        self.dataSet.save_numpy_txt_analysis_result(
+            micronToMosaicTransform, 'micron_to_mosaic_pixel_transform', self)
+        mosaicDimensions = tuple(self._micron_to_mosaic_pixel(
+                micronExtents[-2:], micronExtents))
+        mosaicShape = tuple(np.flip(mosaicDimensions, axis=0))
+
+        dataOrganization = self.dataSet.get_data_organization()
+        dataChannels = self._resolve_data_channels(dataOrganization)
+        maximumProjection, zIndexes = self._resolve_z_indexes()
+
+        print('generating mosaic for \nchannels: {}\nz indexes: {}'.format(dataChannels, zIndexes))
+
+        if self.parameters['output_format'] == 'ome':
+            self._write_ome_mosaics(
+                alignTask, micronToMosaicTransform, mosaicShape,
+                dataOrganization, dataChannels, zIndexes, maximumProjection)
+        else:
+            self._write_imagej_mosaics(
+                alignTask, micronToMosaicTransform, mosaicShape,
+                dataOrganization, dataChannels, zIndexes, maximumProjection)
+
+
+class GenerateMosaicSimple(GenerateMosaic):
+
+    """
+    Deprecated alias for GenerateMosaic, kept so existing analysis-parameters
+    files that reference "GenerateMosaicSimple" keep working. The fast,
+    tile-based placement it introduced is now GenerateMosaic's only
+    placement method (see that class's docstring); this subclass only
+    restores GenerateMosaicSimple's original defaults -- a wider fov crop,
+    and OME (rather than ImageJ) tiff output -- for configs that relied on
+    them implicitly rather than setting them.
+    """
+
+    def __init__(self, dataSet, parameters=None, analysisName=None):
+        parameters = dict(parameters) if parameters else {}
+        parameters.setdefault('downsample', 1)
+        parameters.setdefault('fov_crop_width', 100)
+        parameters.setdefault('output_format', 'ome')
+        super().__init__(dataSet, parameters, analysisName)

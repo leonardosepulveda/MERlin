@@ -168,6 +168,9 @@ class SnakemakeRule(object):
              '\"',
              ' -x \"',
              self._clean_string(self._analysisTask.dataSet.analysisName),
+             '\"',
+             ' -f \"',
+             self._clean_string(self._analysisTask.dataSet.figuresPath),
              '\"'])
         return shellString
 

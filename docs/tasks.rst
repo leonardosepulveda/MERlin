@@ -138,15 +138,26 @@ Description: Exports a csv containing the cell metadata, i.e. fov, volume, x and
 generatemosaic.GenerateMosaic
 -------------------------------
 
-Description: Assembles the images from each field of view into a low resolution mosaic.
+Description: Assembles the images from each field of view into a mosaic. Each fov
+is placed using the configured global\_align\_task's fov position (so a corrected,
+non-regular fov grid, e.g. from LeastSquaresGlobalAlignment, is placed correctly),
+which must be a translation/scale alignment -- one with rotation or shear is not
+supported. GenerateMosaicSimple is a deprecated alias of this class kept for
+backward compatibility; it only changes the defaults below (fov\_crop\_width=100,
+output\_format="ome", downsample=1).
 
 Parameters:
 
-* microns\_per\_pixel -- The number of microns to correspond with a pixel in the mosaic. If set to "full_resolution", the mosaic is generated with the same resolution as the input images.
+* microns\_per\_pixel -- The number of microns to correspond with a pixel in the mosaic. If set to "full_resolution", the mosaic is generated with the same resolution as the input images. Mutually exclusive with downsample.
+* downsample -- An integer (1 or an even number) multiple of the input images' native resolution to set the mosaic resolution. Mutually exclusive with microns\_per\_pixel.
 * data\_channels -- The names of the data channels to export, corresponding to the data organization. If not provided, all data channels are exported.
 * z\_indexes -- The z index to export. If not provided all z indexes are exported.
 * fov\_crop\_width -- The number of pixels to remove from each edge of each fov before inserting it into the mosaic.
 * draw\_fov\_labels -- Flag indicating if the fov index should be drawn on top of each fov in the mosaic
+* separate\_files -- If true, writes one tiff per data channel/z index instead of a single multi-page tiff. Forced true when output\_format is "ome".
+* output\_format -- Either "imagej" (default) for a single ImageJ-compatible tiff, or "ome" for one OME-tiff per data channel/z index.
+* write\_pyramidal\_tiff -- If true (requires output\_format="ome"), writes each mosaic as a pyramidal tiff with pyramidal\_levels subresolutions.
+* pyramidal\_levels -- The number of subresolution levels to write when write\_pyramidal\_tiff is true.
 sequential.SumSignal
 -------------------------------
 

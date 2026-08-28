@@ -710,7 +710,37 @@ real `BC555_sample_05` argv now yields `dataset='BC555_sample_05/epi/data'`,
 `analysis_name='output'`, empty `unknown`). Full fast suite before/after
 (`git stash` diff against this branch): 153 passed both times, same
 pre-existing `test_snakemake.py`/`test_core.py` teardown flakiness on
-both — no regression.
+both — no regression. Merged `--no-ff` into `master` and pushed
+(commit `bafc897`).
+
+**Follow-up bug found and fixed (2026-08-28, same day)**: the port above
+only covered the top-level `merlin` CLI entry point. It missed
+`SnakemakeRule._base_shell_command()` in `merlin/util/snakewriter.py` —
+the function that builds the actual `shell:` command embedded in every
+generated per-task/per-fragment snakemake rule. That command already
+re-passes `-e`/`-s` so each fragment's subprocess can reconstruct an
+equivalent `DataSet`, but never re-passed `-x`, so every fragment task
+silently fell back to `analysisName=dataDirectoryName` instead of the real
+value — mismatching the `analysisPath` the top-level run actually wrote
+`dataorganization.csv` to. Surfaced as a real failure:
+`BC555_sample_05`'s `FiducialCorrelationWarp` fragment 49 crashed with
+`FileNotFoundError: .../merlin/BC555_sample_05/epi/data/dataorganization.csv`
+(should have been `.../merlin/output/dataorganization.csv`). Fixed by
+storing `self.analysisName` on `DataSet` (mirroring `dataHome`/
+`analysisHome`) and having `_base_shell_command` emit `-x` the same way it
+already emits `-e`/`-s`. Verified directly (rebuilt the generated shell
+string before/after) and via the full fast suite (154 passed, same
+pre-existing `test_snakemake.py` failures — confirmed one is an unrelated
+subprocess/env mismatch, not caused by this change).
+Full detail: `prompt_history/
+2026_08_28_1835_fix_analysis_name_snakemake_propagation.md`.
+
+**Also fixed, same commit set**: `-f`/`--figures-path` had the identical
+gap — also missing from `_base_shell_command`, so a custom `-f` path was
+silently lost for every snakemake-invoked fragment task (falling back to
+the default `analysisPath/figures`). Added `-f "<dataSet.figuresPath>"`
+to `_base_shell_command` the same way, per user go-ahead. Verified: full
+fast suite, 153 passed, same pre-existing failures as above.
 
 ## Repo / branch layout
 

@@ -73,6 +73,7 @@ class DataSet(object):
         self.dataSetName = dataDirectoryName
         self.dataHome = dataHome
         self.analysisHome = analysisHome
+        self.analysisName = analysisName
 
         self.rawDataPath = os.sep.join([dataHome, dataDirectoryName])
         self.rawDataPortal = dataportal.DataPortal.create_portal(

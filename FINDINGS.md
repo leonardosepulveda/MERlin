@@ -735,11 +735,12 @@ subprocess/env mismatch, not caused by this change).
 Full detail: `prompt_history/
 2026_08_28_1835_fix_analysis_name_snakemake_propagation.md`.
 
-**Also noted, not fixed**: `-f`/`--figures-path` has the identical gap —
-also missing from `_base_shell_command`, so a custom `-f` path is silently
-lost for every snakemake-invoked fragment task (falls back to the default
-`analysisPath/figures`). Out of scope for this request; flagged for a
-follow-up.
+**Also fixed, same commit set**: `-f`/`--figures-path` had the identical
+gap — also missing from `_base_shell_command`, so a custom `-f` path was
+silently lost for every snakemake-invoked fragment task (falling back to
+the default `analysisPath/figures`). Added `-f "<dataSet.figuresPath>"`
+to `_base_shell_command` the same way, per user go-ahead. Verified: full
+fast suite, 153 passed, same pre-existing failures as above.
 
 ## Repo / branch layout
 

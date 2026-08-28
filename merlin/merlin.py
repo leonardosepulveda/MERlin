@@ -66,6 +66,11 @@ def build_parser():
                         help='the analysis home directory')
     parser.add_argument('-q', '--parameters-home',
                         help='the parameters home directory')
+    parser.add_argument('-f', '--figures-path',
+                        help='the directory to save analysis task '
+                        'verification figures into, used as-is (no dataset '
+                        'subfolder is appended). Defaults to '
+                        '<analysis-home>/<dataset>/figures')
     parser.add_argument('-k', '--snakemake-parameters',
                         help='the name of the snakemake parameters file, '
                         'for distributed execution on a SLURM cluster via '
@@ -144,7 +149,8 @@ def merlin():
         dataHome=_clean_string_arg(args.data_home),
         analysisHome=_clean_string_arg(args.analysis_home),
         microscopeParametersName=_clean_string_arg(args.microscope_parameters),
-        allowRaggedZStacks=args.allow_ragged_z_stacks
+        allowRaggedZStacks=args.allow_ragged_z_stacks,
+        figuresPath=_clean_string_arg(args.figures_path)
     )
     
     parametersHome = m.ANALYSIS_PARAMETERS_HOME

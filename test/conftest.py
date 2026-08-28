@@ -144,6 +144,24 @@ def two_codebook_merfish_data(merfish_files):
 
 
 @pytest.fixture(scope='session')
+def custom_figures_merfish_data(merfish_files):
+    figuresPath = os.path.abspath('test_figures_custom')
+    testMERFISHData = dataset.MERFISHDataSet(
+            'merfish_test',
+            dataOrganizationName='test_data_organization.csv',
+            codebookNames=['test_codebook.csv'],
+            positionFileName='test_positions.csv',
+            analysisHome=os.path.join(merlin.ANALYSIS_HOME, '..',
+                                      'test_analysis_custom_figures'),
+            microscopeParametersName='test_microscope_parameters.json',
+            figuresPath=figuresPath)
+    yield testMERFISHData
+
+    shutil.rmtree('test_analysis_custom_figures')
+    shutil.rmtree(figuresPath, ignore_errors=True)
+
+
+@pytest.fixture(scope='session')
 def ragged_merfish_files(base_files):
     os.mkdir(raggedMerfishDataDirectory)
 

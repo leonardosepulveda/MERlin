@@ -39,7 +39,8 @@ class DataFormatException(Exception):
 class DataSet(object):
 
     def __init__(self, dataDirectoryName: str,
-                 dataHome: str = None, analysisHome: str = None):
+                 dataHome: str = None, analysisHome: str = None,
+                 figuresPath: str = None):
         """Create a dataset for the specified raw data.
 
         Args:
@@ -52,6 +53,10 @@ class DataSet(object):
                     results for this DataSet will be stored in
                     analysisHome/dataDirectoryName. If analysisHome is not
                     specified, ANALYSIS_HOME is read from the .env file.
+            figuresPath: the directory to save per-task verification figures
+                    into (see save_task_figure), used exactly as given --
+                    unlike analysisHome, dataDirectoryName is not appended.
+                    If not specified, defaults to analysisPath/figures.
         """
         if dataHome is None:
             dataHome = merlin.DATA_HOME
@@ -74,6 +79,9 @@ class DataSet(object):
 
         self.logPath = os.sep.join([self.analysisPath, 'logs'])
         os.makedirs(self.logPath, exist_ok=True)
+
+        self.figuresPath = figuresPath if figuresPath is not None \
+            else os.sep.join([self.analysisPath, 'figures'])
 
         self._store_dataset_metadata()
 
@@ -148,14 +156,17 @@ class DataSet(object):
     def save_task_figure(self, analysisTask: TaskOrName, figure: plt.Figure,
                          figureName: str) -> None:
         """Save a quick, on-the-fly verification figure for an analysis task
-        into one shared 'figures' folder at this data set's analysis root
-        (a sibling of every task's own output folder), named
-        '{taskName}.{figureName}.png' -- distinct from save_figure above
-        (used by the separate merlin.plots/PlotPerformance framework), which
-        nests figures under each task's own output folder instead. Meant to
-        be called from AnalysisTask._generate_verification_figures, so every
-        task's own quick self-check figures land in one place regardless of
-        which task produced them.
+        into this data set's configured figures folder (self.figuresPath --
+        by default a 'figures' folder at this data set's analysis root, a
+        sibling of every task's own output folder; overridable via the
+        figuresPath constructor argument / merlin's --figures-path CLI
+        flag), named 'merlin.{taskName}.{figureName}.png' -- distinct from
+        save_figure above (used by the separate merlin.plots/PlotPerformance
+        framework), which nests figures under each task's own output folder
+        instead. Meant to be called from
+        AnalysisTask._generate_verification_figures, so every task's own
+        quick self-check figures land in one place regardless of which task
+        produced them.
 
         Args:
             analysisTask: the analysis task that generated this figure.
@@ -165,9 +176,9 @@ class DataSet(object):
         """
         taskName = analysisTask if isinstance(analysisTask, str) \
             else analysisTask.get_analysis_name()
-        figuresDir = os.sep.join([self.analysisPath, 'figures'])
-        os.makedirs(figuresDir, exist_ok=True)
-        savePath = os.sep.join([figuresDir, '.'.join([taskName, figureName])])
+        os.makedirs(self.figuresPath, exist_ok=True)
+        savePath = os.sep.join(
+            [self.figuresPath, '.'.join(['merlin', taskName, figureName])])
         figure.savefig(savePath + '.png', dpi=150, bbox_inches='tight')
 
     def figure_exists(self, analysisTask: TaskOrName, figureName: str,
@@ -978,7 +989,8 @@ class ImageDataSet(DataSet):
 
     def __init__(self, dataDirectoryName: str, dataHome: str = None,
                  analysisHome: str = None,
-                 microscopeParametersName: str = None):
+                 microscopeParametersName: str = None,
+                 figuresPath: str = None):
         """Create a dataset for the specified raw data.
 
         Args:
@@ -994,8 +1006,11 @@ class ImageDataSet(DataSet):
             microscopeParametersName: the name of the microscope parameters
                     file that specifies properties of the microscope used
                     to acquire the images represented by this ImageDataSet
+            figuresPath: the directory to save per-task verification figures
+                    into, used as-is. Defaults to analysisPath/figures.
         """
-        super().__init__(dataDirectoryName, dataHome, analysisHome)
+        super().__init__(dataDirectoryName, dataHome, analysisHome,
+                         figuresPath)
 
         if microscopeParametersName is not None:
             self._import_microscope_parameters(microscopeParametersName)
@@ -1111,7 +1126,8 @@ class MERFISHDataSet(ImageDataSet):
                  dataOrganizationName: str = None, positionFileName: str = None,
                  dataHome: str = None, analysisHome: str = None,
                  microscopeParametersName: str = None,
-                 allowRaggedZStacks: bool = False):
+                 allowRaggedZStacks: bool = False,
+                 figuresPath: str = None):
         """Create a MERFISH dataset for the specified raw data.
 
         Args:
@@ -1147,9 +1163,11 @@ class MERFISHDataSet(ImageDataSet):
                     DataOrganization and get_z_positions(fov=...). Defaults
                     to False to preserve behavior for datasets where every
                     fov shares the same z range.
+            figuresPath: the directory to save per-task verification figures
+                    into, used as-is. Defaults to analysisPath/figures.
         """
         super().__init__(dataDirectoryName, dataHome, analysisHome,
-                         microscopeParametersName)
+                         microscopeParametersName, figuresPath)
 
         self.dataOrganization = dataorganization.DataOrganization(
                 self, dataOrganizationName,

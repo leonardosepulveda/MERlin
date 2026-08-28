@@ -3,6 +3,36 @@
 Curated current-state summary. See `prompt_history/` for full provenance of each item
 below; this file only tracks what's true *now* and the open next step.
 
+## Configurable verification-figures folder + `merlin.` filename prefix (2026-08-28)
+
+`merlin`'s CLI gained `-f`/`--figures-path`, threaded through
+`MERFISHDataSet`/`ImageDataSet`/`DataSet.__init__` as `figuresPath` and stored as
+`dataSet.figuresPath`. It is used exactly as given (no dataset-name subfolder
+appended, unlike `--analysis-home`/`--data-home`) -- meant for a layout like
+`<experiment>/figures/` sitting alongside `<experiment>/analysis/`, `<experiment>/
+merci/`, etc. Default unchanged: `{analysisPath}/figures`. `DataSet.save_task_figure`
+(the per-task verification-figures sink, see "General per-task verification-figures
+mechanism" below) now writes into `self.figuresPath` and prefixes every filename with
+`merlin.`, i.e. `merlin.{taskName}.{figureName}.png` instead of the old
+`{taskName}.{figureName}.png` -- makes files unambiguous when the figures folder is
+shared with another tool's own outputs. `save_figure` (the separate
+`merlin.plots`/`PlotPerformance` sink, nested under each task's own output folder) is
+unaffected -- this only touches the shared/verification-figures path.
+
+Verified via `test/test_analysistask_figures.py` (new
+`test_custom_figures_path_is_used_as_is`, plus existing tests updated for the
+`merlin.` prefix) and `test/test_globalalign.py`'s figure test, both green;
+`test/conftest.py` gained a `custom_figures_merfish_data` fixture (mirrors the existing
+`two_codebook_merfish_data` pattern) pointing `figuresPath` at a dedicated temp dir.
+Pre-existing NFS teardown flakiness in `test_core.py`/`test_dataset.py`/
+`test_snakemake.py` (`OSError: Directory not empty`, cascading into a few dependent
+failures) reproduces identically on unmodified master via `git stash` -- confirmed
+unrelated to this change.
+
+Handoff written to MERci's own `prompt_history/` asking it to pass `-f
+<experiment>/figures` when it invokes `merlin` from the notebooks that generate
+merlin's input files. See `prompt_history/2026_08_28_1349_add_figures_path_cli_option.md`.
+
 ## GenerateMosaic / GenerateMosaicSimple merged (2026-08-27)
 
 `merlin/analysis/generatemosaic.py`'s two mosaic-assembly classes are now one.
@@ -308,6 +338,12 @@ run to run); every failure traces to the same two already-documented pre-existin
 issues (confirmed by re-running one flagged failure, `test_get_analysis_tasks`, alone
 with a clean start -- it passed). See `prompt_history/
 2026_08_14_1218_add_verification_figures_mechanism.md` for full detail.
+
+**Update (2026-08-28):** the shared figures folder and filename pattern described
+above are stale -- see "Configurable verification-figures folder + `merlin.` filename
+prefix" above. The folder is now `dataSet.figuresPath` (configurable via
+`--figures-path`, defaults unchanged to `{analysisPath}/figures`), and filenames are
+`merlin.{taskName}.{figureName}.png`.
 
 ## Test environment (merlin_env, built 2026-08-14)
 

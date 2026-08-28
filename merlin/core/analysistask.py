@@ -206,9 +206,11 @@ class AnalysisTask(ABC):
         The default implementation does nothing. A subclass that wants
         verification output should override this and call
         self.dataSet.save_task_figure(self, figure, figureName) for each
-        figure -- each is saved into a single 'figures' folder shared by
-        every analysis task in this data set (sibling to each task's own
-        output folder), as '{taskName}.{figureName}.png', so a run's figures
+        figure -- each is saved into a single figures folder shared by
+        every analysis task in this data set (by default a 'figures' folder
+        sibling to each task's own output folder; overridable via
+        MERFISHDataSet's figuresPath argument / merlin's --figures-path CLI
+        flag), as 'merlin.{taskName}.{figureName}.png', so a run's figures
         can all be browsed in one place regardless of which task produced
         them. This is distinct from merlin.plots' PlotEngine/AbstractPlot
         framework (used by the separate PlotPerformance task), which builds

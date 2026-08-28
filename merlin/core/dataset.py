@@ -40,7 +40,7 @@ class DataSet(object):
 
     def __init__(self, dataDirectoryName: str,
                  dataHome: str = None, analysisHome: str = None,
-                 figuresPath: str = None):
+                 figuresPath: str = None, analysisName: str = None):
         """Create a dataset for the specified raw data.
 
         Args:
@@ -57,11 +57,18 @@ class DataSet(object):
                     into (see save_task_figure), used exactly as given --
                     unlike analysisHome, dataDirectoryName is not appended.
                     If not specified, defaults to analysisPath/figures.
+            analysisName: the subdirectory name under analysisHome to store
+                    analysis results in, if it should differ from
+                    dataDirectoryName (e.g. a short fixed name instead of a
+                    long/nested raw-data path). Defaults to
+                    dataDirectoryName.
         """
         if dataHome is None:
             dataHome = merlin.DATA_HOME
         if analysisHome is None:
             analysisHome = merlin.ANALYSIS_HOME
+        if analysisName is None:
+            analysisName = dataDirectoryName
 
         self.dataSetName = dataDirectoryName
         self.dataHome = dataHome
@@ -74,7 +81,7 @@ class DataSet(object):
             print('The raw data is not available at %s'.format(
                 self.rawDataPath))
 
-        self.analysisPath = os.sep.join([analysisHome, dataDirectoryName])
+        self.analysisPath = os.sep.join([analysisHome, analysisName])
         os.makedirs(self.analysisPath, exist_ok=True)
 
         self.logPath = os.sep.join([self.analysisPath, 'logs'])
@@ -990,7 +997,7 @@ class ImageDataSet(DataSet):
     def __init__(self, dataDirectoryName: str, dataHome: str = None,
                  analysisHome: str = None,
                  microscopeParametersName: str = None,
-                 figuresPath: str = None):
+                 figuresPath: str = None, analysisName: str = None):
         """Create a dataset for the specified raw data.
 
         Args:
@@ -1008,9 +1015,12 @@ class ImageDataSet(DataSet):
                     to acquire the images represented by this ImageDataSet
             figuresPath: the directory to save per-task verification figures
                     into, used as-is. Defaults to analysisPath/figures.
+            analysisName: the subdirectory name under analysisHome to store
+                    analysis results in, if it should differ from
+                    dataDirectoryName. Defaults to dataDirectoryName.
         """
         super().__init__(dataDirectoryName, dataHome, analysisHome,
-                         figuresPath)
+                         figuresPath, analysisName)
 
         if microscopeParametersName is not None:
             self._import_microscope_parameters(microscopeParametersName)
@@ -1127,7 +1137,7 @@ class MERFISHDataSet(ImageDataSet):
                  dataHome: str = None, analysisHome: str = None,
                  microscopeParametersName: str = None,
                  allowRaggedZStacks: bool = False,
-                 figuresPath: str = None):
+                 figuresPath: str = None, analysisName: str = None):
         """Create a MERFISH dataset for the specified raw data.
 
         Args:
@@ -1165,9 +1175,12 @@ class MERFISHDataSet(ImageDataSet):
                     fov shares the same z range.
             figuresPath: the directory to save per-task verification figures
                     into, used as-is. Defaults to analysisPath/figures.
+            analysisName: the subdirectory name under analysisHome to store
+                    analysis results in, if it should differ from
+                    dataDirectoryName. Defaults to dataDirectoryName.
         """
         super().__init__(dataDirectoryName, dataHome, analysisHome,
-                         microscopeParametersName, figuresPath)
+                         microscopeParametersName, figuresPath, analysisName)
 
         self.dataOrganization = dataorganization.DataOrganization(
                 self, dataOrganizationName,

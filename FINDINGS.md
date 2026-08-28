@@ -671,22 +671,46 @@ abbreviation function, and a terser driver-log job-submission message.
   against the prior commit -- unchanged by this change). `cache/` (local
   reference material, untracked) deliberately left out of the commit.
 
-## Pending: port the `-x`/`--analysis-name` flag into this repo
+## `-x`/`--analysis-name` flag ported into this repo (2026-08-28)
 
 `BC553_sample_02`'s real slurm script uses `-x "output"` (decouples analysis
-output location from the raw-data path), which this repo's `merlin.py` does
-not implement — confirmed via grep, no `-x`/`analysisName` anywhere here.
-The real implementation exists but is **uncommitted, never pushed**, in a
-different local clone of the same origin: `~/Software/merlin_cc/MERlin`
-(checked out at `1fae07e`), added directly from a MERci session on
-2026-08-14 (MERci `prompt_history/2026_08_14_1815_fix_merlin_data_organization_and_output_path.md`)
-— exactly the untracked-cross-project-edit pattern `CLAUDE.md`'s
-"Cross-project boundary" section now exists to prevent. Small diff (~25
-lines, `merlin.py` + `dataset.py`; the dataorganization.py piece in that
-same working tree is already superseded by this repo's own `adc0482`).
+output location from the raw-data path), which this repo's `merlin.py`
+previously did not implement — confirmed via grep, no `-x`/`analysisName`
+anywhere here. The real implementation existed but was **uncommitted, never
+pushed**, in a different local clone of the same origin:
+`~/Software/merlin_cc/MERlin` (checked out at `1fae07e`), added directly
+from a MERci session on 2026-08-14 (MERci `prompt_history/
+2026_08_14_1815_fix_merlin_data_organization_and_output_path.md`) — exactly
+the untracked-cross-project-edit pattern `CLAUDE.md`'s "Cross-project
+boundary" section now exists to prevent.
 Full detail: `prompt_history/2026_08_17_1741_investigate_x_flag_origin.md`.
-Not yet ported — deferred at the user's request ("we can work on that after
-this is done").
+
+**Confirmed real-world manifestation (2026-08-28)**: `BC555_sample_05`'s
+slurm job crashed with `DataFormatException: No image files found at
+.../lineage_tracing/experiments/output.` — reproduced directly that
+`parse_known_args()` silently mis-parses `-x "output" <dataset>` when `-x`
+is unimplemented, matching the bare `"output"` token to the required
+`dataset` positional and discarding the real dataset path. The sibling
+`BC553_sample_02` script has the identical bug but is masked by an
+already-cached `filemap.csv` from a prior run, so it doesn't crash.
+`BC555_sample_05`'s script also had an unrelated second bug: `-e` pointed
+at the wrong project (`lineage_tracing` instead of `breast_cancer`). Full
+detail: `prompt_history/2026_08_28_1755_diagnose_bc555_sample_05_dataset_arg_bug.md`.
+
+**Ported** the ~25-line diff (`merlin.py` + `dataset.py`) from
+`~/Software/merlin_cc/MERlin`'s working tree into this repo, on
+`feature/analysis-name-flag`: new `-x`/`--analysis-name` CLI flag, and an
+`analysisName` parameter threaded through `DataSet`/`ImageDataSet`/
+`MERFISHDataSet.__init__` (defaults to `dataDirectoryName`, so omitting the
+flag is unchanged behavior). The `dataorganization.py` piece from that same
+working tree was **not** ported — already superseded by this repo's own
+`adc0482` ("Fix filemap losing per-round subfolder paths"). Verified the
+mis-parse is fixed directly (`build_parser().parse_known_args()` on the
+real `BC555_sample_05` argv now yields `dataset='BC555_sample_05/epi/data'`,
+`analysis_name='output'`, empty `unknown`). Full fast suite before/after
+(`git stash` diff against this branch): 153 passed both times, same
+pre-existing `test_snakemake.py`/`test_core.py` teardown flakiness on
+both — no regression.
 
 ## Repo / branch layout
 

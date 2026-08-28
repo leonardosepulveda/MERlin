@@ -64,6 +64,12 @@ def build_parser():
                         help='the data home directory')
     parser.add_argument('-s', '--analysis-home',
                         help='the analysis home directory')
+    parser.add_argument('-x', '--analysis-name',
+                        help='the subdirectory name under analysis-home to '
+                        'store analysis results in, if it should differ '
+                        'from the dataset directory (e.g. a short fixed '
+                        'name instead of a long/nested raw-data path). '
+                        'Defaults to the dataset directory.')
     parser.add_argument('-q', '--parameters-home',
                         help='the parameters home directory')
     parser.add_argument('-f', '--figures-path',
@@ -150,7 +156,8 @@ def merlin():
         analysisHome=_clean_string_arg(args.analysis_home),
         microscopeParametersName=_clean_string_arg(args.microscope_parameters),
         allowRaggedZStacks=args.allow_ragged_z_stacks,
-        figuresPath=_clean_string_arg(args.figures_path)
+        figuresPath=_clean_string_arg(args.figures_path),
+        analysisName=_clean_string_arg(args.analysis_name)
     )
     
     parametersHome = m.ANALYSIS_PARAMETERS_HOME

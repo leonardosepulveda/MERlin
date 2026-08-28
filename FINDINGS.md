@@ -3,6 +3,46 @@
 Curated current-state summary. See `prompt_history/` for full provenance of each item
 below; this file only tracks what's true *now* and the open next step.
 
+## GenerateMosaic / GenerateMosaicSimple merged (2026-08-27)
+
+`merlin/analysis/generatemosaic.py`'s two mosaic-assembly classes are now one.
+`GenerateMosaic` always uses `GenerateMosaicSimple`'s fast per-fov tile
+placement (resample + slice, with a correct arbitrary-overlap-count average),
+but -- unlike the old `GenerateMosaicSimple`, which read raw stage positions
+straight from the dataset and never actually used the `global_align_task` it
+declared a dependency on -- each fov's placement now comes from
+`alignTask.fov_to_global_transform(fov)`, so a corrected, non-regular fov grid
+(`LeastSquaresGlobalAlignment`, see below) is honored. This only works for a
+translation/scale `fov_to_global_transform` (true of every alignment class
+implemented today); a rotated/sheared one raises `NotImplementedError`
+explicitly rather than silently placing tiles wrong -- the old
+`GenerateMosaic`'s full-canvas-`cv2.warpAffine` path nominally supported
+rotation, but nothing exercises that today (`CorrelationGlobalAlignment`,
+the one sketched with rotation in mind, is unimplemented), so it wasn't
+carried forward. Both classes' parameters are preserved: `microns_per_pixel`
+or `downsample` (mutually exclusive) sizes the mosaic; `output_format`
+(`"imagej"`/`"ome"`, the latter forcing `separate_files=True`) plus
+`write_pyramidal_tiff`/`pyramidal_levels` picks the writer.
+`GenerateMosaicSimple` is now a ~10-line subclass that only restores its old
+defaults (`downsample=1`, `fov_crop_width=100`, `output_format="ome"`), kept
+for existing analysis-parameters files that reference it by name.
+`docs/tasks.rst`'s `GenerateMosaic` entry updated to match (it predated
+`GenerateMosaicSimple` and didn't mention it). See `prompt_history/
+2026_08_27_2159_merge_generatemosaic_and_generatemosaicsimple.md`.
+
+This makes two references below stale, now corrected: the "ongoing ragged-Z"
+section's `GenerateMosaic._prepare_mosaic_slice`/`GenerateMosaicSimple.load_tile`
+(that method is gone; both classes now share one `load_tile`/`_build_mosaic`
+path), and "LeastSquaresGlobalAlignment"'s 2026-08-22 update's
+"`generatemosaic.py`'s absolute-offset tile placement" (that was
+specifically `GenerateMosaicSimple`'s old raw-stage-position placement, which
+this merge replaced with `alignTask`-sourced placement -- so
+`LeastSquaresGlobalAlignment`'s corrected positions are now actually honored
+by `GenerateMosaic`, which wasn't true before this merge).
+
+**Not yet committed** -- working tree change only, on `master`; needs a
+feature branch before committing per the git-workflow rule.
+
 ## FiducialCorrelationWarp: drift_qc verification figure (2026-08-23)
 
 Added a `drift_qc` verification figure to `FiducialCorrelationWarp`
@@ -667,8 +707,9 @@ warp.py zero-fill was needed after all. What actually changed:
   choice, since this is naturally a "process what's there" loop, unlike SumSignal's
   single required value). Also fixed a pre-existing latent bug: `z_indexes` isinstance
   check ran before the "key not present" check, which would `KeyError` if absent.
-- `generatemosaic.py`: `GenerateMosaic._prepare_mosaic_slice`/`GenerateMosaicSimple
-  .load_tile` gate the `get_aligned_image` call on whether the requested z is within that
+- `generatemosaic.py`: (both classes' mosaic-building methods at the time; since merged
+  into one `GenerateMosaic.load_tile`, see "GenerateMosaic / GenerateMosaicSimple merged"
+  above) gate the `get_aligned_image` call on whether the requested z is within that
   fov's own depth; when not, substitute a same-shape zero array. The existing
   `pixel > 0`-based coverage/division-mask accounting already correctly treats an
   all-zero contribution as "not imaged here" — no separate explicit mask was needed.

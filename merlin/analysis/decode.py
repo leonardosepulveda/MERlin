@@ -103,6 +103,13 @@ class Decode(BarcodeSavingParallelAnalysisTask):
     def get_estimated_time(self):
         return 5
 
+    def _generate_verification_figures(self) -> None:
+        """Generate the decodeplots figures (decode_task-only) as soon as
+        this task is done, instead of waiting for the separate
+        PlotPerformance task.
+        """
+        self._generate_plots_for_role('decode_task')
+
     def get_dependencies(self):
         dependencies = [self.parameters['preprocess_task'],
                         self.parameters['optimize_task'],

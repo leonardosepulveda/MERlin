@@ -99,6 +99,13 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
     def get_estimated_time(self):
         return 60
 
+    def _generate_verification_figures(self) -> None:
+        """Generate the optimizationplots figures (optimize_task-only) as
+        soon as this task is done, instead of waiting for the separate
+        PlotPerformance task.
+        """
+        self._generate_plots_for_role('optimize_task')
+
     def get_dependencies(self):
         dependencies = [self.parameters['preprocess_task'],
                         self.parameters['warp_task']]

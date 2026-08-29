@@ -27,8 +27,11 @@ green) and a scratch equivalent for warp.py's `drift_qc` (no dedicated test
 existed for it; confirmed passing, not checked in). See `prompt_history/
 2026_08_29_1629_move_verification_figures_to_plots_folder.md`.
 
-**Not yet merged or pushed** -- same branch as the entry below
-(`feature/auto-figures-per-task`), a separate commit.
+**Update (2026-08-29): merged into `master` and pushed to `origin/master`**
+(`--no-ff`, confirmed via `git rev-parse master origin/master` matching) --
+this note's original "not yet merged" status is stale. Same branch as the
+entry below (`feature/auto-figures-per-task`), a separate commit; that branch
+was also pushed to `origin` and kept (not deleted), per repo convention.
 
 ## PlotPerformance figures now auto-generate per-task (2026-08-29)
 
@@ -67,8 +70,11 @@ environment" note below); `test_analysistask_figures.py`/`test_globalalign.py`
 unaffected. See `prompt_history/
 2026_08_29_1621_auto_figure_generation_per_task.md` for full detail.
 
-**Not yet merged or pushed** -- committed on new branch
-`feature/auto-figures-per-task` off `master`.
+**Update (2026-08-29): merged into `master` and pushed to `origin/master`**
+(`--no-ff`, confirmed via `git rev-parse master origin/master` matching) --
+this note's original "not yet merged" status is stale. Committed on branch
+`feature/auto-figures-per-task` off `master`, also pushed to `origin` and
+kept (not deleted), per repo convention.
 
 ## Configurable verification-figures folder + `merlin.` filename prefix (2026-08-28)
 

@@ -3,6 +3,33 @@
 Curated current-state summary. See `prompt_history/` for full provenance of each item
 below; this file only tracks what's true *now* and the open next step.
 
+## Hand-written verification figures moved into merlin/plots/ (2026-08-29)
+
+`FiducialCorrelationWarp` (warp.py) and `LeastSquaresGlobalAlignment`
+(globalalign.py) used to have their `_generate_verification_figures` plotting
+code written directly inline in the task class. Moved to follow the same
+one-file-per-analysis-module `merlin/plots/` paradigm as
+decodeplots.py/filterplots.py/optimizationplots.py/segmentationplots.py: new
+`merlin/plots/warpplots.py` (`generate_drift_qc(warpTask)`, plus the
+`_robust_max`/`_load_drift_dataframe` helpers it needs) and `merlin/plots/
+globalalignplots.py` (`generate_all(alignTask)` dispatching to
+`plot_direction_reliability`/`plot_grid_overlay`/
+`plot_overlap_correlation_grid`/`plot_overlap_correlation_histogram`). Each
+task's `_generate_verification_figures` is now a one-line call into its new
+module (`warpplots.generate_drift_qc(self)` /
+`globalalignplots.generate_all(self)`); figure content, filenames, and save
+location are unchanged. These stay plain functions, not `AbstractPlot`
+subclasses -- `get_available_plots()` (used by `PlotPerformance`) picks up
+nothing new from either file, confirmed directly.
+
+Verified via the existing `test_globalalign.py` figure test (unchanged, still
+green) and a scratch equivalent for warp.py's `drift_qc` (no dedicated test
+existed for it; confirmed passing, not checked in). See `prompt_history/
+2026_08_29_1629_move_verification_figures_to_plots_folder.md`.
+
+**Not yet merged or pushed** -- same branch as the entry below
+(`feature/auto-figures-per-task`), a separate commit.
+
 ## PlotPerformance figures now auto-generate per-task (2026-08-29)
 
 The `merlin.plots` figures (decodeplots/filterplots/optimizationplots/

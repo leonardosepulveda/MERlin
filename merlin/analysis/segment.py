@@ -48,6 +48,15 @@ class FeatureSavingAnalysisTask(analysistask.ParallelAnalysisTask):
         """
         return spatialfeature.HDF5SpatialFeatureDB(self.dataSet, self)
 
+    def _generate_verification_figures(self) -> None:
+        """Generate the segmentationplots figures (segment_task-only) as
+        soon as this task is done, instead of waiting for the separate
+        PlotPerformance task. Covers every FeatureSavingAnalysisTask
+        subclass (WatershedSegment, CellPoseSegment3D, CellPoseSegmentSAM,
+        RefineCellDatabases).
+        """
+        self._generate_plots_for_role('segment_task')
+
 
 class WatershedSegment(FeatureSavingAnalysisTask):
 

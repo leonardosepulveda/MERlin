@@ -3,6 +3,73 @@
 Curated current-state summary. See `prompt_history/` for full provenance of each item
 below; this file only tracks what's true *now* and the open next step.
 
+## Hand-written verification figures moved into merlin/plots/ (2026-08-29)
+
+`FiducialCorrelationWarp` (warp.py) and `LeastSquaresGlobalAlignment`
+(globalalign.py) used to have their `_generate_verification_figures` plotting
+code written directly inline in the task class. Moved to follow the same
+one-file-per-analysis-module `merlin/plots/` paradigm as
+decodeplots.py/filterplots.py/optimizationplots.py/segmentationplots.py: new
+`merlin/plots/warpplots.py` (`generate_drift_qc(warpTask)`, plus the
+`_robust_max`/`_load_drift_dataframe` helpers it needs) and `merlin/plots/
+globalalignplots.py` (`generate_all(alignTask)` dispatching to
+`plot_direction_reliability`/`plot_grid_overlay`/
+`plot_overlap_correlation_grid`/`plot_overlap_correlation_histogram`). Each
+task's `_generate_verification_figures` is now a one-line call into its new
+module (`warpplots.generate_drift_qc(self)` /
+`globalalignplots.generate_all(self)`); figure content, filenames, and save
+location are unchanged. These stay plain functions, not `AbstractPlot`
+subclasses -- `get_available_plots()` (used by `PlotPerformance`) picks up
+nothing new from either file, confirmed directly.
+
+Verified via the existing `test_globalalign.py` figure test (unchanged, still
+green) and a scratch equivalent for warp.py's `drift_qc` (no dedicated test
+existed for it; confirmed passing, not checked in). See `prompt_history/
+2026_08_29_1629_move_verification_figures_to_plots_folder.md`.
+
+**Not yet merged or pushed** -- same branch as the entry below
+(`feature/auto-figures-per-task`), a separate commit.
+
+## PlotPerformance figures now auto-generate per-task (2026-08-29)
+
+The `merlin.plots` figures (decodeplots/filterplots/optimizationplots/
+segmentationplots) no longer need the separate `PlotPerformance` task to be run --
+each producing task now generates its own single-task-role figures right after it
+completes, via a new shared helper `AnalysisTask._generate_plots_for_role(role)`
+(`merlin/core/analysistask.py`) wired into `_generate_verification_figures` (the
+existing "run automatically once this task is done" hook from the 2026-08-14
+mechanism below) on `Decode` (`'decode_task'`), `AbstractFilterBarcodes` (shared
+base of `FilterBarcodes`/`AdaptiveFilterBarcodes`(`Local`), `'filter_task'`),
+`OptimizeIteration` (`'optimize_task'`), and `FeatureSavingAnalysisTask` (shared
+base of `WatershedSegment`/`CellPoseSegment3D`/`CellPoseSegmentSAM`/
+`RefineCellDatabases`, `'segment_task'`). Figures save via
+`dataSet.save_task_figure` into the shared `figuresPath` folder (`merlin.
+{taskName}.{figureName}.png`), not the old `PlotPerformance`-nested location.
+
+Only plots whose *sole* declared requirement (`AbstractPlot.get_required_tasks`)
+is that one task role are auto-generated this way. The two plots needing both
+`filter_task` and `global_align_task` (`CodingBarcodeSpatialDistribution`,
+`BlankBarcodeSpatialDistribution` in filterplots.py) are intentionally **not**
+auto-generated -- per the user's explicit choice over walking
+`filter_task -> decode_task -> global_align_task` to resolve the extra role --
+and still require the standalone `PlotPerformance` task, which is otherwise
+untouched and still works for anyone who keeps it in their pipeline.
+
+Verified end-to-end against the real `test_analysis_parameters.json` fixture run
+through `run_with_snakemake` with no `PlotPerformance` task in the pipeline at
+all -- every wired task (`Decode`, `FilterBarcodes`, `AdaptiveFilterBarcodes`,
+both `OptimizeIteration` instances, `WatershedSegment`, and the downstream
+`RefineCellDatabases`) produced its figures automatically. `pytest -k "not
+slowtest"` shows the same non-deterministic pre-existing failure/error classes on
+this branch and on unmodified `master` (NFS teardown flakiness, `test_snakemake.py`
+`WorkflowError`s, `test_plotting.py`'s two known-flaky tests -- see "Test
+environment" note below); `test_analysistask_figures.py`/`test_globalalign.py`
+unaffected. See `prompt_history/
+2026_08_29_1621_auto_figure_generation_per_task.md` for full detail.
+
+**Not yet merged or pushed** -- committed on new branch
+`feature/auto-figures-per-task` off `master`.
+
 ## Configurable verification-figures folder + `merlin.` filename prefix (2026-08-28)
 
 `merlin`'s CLI gained `-f`/`--figures-path`, threaded through

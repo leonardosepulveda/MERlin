@@ -20,6 +20,14 @@ class AbstractFilterBarcodes(decode.BarcodeSavingParallelAnalysisTask):
             self.parameters['decode_task'])
         return decodeTask.get_codebook()
 
+    def _generate_verification_figures(self) -> None:
+        """Generate the filterplots figures (filter_task-only) as soon as
+        this task is done, instead of waiting for the separate
+        PlotPerformance task. Covers FilterBarcodes and the
+        AdaptiveFilterBarcodes(Local) subclasses.
+        """
+        self._generate_plots_for_role('filter_task')
+
 
 class FilterBarcodes(AbstractFilterBarcodes):
 

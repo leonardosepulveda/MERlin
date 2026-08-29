@@ -239,6 +239,53 @@ class AnalysisTask(ABC):
             logger.exception(e)
             self.dataSet.close_logger(self)
 
+    def _generate_plots_for_role(self, role: str) -> None:
+        """Generate the merlin.plots figures whose only declared requirement
+        (AbstractPlot.get_required_tasks) is this task, in the given role
+        (e.g. 'decode_task', 'filter_task', 'optimize_task', 'segment_task'),
+        saving each via dataSet.save_task_figure into the shared
+        verification-figures folder. Meant to be called from a subclass's
+        _generate_verification_figures override, right after that task
+        itself completes, so these figures no longer require running the
+        separate PlotPerformance task.
+
+        Plots that need more than one task role (e.g. filterplots'
+        CodingBarcodeSpatialDistribution, which also needs
+        global_align_task) are intentionally skipped here -- PlotPerformance
+        still covers those.
+
+        Each plot is generated independently, with its own exception
+        handling, so one broken plot does not prevent the others.
+        """
+        from matplotlib import pyplot as plt
+        from merlin import plots
+
+        taskDict = {role: self}
+        for plotClass in plots.get_available_plots():
+            p = plotClass(self)
+            if set(p.get_required_tasks()) != {role} \
+                    or not p.is_relevant(taskDict):
+                continue
+            try:
+                metadataDict = {}
+                for metadataClass in p.get_required_metadata():
+                    m = metadataClass(self, taskDict)
+                    m.update()
+                    if not m.is_complete():
+                        raise RuntimeError(
+                            '%s metadata not complete after a single update'
+                            % metadataClass.metadata_name())
+                    metadataDict[metadataClass.metadata_name()] = m
+
+                f = p._generate_plot(taskDict, metadataDict)
+                f.tight_layout(pad=1)
+                self.dataSet.save_task_figure(self, f, p.figure_name())
+                plt.close(f)
+            except Exception as e:
+                logger = self.dataSet.get_logger(self)
+                logger.exception(e)
+                self.dataSet.close_logger(self)
+
     def is_error(self):
         """Determines if an error has occurred while running this analysis
         

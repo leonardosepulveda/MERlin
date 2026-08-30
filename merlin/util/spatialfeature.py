@@ -1,4 +1,5 @@
 from abc import abstractmethod
+import multiprocessing
 import numpy as np
 import uuid
 import cv2
@@ -17,6 +18,33 @@ from scipy.spatial import cKDTree
 
 from merlin.core import dataset
 from merlin.core import analysistask
+
+
+# Module-level worker state for SpatialFeature.features_from_label_matrix_stack.
+# Set once per worker process by _init_feature_worker (passed through the
+# multiprocessing.Pool initializer, not pickled per task) so each worker
+# holds its own copy of the label matrix stack instead of it being
+# re-serialized for every mask value.
+_workerLabelMatrixStack = None
+_workerFov = None
+_workerTransformationMatrix = None
+_workerZCoordinates = None
+
+
+def _init_feature_worker(labelMatrixStack, fov, transformationMatrix,
+                          zCoordinates):
+    global _workerLabelMatrixStack, _workerFov, \
+        _workerTransformationMatrix, _workerZCoordinates
+    _workerLabelMatrixStack = labelMatrixStack
+    _workerFov = fov
+    _workerTransformationMatrix = transformationMatrix
+    _workerZCoordinates = zCoordinates
+
+
+def _feature_for_mask_value(maskValue):
+    return SpatialFeature.feature_from_label_matrix(
+        _workerLabelMatrixStack == maskValue, _workerFov,
+        _workerTransformationMatrix, _workerZCoordinates)
 
 
 class SpatialFeature(object):
@@ -90,6 +118,48 @@ class SpatialFeature(object):
             SpatialFeature._remove_interior_boundaries(
                 [geometry.Polygon(x) for x in b if len(x) > 2]))
                                for b in boundaries], fov, zCoordinates)
+
+    @staticmethod
+    def features_from_label_matrix_stack(
+            labelMatrixStack: np.ndarray, maskValues: np.ndarray, fov: int,
+            transformationMatrix: np.ndarray = None,
+            zCoordinates: np.ndarray = None,
+            processes: int = 1) -> List['SpatialFeature']:
+        """Generate one feature per mask value in a labeled image stack.
+
+        Equivalent to calling
+        feature_from_label_matrix(labelMatrixStack == value, ...) once per
+        entry in maskValues, but split across worker processes -- the
+        per-object contour extraction done inside feature_from_label_matrix
+        is the dominant cost for FOVs with many segmented objects, and each
+        object's feature is independent of the others.
+
+        Args:
+            labelMatrixStack: a 3d matrix (z, x, y) where each segmented
+                object is assigned its own integer label.
+            maskValues: the label values to extract, one feature per value,
+                in the returned order.
+            fov: the index of the field of view corresponding to the
+                label matrix.
+            transformationMatrix: as in feature_from_label_matrix.
+            zCoordinates: as in feature_from_label_matrix.
+            processes: number of worker processes to use. 1 (the default)
+                runs serially in the current process with no multiprocessing
+                overhead.
+        Returns: the list of features, one per entry in maskValues, in the
+            same order.
+        """
+        if processes <= 1 or len(maskValues) == 0:
+            return [SpatialFeature.feature_from_label_matrix(
+                        labelMatrixStack == v, fov, transformationMatrix,
+                        zCoordinates)
+                    for v in maskValues]
+
+        with multiprocessing.Pool(
+                processes=processes, initializer=_init_feature_worker,
+                initargs=(labelMatrixStack, fov, transformationMatrix,
+                          zCoordinates)) as pool:
+            return pool.map(_feature_for_mask_value, maskValues)
 
     @staticmethod
     def _extract_boundaries(labelMatrix: np.ndarray) -> List[np.ndarray]:

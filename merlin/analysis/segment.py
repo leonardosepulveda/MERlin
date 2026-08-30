@@ -477,6 +477,15 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
         if 'use_old_segmentation' not in self.parameters:
             self.parameters['use_old_segmentation'] = False
 
+        # number of worker processes used to extract per-cell spatial
+        # features after segmentation (the slow, serial step for FOVs with
+        # many cells). 1 keeps the original serial behavior; only raise
+        # this if the cluster resource allocation for this rule also
+        # requests that many CPUs, otherwise the extra processes just
+        # compete for the single allocated core.
+        if 'feature_extraction_processes' not in self.parameters:
+            self.parameters['feature_extraction_processes'] = 1
+
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
 
@@ -717,17 +726,16 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
         if 'zPosRetained' not in locals():
             zPosRetained = np.array(self.dataSet.get_z_positions(fragmentIndex))
 
-        featureList = []
-        for val in mask_values:
-            t0 = time.time()
-            feat = spatialfeature.SpatialFeature.feature_from_label_matrix(
-                        (masks == val),
-                        fragmentIndex,
-                        globalTask.fov_to_global_transform(fragmentIndex),
-                        zPosRetained)
-            featureList.append(feat)
-            t1 = time.time()
-            print(f'generated features mask value {val} in time {t1-t0}s')
+        t0 = time.time()
+        featureList = spatialfeature.SpatialFeature.features_from_label_matrix_stack(
+                    masks,
+                    mask_values,
+                    fragmentIndex,
+                    globalTask.fov_to_global_transform(fragmentIndex),
+                    zPosRetained,
+                    processes=self.parameters['feature_extraction_processes'])
+        t1 = time.time()
+        print(f'generated features for {len(mask_values)} masks in time {t1-t0}s')
 
         """
         [spatialfeature.SpatialFeature.feature_from_label_matrix(

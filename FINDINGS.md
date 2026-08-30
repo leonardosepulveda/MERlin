@@ -3,6 +3,64 @@
 Curated current-state summary. See `prompt_history/` for full provenance of each item
 below; this file only tracks what's true *now* and the open next step.
 
+## BC555_sample_05 epi/disk SLURM failures diagnosed; feature-extraction parallelized (2026-08-29)
+
+Investigated the `epi` run's `CellPoseSegmentSAM` TIMEOUTs and the `disk`
+run's `DeconvolutionPreprocess` FAILEDs (both on `BC555_sample_05`, the
+`s5-BC555e_*`/`s5-BC555d_*` SLURM jobs). Neither was transient/flaky --
+both fail identically on every attempt:
+
+- **`disk`/`DeconvolutionPreprocess`**: 558/558 attempted fragments failed,
+  0 succeeded, all with `ValueError: can only convert an array of size 1 to
+  a Python scalar` from `dataorganization.py`'s `get_data_channel_for_bit`.
+  Root cause is a config mismatch in the experiment's own run, not a MERlin
+  bug: `save_pixel_histogram: true` on `DeconvolutionPreprocess` makes it
+  loop over every codebook bit name and look each up in the data
+  organization, but this run's codebook (`C3v1_codebook.csv`, full MERFISH
+  barcode bits) doesn't match its data organization (`ST2`, 3 smFISH
+  channels only -- correct for this decode-free pipeline). Worth noting for
+  next time: `write_preprocessed_FOV` defaults to *every* FOV when unset, so
+  `save_pixel_histogram: false` alone does not skip this code path -- both
+  parameters must be set. Root cause traced to two MERci-side template
+  defaults (`data/configs/merlin/analysis/tasks/deconvolution_preprocess.yaml`,
+  `_PREPROCESS_DEFAULTS` in `merlin_config.py`) that always turn the
+  histogram on regardless of whether the assembled pipeline decodes
+  barcodes; handed off to MERci (its own `prompt_history/`, dated
+  2026-08-29, "tumor_disk pixel histogram codebook crash"). The
+  experiment's own generated yaml was hand-patched with both parameters as
+  an immediate, non-durable stopgap.
+
+- **`epi`/`CellPoseSegmentSAM`**: 64/476 FOVs stuck, 0 have ever succeeded
+  even across snakemake's automatic retries. Cellpose GPU inference itself
+  finishes in under a second; the actual bottleneck is the serial per-cell
+  post-processing loop (`CellPoseSegmentSAM._run_analysis`, calling
+  `SpatialFeature.feature_from_label_matrix` once per detected cell at
+  ~0.9-1s each) against a fixed 10-minute SLURM time limit
+  (`cluster_resource_allocation_*.json`) -- any FOV dense enough to exceed
+  ~600 cells cannot finish in time regardless of retries.
+
+  **Fix (branch `perf/parallel-spatialfeature-extraction`, commit
+  `a542072`)**: added `SpatialFeature.features_from_label_matrix_stack`
+  (`merlin/util/spatialfeature.py`) which spreads the independent per-cell
+  feature extraction across a `multiprocessing.Pool` -- the label matrix
+  stack is passed once per worker via the pool initializer (not once per
+  cell) to avoid repeated pickling of a large array. `CellPoseSegmentSAM`
+  gained a `feature_extraction_processes` parameter (default `1`, i.e. no
+  behavior change unless configured) and now calls the new method instead
+  of looping inline. Verified serial (`processes=1`) and parallel
+  (`processes=2`) output match exactly on a synthetic mask; `test/
+  test_spatialfeature.py` (18 tests) and the full non-slow suite still pass
+  (pre-existing, order-dependent `test_analysis/` teardown flakiness in
+  `test_core.py`/`test_snakemake.py` reproduces identically on `master`,
+  unrelated to this change).
+
+  **Not yet done**: this only helps once the per-rule SLURM allocation
+  (`cluster_resource_allocation_BC555_sample_05.json`'s `CellPoseSegmentSAM`
+  entry, currently `n: 1` CPU) is also raised to match whatever
+  `feature_extraction_processes` is set to for the `epi` run, and the
+  64 stuck FOVs still need their `.error`/`.start` markers cleared before
+  resubmitting. Branch not yet merged to `master` or pushed.
+
 ## Hand-written verification figures moved into merlin/plots/ (2026-08-29)
 
 `FiducialCorrelationWarp` (warp.py) and `LeastSquaresGlobalAlignment`

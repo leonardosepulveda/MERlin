@@ -3,6 +3,71 @@
 Curated current-state summary. See `prompt_history/` for full provenance of each item
 below; this file only tracks what's true *now* and the open next step.
 
+## BC555_sample_05 epi/CellPoseSegmentSAMDone OOM in the aggregate "Done" figure step (2026-08-30)
+
+Follow-up on the entry below: the per-fragment `CellPoseSegmentSAM` TIMEOUT problem is
+confirmed **fixed** on this run — all 476/476 FOVs have `.done` markers and 0 `.error`
+markers. A new, different failure showed up in the same task's aggregate
+`CellPoseSegmentSAMDone` snakemake rule (`WorkflowError: At least one job did not
+complete successfully`), consistently OOM-killed on all 3 automatic retries (SLURM logs
+under `output/snakemake/slurm_logs/rule_CellPoseSegmentSAMDone/`).
+
+Root cause: `ParallelAnalysisTask.is_complete()` (`merlin/core/analysistask.py`), the
+first time every fragment is done, calls `_generate_figures_safely()` →
+`FeatureSavingAnalysisTask._generate_verification_figures()` (`merlin/analysis/
+segment.py`) → `SegmentationBoundaryPlot._generate_plot()` (`merlin/plots/
+segmentationplots.py`), which calls `featureDB.read_features()` and loads **every**
+cell boundary for **all 476 FOVs** into a single process at once just to draw one
+boundary map. This experiment's on-disk feature database is 12 GB across 476 HDF5
+files; unpacked into per-cell shapely `Polygon` objects in memory it exceeds the rule's
+allocation, which is only 8000 MB because `cluster_resource_allocation_BC555_sample_05.json`
+has no `CellPoseSegmentSAMDone` entry of its own and falls back to `__default__`'s
+`mem: 8000`.
+
+**Other error, same run**: `PlotPerformance` (which redundantly regenerates every
+task's figures, including this same segmentation-boundary plot, at the end of the
+pipeline) also failed twice, with `SLURM status: 'TIMEOUT'` instead of OOM — it already
+has a `mem: 30000` override in the same config file but no `time` override, so it
+inherits `__default__`'s `3:00:00` and exceeds it. Plausibly the same full-dataset
+`read_features()` cost, just wall-clock-bound here instead of memory-bound.
+
+**Fix implemented**: `HDF5SpatialFeatureDB` (`merlin/util/spatialfeature.py`) gained
+`get_feature_z_count()` (z-plane count of the first feature, no geometry read) and
+`read_feature_boundaries_at_z(zIndex)` (loads only one feature's `zIndex_<zIndex>`
+group, skipping every other z-plane). `SegmentationBoundaryPlot._generate_plot`
+(`merlin/plots/segmentationplots.py`) now uses these instead of `read_features()` —
+same `zPosition` (middle-z) selection and same plot output, just without reading the
+~24 other z-planes per cell it never plots. Cuts the ~9-13 GB estimate above to
+~0.25-0.75 GB for this dataset, comfortably inside the existing 8 GB allocation (no
+SLURM config change needed for this fix alone). Verified via a new equivalence test
+(`test_feature_hdf5_db_read_boundaries_at_z_matches_read_features`) and the full
+non-slow suite (same pre-existing order-dependent teardown flakiness as `master`, no
+regression). Full detail: `prompt_history/
+2026_08_30_1422_diagnose_cellposesegmentsamdone_oom.md`, `prompt_history/
+2026_08_30_1512_read_single_z_for_segmentation_boundary_plot.md`.
+
+**Not yet done**: this only reduces the memory `CellPoseSegmentSAMDone` needs — it
+doesn't give a hard, dataset-size-independent bound (a subsample cap, "option D" from
+the cost comparison, was discussed and declined for now). Not yet committed/branched,
+merged, or deployed to the experiment's own env; the `PlotPerformance` TIMEOUT (a
+separate resource-allocation gap, not a code bug) is also still open.
+
+**Follow-up finding, same day**: benchmarked 4 candidate fixes for
+`SegmentationBoundaryPlot` (`merlin/plots/segmentationplots.py`) against 9 real FOVs
+from this experiment, in a throwaway comparison notebook (not committed — see the
+prompt_history entry below for its scratchpad location). Turned up a second,
+unrelated bug along the way: because Cellpose segments effectively per-z-plane here
+(most cells occupy only 1-9 of ~25 z-planes, not clustered at the geometric middle),
+the plot's existing single fixed z-index selection silently shows only 0-40% of cells
+per FOV (0% on one sampled FOV) — independent of the OOM. A per-cell "own occupied
+z" read strategy (`single_z_occupied` in the notebook) fixes both at once: ~100%
+coverage at a fraction of `full`'s cost (~0.3 GB / ~8.5 min extrapolated
+dataset-wide vs ~29 GB / ~44 min for today's `read_features()`-based path, if that
+path were also restructured to stream one FOV at a time instead of holding all 476
+simultaneously). Comparison only — no fix implemented yet, awaiting the user's
+choice of option. Full detail: `prompt_history/
+2026_08_30_1450_segmentation_boundary_plot_cost_notebook.md`.
+
 ## BC555_sample_05 epi/disk SLURM failures diagnosed; feature-extraction parallelized (2026-08-29)
 
 Investigated the `epi` run's `CellPoseSegmentSAM` TIMEOUTs and the `disk`

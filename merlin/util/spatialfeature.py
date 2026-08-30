@@ -609,6 +609,88 @@ class HDF5SpatialFeatureDB(SpatialFeatureDB):
 
         return featureList
 
+    def get_feature_z_count(self, fov: int = None) -> int:
+        """Get the z-plane count of the first feature found, without
+        loading any boundary geometry.
+
+        Lets a caller (e.g. a plot that only needs one z-plane) pick a
+        z index cheaply, instead of calling read_features() -- which
+        would deserialize every z-plane's polygons for every feature just
+        to check how many z-planes exist.
+
+        Args:
+            fov: restrict the search to a single fov. If None, fovs are
+                checked in dataset order until one with a feature is found.
+        Returns: the z count of the first feature found, or 0 if no
+            features exist.
+        """
+        if fov is None:
+            for x in self._dataSet.get_fovs():
+                zCount = self.get_feature_z_count(x)
+                if zCount > 0:
+                    return zCount
+            return 0
+
+        try:
+            with self._dataSet.open_hdf5_file('r', 'feature_data',
+                                              self._analysisTask, fov,
+                                              'features') as f:
+                featureGroup = f.require_group('featuredata')
+                keys = list(featureGroup.keys())
+                if not keys:
+                    return 0
+                firstFeature = featureGroup[keys[0]]
+                return len([k for k in firstFeature.keys()
+                           if k.startswith('zIndex_')])
+        except FileNotFoundError:
+            return 0
+
+    def read_feature_boundaries_at_z(
+            self, zIndex: int, fov: int = None) -> List[List[geometry.Polygon]]:
+        """Read only the boundary polygons at a single z index, for every
+        feature, without loading any other z-plane's geometry.
+
+        This is what a caller that only needs one z-plane (e.g.
+        SegmentationBoundaryPlot) should use instead of read_features() --
+        read_features() deserializes every z-plane of every feature, which
+        for a whole dataset is ~20-25x more polygon data than a single
+        z-plane needs.
+
+        Args:
+            zIndex: the z index to read boundaries for.
+            fov: if not None, only the boundaries for the specified fov are
+                returned.
+        Returns: one list of polygons per feature (the z=zIndex entry of
+            that feature's get_boundaries()), for features that have a
+            zIndex_<zIndex> group. Features without one are skipped.
+        """
+        if fov is None:
+            return [b for x in self._dataSet.get_fovs()
+                   for b in self.read_feature_boundaries_at_z(zIndex, x)]
+
+        boundaryList = []
+        zGroupName = 'zIndex_' + str(zIndex)
+        try:
+            with self._dataSet.open_hdf5_file('r', 'feature_data',
+                                              self._analysisTask, fov,
+                                              'features') as f:
+                featureGroup = f.require_group('featuredata')
+                for k in featureGroup.keys():
+                    featG = featureGroup[k]
+                    if zGroupName not in featG:
+                        continue
+                    zGroup = featG[zGroupName]
+                    pCount = len([x for x in zGroup.keys()
+                                 if x[:2] == 'p_'])
+                    boundaryList.append([
+                        self._load_geometry_from_hdf5_group(
+                            zGroup['p_' + str(p)])
+                        for p in range(pCount)])
+        except FileNotFoundError:
+            pass
+
+        return boundaryList
+
     def empty_database(self, fov: int = None) -> None:
         if fov is None:
             for f in self._dataSet.get_fovs():

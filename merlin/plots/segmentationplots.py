@@ -17,22 +17,26 @@ class SegmentationBoundaryPlot(AbstractPlot):
 
     def _generate_plot(self, inputTasks, inputMetadata):
         featureDB = inputTasks['segment_task'].get_feature_database()
-        features = featureDB.read_features()
+
+        # Only read the single z-plane actually plotted below, instead of
+        # every z-plane of every feature in the dataset (read_features()) --
+        # for a whole-dataset plot like this one, that is ~20-25x less
+        # polygon data to deserialize and hold in memory at once.
+        zCount = featureDB.get_feature_z_count()
+        zPosition = 0
+        if zCount > 1:
+            zPosition = int(zCount / 2)
+
+        featuresSingleZ = featureDB.read_feature_boundaries_at_z(zPosition)
+        featuresSingleZ = [x for y in featuresSingleZ for x in y]
 
         fig = plt.figure(figsize=(15, 15))
         ax = fig.add_subplot(111)
         ax.set_aspect('equal', 'datalim')
 
-        if len(features) == 0:
+        if len(featuresSingleZ) == 0:
             return fig
 
-        zPosition = 0
-        if len(features[0].get_boundaries()) > 1:
-            zPosition = int(len(features[0].get_boundaries())/2)
-
-        featuresSingleZ = [feature.get_boundaries()[int(zPosition)]
-                           for feature in features]
-        featuresSingleZ = [x for y in featuresSingleZ for x in y]
         allCoords = [[feature.exterior.coords.xy[0].tolist(),
                       feature.exterior.coords.xy[1].tolist()]
                      for feature in featuresSingleZ]

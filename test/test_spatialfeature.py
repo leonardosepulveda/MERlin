@@ -153,6 +153,34 @@ def test_feature_hdf5_db_read_write_delete_multiple_fov(
     assert len(metaDataEmpty) == 0
 
 
+def test_feature_hdf5_db_read_boundaries_at_z_matches_read_features(
+        single_task, simple_merfish_data):
+    """read_feature_boundaries_at_z() (used by SegmentationBoundaryPlot to
+    avoid loading every z-plane) must return exactly the same polygons as
+    slicing the equivalent z out of a full read_features() call.
+    """
+    featureDB = spatialfeature.HDF5SpatialFeatureDB(
+        simple_merfish_data, single_task)
+    featureDB.write_features([feature3, feature4], fov=0)
+
+    fullFeatures = featureDB.read_features(fov=0)
+    zCount = featureDB.get_feature_z_count(fov=0)
+    assert zCount == 2
+
+    for z in range(zCount):
+        boundariesAtZ = featureDB.read_feature_boundaries_at_z(z, fov=0)
+        expected = [f.get_boundaries()[z] for f in fullFeatures]
+        assert len(boundariesAtZ) == len(expected)
+        for actualPolys, expectedPolys in zip(boundariesAtZ, expected):
+            assert len(actualPolys) == len(expectedPolys)
+            for actualPoly, expectedPoly in zip(actualPolys, expectedPolys):
+                assert actualPoly.equals(expectedPoly)
+
+    featureDB.empty_database(0)
+    assert featureDB.get_feature_z_count(fov=0) == 0
+    assert featureDB.read_feature_boundaries_at_z(0, fov=0) == []
+
+
 def test_feature_contained_within_boundary():
     interiorLabels = np.zeros((1, 8, 8))
     interiorLabels[0, 2:6, 2:6] = 1

@@ -3,6 +3,35 @@
 Curated current-state summary. See `prompt_history/` for full provenance of each item
 below; this file only tracks what's true *now* and the open next step.
 
+## CreateFfc task: flat-field correction, wired into GenerateMosaic (2026-08-30)
+
+Implements the flat-field-correction (FFC) handoff written up on 2026-08-27
+(originally requested from the sibling MERci session, which found MERlin's
+mosaic task had no FFC support): a new standalone `createffc.CreateFfc`
+analysis task estimates one flat-field-correction field per imaging *color*
+(not per data channel, since vignetting is a fixed property of the
+microscope/objective/color) from a small sample of fovs (the `fov_count`
+farthest from the imaged footprint's centroid), reading raw frames directly
+with no dependency on `Warp`/`GlobalAlign`. Fields are Gaussian-smoothed,
+normalized to a percentile, and floor-clipped, mirroring the MERci reference
+implementation the handoff pointed to.
+
+Consumption is opt-in via a new `ffc_task` parameter on `GenerateMosaic`
+(`merlin/analysis/generatemosaic.py`): when set, each fov's aligned image is
+divided by that channel's cached field (`CreateFfc.apply_ffc`) before being
+placed into the mosaic; when absent, behavior is unchanged. Only the
+"minimum concrete deliverable" from the handoff is done — extending
+`ffc_task` into `Warp`/`Preprocess` so decode/segment/smFISH also benefit is
+the noted follow-on, not yet started.
+
+**Status**: implemented and tested (`test/test_createffc.py`, 6/6 pass);
+`GenerateMosaic` has no pre-existing test file to extend. Full non-slow suite
+run on `feature/createffc-task`: 161 passed / 6 failed / 8 errored, same
+pre-existing failure categories as documented elsewhere in this file
+(`test_snakemake.py` `WorkflowError`, `test_core.py` "Directory not empty"
+teardown races) — not a regression from this change. Not yet merged to
+`master` or deployed to any experiment's own env.
+
 ## BC555_sample_05 epi/CellPoseSegmentSAMDone OOM in the aggregate "Done" figure step (2026-08-30)
 
 Follow-up on the entry below: the per-fragment `CellPoseSegmentSAM` TIMEOUT problem is

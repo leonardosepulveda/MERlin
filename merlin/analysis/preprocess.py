@@ -228,12 +228,18 @@ class DeconvolutionPreprocess(Preprocess):
     providesTimeEstimate = True
 
     def get_estimated_memory(self):
-        # Uncalibrated -- no DeconvolutionPreprocess job has been
-        # measured. kTask=15 is a rough guess for float64 promotion (4x
-        # uint16) plus the handful of same-shape working buffers Lucy-
-        # Richardson deconvolution needs per iteration.
+        # Calibrated against BC555_sample_05 epi's 476 real, completed
+        # DeconvolutionPreprocess fovs (see FINDINGS.md): peak MaxRSS
+        # ranged 429-696 MB there. kTask=56 reproduces that real max
+        # (2048x2048 frames) with baselineMb fixed at 230 -- the same
+        # measured "import merlin alone" baseline used for
+        # FiducialCorrelationWarp, a similarly lightweight numpy/scipy/
+        # cv2 per-frame process with no loaded model -- since a single
+        # real data point can't independently pin down both baseline and
+        # kTask. Not yet cross-checked against a second real dataset at a
+        # different frame size/decon_iterations.
         return resourceestimate.estimate_stack_memory_mb(
-            self.dataSet, frameCount=1, kTask=15, baselineMb=300)
+            self.dataSet, frameCount=1, kTask=56, baselineMb=230)
 
     def get_estimated_time(self):
         # Uncalibrated. One deconvolve_lucyrichardson() call per (bit, z)

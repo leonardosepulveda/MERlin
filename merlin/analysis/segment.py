@@ -502,20 +502,24 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
     providesMemoryEstimate = True
 
     def get_estimated_memory(self):
-        # Uncalibrated -- no CellPoseSegmentSAM job has been measured.
-        # baselineMb is deliberately much higher than the plain-python
-        # ~230 MB baseline measured elsewhere in this file's sibling
-        # tasks, since a loaded cellpose model (GPU or CPU) alone
-        # typically costs on the order of a GB; this is a rough guess,
-        # not a measurement. downsample_factor shrinks the x/y footprint
-        # (not z, per this task's own parameter docstring) before
-        # cellpose ever sees the volume.
+        # Calibrated jointly against two real, completed BC555_sample_05
+        # runs (see FINDINGS.md): epi (25 z, 2048x2048, 476 fovs, real
+        # max 3679 MB) and disk (100 z, 2304x2304, do_3D, 71 fovs so far,
+        # real max 9741 MB). Two data points at different z-depths pin
+        # down both free parameters -- baselineMb=2190 (a loaded cellpose
+        # model's fixed GPU/CPU footprint) and kTask=114 (this task
+        # genuinely holds the whole [z, x, y, c] downsampled volume at
+        # once, so needs a much larger multiplier than a single-frame
+        # task) -- exactly reproducing both real maxes. downsample_factor
+        # shrinks the x/y footprint (not z, per this task's own parameter
+        # docstring) before cellpose ever sees the volume. Not
+        # cross-checked against a channel_2_name-set (2-channel) run.
         channelCount = 2 if self.parameters['channel_2_name'] else 1
         zCount = len(self.dataSet.get_z_positions())
         downsampleFactor = self.parameters['downsample_factor'] or 1
         return resourceestimate.estimate_stack_memory_mb(
             self.dataSet, frameCount=channelCount * zCount,
-            downsampleFactor=downsampleFactor, kTask=20, baselineMb=3000)
+            downsampleFactor=downsampleFactor, kTask=114, baselineMb=2190)
 
     def get_estimated_time(self):
         # TODO - refine estimate. Not geometry-driven (see

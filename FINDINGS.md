@@ -3,6 +3,43 @@
 Curated current-state summary. See `prompt_history/` for full provenance of each item
 below; this file only tracks what's true *now* and the open next step.
 
+## DeconvolutionPreprocess/CellPoseSegmentSAM memory recalibrated from real data (2026-08-31)
+
+Follow-up on the entry below (real per-fov calibration comparison): recalibrated both
+constants that were found too low, fitting to each run's real **max** observed fov (not
+median) -- a generated Snakefile rule applies one static `mem_mb` to every fragment of a
+task, so fitting to the median would leave denser-than-typical fovs under-provisioned,
+exactly the failure this recalibration fixes.
+
+- `DeconvolutionPreprocess`: one clean real data point (`epi`, 476 fovs, real max
+  695.91 MB). `baselineMb` fixed at 230 (the same measured "import merlin alone" baseline
+  used for `FiducialCorrelationWarp` -- one data point can't independently solve two free
+  parameters). Solved `kTask = 56` (was an unvalidated guess of 15). New raw estimate for
+  `epi`: 700 MB (margined 840 MB) -- covers the real max, still well under the static
+  JSON's 3000 MB.
+- `CellPoseSegmentSAM`: two clean real data points at different z-depths (`epi`: 25 z,
+  real max 3678.80 MB; `disk`: 100 z, `do_3D: true`, real max 9741.16 MB, only 71/603
+  fovs completed so far -- provisional) -- enough to solve `baselineMb`/`kTask` jointly:
+  `baselineMb = 2190`, `kTask = 114` (was an unvalidated guess of 3000/20). New raw
+  estimates exactly reproduce both real maxes; margined, `epi` = 4421 MB, `disk` =
+  11705 MB -- both far below the static JSON's blanket 32000 MB for this task, while now
+  safely covering the worst fov actually observed (unlike the un-calibrated version,
+  which fell short of even the *median*).
+
+Overshoot vs. the typical (median) fov -- the real cost of fitting to the max: `epi`
+`CellPoseSegmentSAM` 1.06x (tight), `disk` `CellPoseSegmentSAM` 1.82x (`disk`'s fovs vary
+more in cell density). Verified via the actual `get_estimated_memory()` call against the
+real dataset, not a hand recomputation.
+
+**Not done**: `CAREPreprocess`/`Decode` remain uncalibrated (no real data exists for
+either yet); `disk`'s `CellPoseSegmentSAM` fit is provisional (71/603 fovs); the
+2-channel (`channel_2_name` set) case is unverified (both real runs use 1 channel); the
+time-estimate wiring is still not recommended for merging (separate, still fully
+uncalibrated). Full detail in this project's own request-history log, dated 2026-08-31
+14:32.
+
+## SlurmReport per-fov table: validated against real BC555_sample_05, formula gaps found (2026-08-31)
+
 ## SlurmReport per-fov table: validated against real BC555_sample_05, formula gaps found (2026-08-31)
 
 Added `SlurmReport._save_per_fov_resource_table()` (parquet, one row per fov, two

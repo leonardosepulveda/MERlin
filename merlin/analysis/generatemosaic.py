@@ -5,6 +5,7 @@ from typing import Tuple
 import time
 
 from merlin.core import analysistask
+from merlin.analysis.createffc import CreateFfc
 
 
 ExtentTuple = Tuple[float, float, float, float]
@@ -171,6 +172,13 @@ class GenerateMosaic(analysistask.AnalysisTask):
                 self.parameters['optimize_task']).get_chromatic_corrector()
         return None
 
+    def _get_ffc_field(self, dataChannel: int):
+        if 'ffc_task' in self.parameters:
+            return self.dataSet.load_analysis_task(
+                self.parameters['ffc_task']).get_ffc_field_for_channel(
+                dataChannel)
+        return None
+
     def _postprocess_tile(self, rawImage: np.ndarray, fov: int) -> np.ndarray:
         cropWidth = self.parameters['fov_crop_width']
         if cropWidth > 0:
@@ -205,6 +213,10 @@ class GenerateMosaic(analysistask.AnalysisTask):
         if zIndex < len(self.dataSet.get_z_positions(fov)):
             rawImage = self.warpTask.get_aligned_image(
                 fov, dataChannel, zIndex, chromaticCorrector)
+            ffcField = self._get_ffc_field(dataChannel)
+            if ffcField is not None:
+                rawImage = CreateFfc.apply_ffc(
+                    rawImage, ffcField).astype(rawImage.dtype)
         else:
             # this fov has no data at this depth (ragged z-stack) -- a blank
             # tile keeps the placement/averaging below unchanged, since an
@@ -241,6 +253,10 @@ class GenerateMosaic(analysistask.AnalysisTask):
                     [self.warpTask.get_aligned_image(
                         fov, dataChannel, z, chromaticCorrector)
                      for z in range(fovZCount)], axis=0)
+                ffcField = self._get_ffc_field(dataChannel)
+                if ffcField is not None:
+                    rawImage = CreateFfc.apply_ffc(
+                        rawImage, ffcField).astype(rawImage.dtype)
                 tile = self._postprocess_tile(rawImage, fov)
             else:
                 tile = self.load_tile(fov, zIndex, dataChannel)

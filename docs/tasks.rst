@@ -135,6 +135,27 @@ segment.ExportCellMetadata
 
 Description: Exports a csv containing the cell metadata, i.e. fov, volume, x and y coordinates.
 
+createffc.CreateFfc
+--------------------
+
+Description: Estimates a flat-field correction (FFC) field -- a per-pixel
+illumination/vignetting profile -- for each imaging color used in the
+experiment, from a small sample of fovs (those farthest from the imaged
+footprint's centroid). One field is estimated per color (not per data
+channel), since vignetting is a fixed property of the microscope/objective/
+color; every data channel sharing a color reuses the same field. Reads raw
+frames directly, so it has no dependency on Warp/GlobalAlign. Consumption is
+opt-in: a task that wants FFC applied (e.g. GenerateMosaic's ffc\_task
+parameter below) loads this task and calls get\_ffc\_field/
+get\_ffc\_field\_for\_channel on it.
+
+Parameters:
+
+* fov\_count -- The number of fovs to sample when estimating each color's field.
+* smooth\_sigma -- The sigma, in pixels, of the Gaussian smoothing applied to the sampled-frame average.
+* normalize\_percentile -- The percentile of the smoothed field used to normalize it to a ~1.0 peak.
+* minimum\_value -- The floor value the normalized field is clipped to, to avoid near-zero divisors at the field's dim edges.
+
 generatemosaic.GenerateMosaic
 -------------------------------
 
@@ -158,6 +179,7 @@ Parameters:
 * output\_format -- Either "imagej" (default) for a single ImageJ-compatible tiff, or "ome" for one OME-tiff per data channel/z index.
 * write\_pyramidal\_tiff -- If true (requires output\_format="ome"), writes each mosaic as a pyramidal tiff with pyramidal\_levels subresolutions.
 * pyramidal\_levels -- The number of subresolution levels to write when write\_pyramidal\_tiff is true.
+* ffc\_task -- The name of a CreateFfc task. If provided, each fov's aligned image is flat-field corrected (per data channel color) before being placed into the mosaic. If not provided, no flat-field correction is applied.
 sequential.SumSignal
 -------------------------------
 

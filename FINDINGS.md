@@ -40,6 +40,25 @@ from scope entirely. Only `CellPoseSegmentSAM` and `Decode` (and only when
 this branch (`feature/estimated-cluster-resources`, off `master`). Full detail in this
 project's own request-history log, dated 2026-08-31 13:22.
 
+**Follow-up, run against the real experiment (2026-08-31)**: loaded the actual, already-run
+`FiducialCorrelationWarp`/`DeconvolutionPreprocess`/`Decode`/`CellPoseSegmentSAM` task
+instances for both `BC555_sample_05` sub-runs (`epi`: 2048x2048, 25 z; `disk`: 2304x2304,
+100 z -- the deep stack is `disk` specifically, correcting an ambiguity in this file's
+earlier wording) and called the real `SnakemakeRule._cluster_resources_for_rule()` with
+`useComputedEstimate` both ways. **Memory** is unchanged from today for all 4 (each
+already has its own explicit JSON `mem` entry, which the override policy keeps
+authoritative -- the estimates are informative-only unless that entry is removed).
+**Time is live today and risky**: none of the three non-CellPose tasks has its own JSON
+`time` entry (only `__default__`'s blanket `3:00:00` applies), so the computed time
+estimate *would* immediately replace it if this branch were merged -- 180 min -> ~2-6 min
+for each, a 30-40x cut, backed by zero real timing measurements (every `secondsPerFrame`
+constant is a pure guess, unlike the one calibrated memory constant). **Recommendation
+given to the user: do not merge this branch's time-estimate wiring without first
+calibrating `secondsPerFrame` against at least one real timed job per task** -- if any
+task's real per-fragment runtime exceeds a few minutes (including SLURM queue/cold-start
+overhead), this would reproduce the exact TIMEOUT problem this feature exists to fix, at
+scale. Not yet decided/actioned by the user.
+
 ## SmfishSignal/SmfishColocalizationSignal: bounded-memory streaming write (2026-08-31)
 
 Follow-up on `docs/bc555-oom-findings-and-merci-handoff`'s cluster-mem-sizing

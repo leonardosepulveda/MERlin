@@ -3,6 +3,38 @@
 Curated current-state summary. See `prompt_history/` for full provenance of each item
 below; this file only tracks what's true *now* and the open next step.
 
+## DeconvolutionPreprocess time estimate recalibrated before a real restart (2026-08-31)
+
+`feature/estimated-cluster-resources` merged to `master`. Before recommending the user
+restart `BC555_sample_05` jobs with the unchanged JSON config, checked what would actually
+change: **memory is unaffected** for all 4 opted-in tasks (each already has its own
+explicit `mem` entry in `cluster_resource_allocation_BC555_sample_05.json`, which still
+overrides the computed estimate). **Time is not** -- `FiducialCorrelationWarp`,
+`DeconvolutionPreprocess`, and `Decode` have no `time` entry of their own (only
+`__default__`'s blanket `3:00:00`), so the computed estimate would take effect for them
+on restart.
+
+Checked each against the real per-fov time data before calling it safe.
+`FiducialCorrelationWarp`'s margined estimate covers the real max on both runs -- safe,
+unchanged. **`DeconvolutionPreprocess`'s did not** -- both real runs use
+`decon_iterations: 0`, which zeroed out the formula's entire per-frame term, leaving only
+a flat 2-minute baseline guess against a real median of 3.35 min (epi) -- would have
+under-provisioned most fovs. Recalibrated the same way as the memory fix: two real data
+points (epi 400 bit-z frames/4.65 min max, disk 1600/6.53 min max) solved jointly for a
+real flat per-frame cost (0.094 sec/frame) and baseline (4 min); the existing
+`decon_iterations * 0.2 sec` term stays as an uncalibrated additive extra for nonzero-
+iteration configs (no real data exists there). New margined estimate now covers the real
+max on both runs (5.55 min epi vs 4.65 min real max; 7.81 min disk vs 6.53 min real max).
+
+**`Decode`'s time estimate is still entirely uncalibrated** (0/476 fragments complete on
+`epi`, no `Decode` task on `disk` at all) -- flagged to the user as an open risk if they
+restart before real `Decode` data exists; suggested an explicit JSON `time` override as a
+stopgap.
+
+**Not done**: `FiducialCorrelationWarp`'s time left un-tightened (safe, just generous);
+`Decode`'s time uncalibrated. Full detail in this project's own request-history log,
+dated 2026-08-31 15:05.
+
 ## DeconvolutionPreprocess/CellPoseSegmentSAM memory recalibrated from real data (2026-08-31)
 
 Follow-up on the entry below (real per-fov calibration comparison): recalibrated both

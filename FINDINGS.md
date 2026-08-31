@@ -3,6 +3,48 @@
 Curated current-state summary. See `prompt_history/` for full provenance of each item
 below; this file only tracks what's true *now* and the open next step.
 
+## YAML support for cluster_resource_allocation configs; BC555_sample_05 converted (2026-08-31)
+
+`merlin.merlin._load_json_or_yaml` (new, shared with the existing analysis-parameter
+recipe loader) lets a `cluster_config` path be `.yaml`/`.yml`, parsed with native `#`
+comments -- `.json` still parses exactly as before. This is what makes a "commented-out
+calculated value, uncomment to override" workflow possible at all, since plain JSON has
+no comment syntax.
+
+Converted both real `BC555_sample_05` `cluster_resource_allocation_BC555_sample_05.json`
+files (`epi`/`disk`, on shared lab storage, not in this repo) to `.yaml` in this format:
+a task with a real, validated `get_estimated_memory()`/`get_estimated_time()` (currently
+`FiducialCorrelationWarp` mem+time, `DeconvolutionPreprocess` mem+time,
+`CellPoseSegmentSAM` mem only) has its active `mem`/`time` key commented out with a
+`# calculated ...` reference line (rounded up to the nearest whole GB / 5 minutes, per
+the user's convention); everything else keeps a plain active value unchanged.
+
+**Found and fixed a real gap while verifying end-to-end, not just round-tripping the
+YAML**: `Decode` on `epi` has `providesTimeEstimate = True` but was never validated (see
+the per-fov-table entry above) and had no explicit JSON `time` override -- leaving it
+untouched would have let the unvalidated formula silently activate on restart (confirmed
+via a real generated Snakefile: `runtime=6` instead of the safe 180). A systematic check
+across every task in both configs for "`providesEstimate=True`, no override, not
+validated" found this as the only instance; pinned it to an explicit `time: '3:00:00'`
+(its existing, safe `__default__`-inherited value) with an explanatory comment.
+
+Both conversions verified twice: a round-trip parse check, and the actual end-to-end
+`parameters_BC555_sample_05.json` -> `_load_json_or_yaml` -> Snakefile-generation path
+run for real against both experiments' live datasets -- generated `resources:` blocks
+match the intended rounded/margined values exactly. `parameters_BC555_sample_05.json`
+(both runs) updated to point `cluster_config` at the new `.yaml`; the original `.json`
+files were left in place, untouched, as an unreferenced historical backup.
+
+**Handoff to MERci**: logged in MERci's own `prompt_history/`, dated 2026-08-31 15:31
+(status: pending) -- asks `create_cluster_resource_allocation()` to emit this same format
+for future experiments. Flags an open gap worth resolving on either side: there's no
+code-level way today to distinguish "has a formula" from "formula is actually
+calibrated" -- both are just `providesMemoryEstimate`/`providesTimeEstimate = True`.
+
+**Not done**: the calibrated-vs-unvalidated code-level gap itself (flagged, not built);
+MERci's generator changes (their side). Full detail in this project's own request-history
+log, dated 2026-08-31 15:31.
+
 ## DeconvolutionPreprocess time estimate recalibrated before a real restart (2026-08-31)
 
 `feature/estimated-cluster-resources` merged to `master`. Before recommending the user

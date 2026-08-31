@@ -158,13 +158,35 @@ class AnalysisTask(ABC):
         """
         pass
 
+    #: Whether get_estimated_memory()/get_estimated_time() (respectively)
+    #: return a real, parameter-aware estimate for this task rather than
+    #: an unused placeholder constant. SnakefileGenerator only trusts a
+    #: method (to size a cluster job's mem_mb/runtime, with a safety
+    #: margin) when the matching flag is True on the concrete task class
+    #: -- every task still implements both methods (many return a
+    #: leftover hardcoded constant with no caller), but only a task that
+    #: opts in here has had that constant replaced with a real,
+    #: geometry-driven formula. Kept as two separate flags because the two
+    #: estimates aren't always equally trustworthy for the same task: e.g.
+    #: CellPoseSegmentSAM's memory genuinely scales with frame/z geometry,
+    #: but its wall-clock time is dominated by per-cell post-processing
+    #: (cell count is data-dependent, unknown ahead of a run), so only its
+    #: memory estimate is real. A subclass of an opted-in task that
+    #: changes the cost shape enough that the parent's formula no longer
+    #: applies (e.g. a different resource-heavy algorithm) should reset
+    #: the relevant flag back to False and keep returning its own
+    #: constant.
+    providesMemoryEstimate = False
+    providesTimeEstimate = False
+
     @abstractmethod
     def get_estimated_memory(self) -> float:
         """Get an estimate of how much memory is required for this
         AnalysisTask.
 
         Returns:
-            a memory estimate in megabytes.
+            a memory estimate in megabytes. Only meaningful to callers
+                when providesMemoryEstimate is True.
         """
         pass
 
@@ -174,7 +196,8 @@ class AnalysisTask(ABC):
         this AnalysisTask.
 
         Returns:
-            a time estimate in minutes.
+            a time estimate in minutes. Only meaningful to callers when
+                providesTimeEstimate is True.
         """
         pass
 

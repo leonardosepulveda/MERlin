@@ -82,6 +82,62 @@ class RandomNumberParallelAnalysisTask(analysistask.ParallelAnalysisTask):
         return 10
 
 
+class SimpleAnalysisTaskWithResourceEstimate(analysistask.AnalysisTask):
+
+    """A dummy task that opts into providesMemoryEstimate/
+    providesTimeEstimate, returning parameters['estimated_memory']/
+    parameters['estimated_time'] so a test can control the raw estimate
+    SnakefileGenerator sees."""
+
+    providesMemoryEstimate = True
+    providesTimeEstimate = True
+
+    def __init__(self, dataSet, parameters=None, analysisName=None):
+        super().__init__(dataSet, parameters, analysisName)
+
+    def _run_analysis(self):
+        pass
+
+    def get_estimated_memory(self):
+        return self.parameters['estimated_memory']
+
+    def get_estimated_time(self):
+        return self.parameters['estimated_time']
+
+    def get_dependencies(self):
+        return []
+
+
+class SimpleParallelAnalysisTaskWithResourceEstimate(
+        analysistask.ParallelAnalysisTask):
+
+    """Parallel-task counterpart to
+    SimpleAnalysisTaskWithResourceEstimate -- has both a regular and a
+    'Done' rule, so a test can check that a computed estimate is used for
+    the former but not the latter."""
+
+    providesMemoryEstimate = True
+    providesTimeEstimate = True
+
+    def __init__(self, dataSet, parameters=None, analysisName=None):
+        super().__init__(dataSet, parameters, analysisName)
+
+    def _run_analysis(self, fragmentIndex):
+        pass
+
+    def get_estimated_memory(self):
+        return self.parameters['estimated_memory']
+
+    def get_estimated_time(self):
+        return self.parameters['estimated_time']
+
+    def get_dependencies(self):
+        return []
+
+    def fragment_count(self):
+        return 3
+
+
 class SimpleInternallyParallelAnalysisTask(
         analysistask.InternallyParallelAnalysisTask):
 

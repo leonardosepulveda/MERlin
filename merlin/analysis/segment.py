@@ -22,6 +22,7 @@ from merlin.core import dataset
 from merlin.core import analysistask
 from merlin.util import spatialfeature
 from merlin.util import watershed
+from merlin.util import resourceestimate
 import pandas
 import networkx as nx
 
@@ -489,12 +490,38 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
 
+    #: _run_analysis builds one [z, x, y, c] array holding every
+    #: (downsampled) z plane for both segmentation channels at once
+    #: (cellpose needs the whole volume for 3D segmentation/stitching),
+    #: so memory genuinely scales with frame/z geometry. Wall-clock time
+    #: does not: per FINDINGS.md, GPU inference itself finishes in under a
+    #: second and the real bottleneck is the serial per-cell
+    #: post-processing loop afterward, so time is dominated by detected
+    #: cell count -- data-dependent, unknown ahead of a run -- not frame
+    #: geometry. Only memory gets a real estimate here.
+    providesMemoryEstimate = True
+
     def get_estimated_memory(self):
-        # TODO - refine estimate
-        return 2048
+        # Uncalibrated -- no CellPoseSegmentSAM job has been measured.
+        # baselineMb is deliberately much higher than the plain-python
+        # ~230 MB baseline measured elsewhere in this file's sibling
+        # tasks, since a loaded cellpose model (GPU or CPU) alone
+        # typically costs on the order of a GB; this is a rough guess,
+        # not a measurement. downsample_factor shrinks the x/y footprint
+        # (not z, per this task's own parameter docstring) before
+        # cellpose ever sees the volume.
+        channelCount = 2 if self.parameters['channel_2_name'] else 1
+        zCount = len(self.dataSet.get_z_positions())
+        downsampleFactor = self.parameters['downsample_factor'] or 1
+        return resourceestimate.estimate_stack_memory_mb(
+            self.dataSet, frameCount=channelCount * zCount,
+            downsampleFactor=downsampleFactor, kTask=20, baselineMb=3000)
 
     def get_estimated_time(self):
-        # TODO - refine estimate
+        # TODO - refine estimate. Not geometry-driven (see
+        # providesMemoryEstimate's comment above) -- stays a flat,
+        # unused-by-anything placeholder like every other non-opted-in
+        # task until this is estimated from cell density instead.
         return 5
 
     def get_dependencies(self):

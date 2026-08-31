@@ -11,6 +11,7 @@ from merlin.util import decoding
 from merlin.util import barcodedb
 from merlin.data.codebook import Codebook
 from merlin.util import barcodefilters
+from merlin.util import resourceestimate
 
 
 class BarcodeSavingParallelAnalysisTask(analysistask.ParallelAnalysisTask):
@@ -97,11 +98,37 @@ class Decode(BarcodeSavingParallelAnalysisTask):
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
 
+    #: decode_3d (default False) genuinely holds a whole fov's z-stack of
+    #: per-bit normalized pixel traces at once (_run_analysis's decode3d
+    #: branch); the default 2D path processes one z at a time, writing
+    #: each to the output zarr incrementally, so only that one z's
+    #: bitCount-channel image set is held.
+    providesMemoryEstimate = True
+    providesTimeEstimate = True
+
     def get_estimated_memory(self):
-        return 2048
+        # Uncalibrated -- no Decode job has been measured. kTask=8 is a
+        # rough guess for float32 promotion (2x uint16) plus a handful of
+        # same-shape intermediate buffers (normalized pixel traces,
+        # magnitude/distance images) the decoder builds per z.
+        bitCount = self.get_codebook().get_bit_count()
+        if self.parameters['decode_3d']:
+            zCount = len(self.dataSet.get_z_positions())
+            frameCount = bitCount * zCount
+        else:
+            frameCount = bitCount
+        return resourceestimate.estimate_stack_memory_mb(
+            self.dataSet, frameCount=frameCount, kTask=8, baselineMb=300)
 
     def get_estimated_time(self):
-        return 5
+        # Uncalibrated. Both decode_3d and the default 2D path loop over
+        # every z plane, decoding all bitCount channels together at each
+        # one (see _run_analysis) -- decode_3d only changes whether that
+        # loop's results are held in memory or written out incrementally,
+        # not how many times the per-z decode step runs.
+        zCount = len(self.dataSet.get_z_positions())
+        return resourceestimate.estimate_stack_time_minutes(
+            frameCount=zCount, secondsPerFrame=8, baselineMinutes=2)
 
     def _generate_verification_figures(self) -> None:
         """Generate the decodeplots figures (decode_task-only) as soon as

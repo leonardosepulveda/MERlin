@@ -8,6 +8,7 @@ from merlin.core import analysistask
 from merlin.util import deconvolve
 from merlin.util import aberration
 from merlin.util import imagefilters
+from merlin.util import resourceestimate
 from merlin.data import codebook
 
 from skimage import transform
@@ -82,11 +83,30 @@ class CAREPreprocess(Preprocess):
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
 
+    #: _run_analysis processes and writes one (bit, z) frame at a time
+    #: (see the loop below) -- it never holds more than one frame plus
+    #: the loaded CARE/tensorflow model at once, so estimated memory
+    #: doesn't scale with bit or z count, only frame size.
+    providesMemoryEstimate = True
+    providesTimeEstimate = True
+
     def get_estimated_memory(self):
-        return 4096
+        # Uncalibrated -- no CAREPreprocess job has been measured.
+        # baselineMb is deliberately much higher than the plain-python
+        # ~230 MB baseline measured elsewhere in this file's sibling
+        # tasks, since a loaded CARE/tensorflow model alone typically
+        # costs hundreds of MB to a few GB; this is a rough guess, not a
+        # measurement.
+        return resourceestimate.estimate_stack_memory_mb(
+            self.dataSet, frameCount=1, kTask=15, baselineMb=2000)
 
     def get_estimated_time(self):
-        return 5
+        # Uncalibrated. One model.predict() call per (bit, z) frame.
+        bitCount = self.get_codebook().get_bit_count()
+        zCount = len(self.dataSet.get_z_positions())
+        return resourceestimate.estimate_stack_time_minutes(
+            frameCount=bitCount * zCount, secondsPerFrame=2,
+            baselineMinutes=3)
 
     def get_dependencies(self):
         return [self.parameters['warp_task']]
@@ -201,11 +221,33 @@ class DeconvolutionPreprocess(Preprocess):
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
 
+    #: _run_analysis processes and writes one (bit, z) frame at a time
+    #: (see the loop below), so estimated memory doesn't scale with bit
+    #: or z count, only frame size.
+    providesMemoryEstimate = True
+    providesTimeEstimate = True
+
     def get_estimated_memory(self):
-        return 2048
+        # Uncalibrated -- no DeconvolutionPreprocess job has been
+        # measured. kTask=15 is a rough guess for float64 promotion (4x
+        # uint16) plus the handful of same-shape working buffers Lucy-
+        # Richardson deconvolution needs per iteration.
+        return resourceestimate.estimate_stack_memory_mb(
+            self.dataSet, frameCount=1, kTask=15, baselineMb=300)
 
     def get_estimated_time(self):
-        return 5
+        # Uncalibrated. One deconvolve_lucyrichardson() call per (bit, z)
+        # frame, each iterating decon_iterations times -- the dominant,
+        # genuinely parameter-driven cost, so it's folded into
+        # secondsPerFrame rather than left as a flat per-frame guess.
+        bitCount = self.get_codebook().get_bit_count()
+        zCount = len(self.dataSet.get_z_positions())
+        secondsPerIteration = 0.2  # uncalibrated guess
+        return resourceestimate.estimate_stack_time_minutes(
+            frameCount=bitCount * zCount,
+            secondsPerFrame=(
+                self.parameters['decon_iterations'] * secondsPerIteration),
+            baselineMinutes=2)
 
     def get_dependencies(self):
         return [self.parameters['warp_task']]

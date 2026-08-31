@@ -5,6 +5,15 @@ from merlin.core import analysistask
 from merlin.core import dataset
 
 
+#: requested mem_mb/runtime for a task with a computed estimate
+#: (AnalysisTask.providesMemoryEstimate/providesTimeEstimate) is its raw
+#: estimate times this margin -- comfortably above the estimate so a job
+#: doesn't OOM/TIMEOUT from ordinary run-to-run variance, without
+#: requesting so much that it costs the lab's cluster timeshare more than
+#: necessary (see FINDINGS.md).
+RESOURCE_ESTIMATE_MARGIN = 1.2
+
+
 def _parse_slurm_time_to_minutes(timeString: str) -> int:
     """Convert an sbatch-style time limit ('[D-]H(H):MM:SS') to the number
     of minutes expected by snakemake-executor-plugin-slurm's `runtime`
@@ -133,17 +142,43 @@ class SnakemakeRule(object):
             messageString += ' {wildcards.i}'
         return self._add_quotes(messageString)
 
-    def _cluster_resources_for_rule(self, ruleName: str) -> Dict:
+    def _cluster_resources_for_rule(
+            self, ruleName: str, useComputedEstimate: bool = False) -> Dict:
         """Merge __default__ with any override keyed by ruleName (mirroring
         snakemake<8's --cluster-config lookup, which fell back to
         __default__ for rules -- e.g. the 'Done' check rules below -- with
         no entry of their own), then translate to executor-plugin keys.
+
+        Args:
+            ruleName: as above.
+            useComputedEstimate: if True (only passed for a task's own
+                rule, never its 'Done' rule -- see as_string()), mem_mb/
+                runtime are instead taken from the task's own
+                get_estimated_memory()/get_estimated_time() (times
+                RESOURCE_ESTIMATE_MARGIN) whenever it opts in via
+                providesMemoryEstimate/providesTimeEstimate, UNLESS
+                ruleName has its own explicit 'mem'/'time' entry in
+                clusterConfig (not just inherited from __default__) --
+                that explicit per-rule entry is kept as a manual override.
         """
         if not self._clusterConfig:
-            return {}
-        merged = dict(self._clusterConfig.get('__default__', {}))
-        merged.update(self._clusterConfig.get(ruleName, {}))
-        return _translate_cluster_resources(merged)
+            merged, override = {}, {}
+        else:
+            merged = dict(self._clusterConfig.get('__default__', {}))
+            override = self._clusterConfig.get(ruleName, {})
+            merged.update(override)
+        resources = _translate_cluster_resources(merged)
+
+        if useComputedEstimate:
+            task = self._analysisTask
+            if task.providesMemoryEstimate and 'mem' not in override:
+                resources['mem_mb'] = int(round(
+                    task.get_estimated_memory() * RESOURCE_ESTIMATE_MARGIN))
+            if task.providesTimeEstimate and 'time' not in override:
+                resources['runtime'] = int(round(
+                    task.get_estimated_time() * RESOURCE_ESTIMATE_MARGIN))
+
+        return resources
 
     @staticmethod
     def _generate_resources(resources: Dict) -> str:
@@ -200,7 +235,8 @@ class SnakemakeRule(object):
                         self._generate_output(),
                         self._generate_message(),
                         self._generate_resources(
-                            self._cluster_resources_for_rule(ruleName)),
+                            self._cluster_resources_for_rule(
+                                ruleName, useComputedEstimate=True)),
                         self._generate_shell())
         # for parallel tasks, add a second snakemake task to reduce the time
         # it takes to generate DAGs

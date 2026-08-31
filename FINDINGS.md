@@ -3,6 +3,43 @@
 Curated current-state summary. See `prompt_history/` for full provenance of each item
 below; this file only tracks what's true *now* and the open next step.
 
+## get_estimated_memory()/get_estimated_time() implemented for movie-size-scaling tasks (2026-08-31)
+
+`AnalysisTask.providesMemoryEstimate`/`providesTimeEstimate` (new class attributes,
+default `False`) are the opt-in contract: `SnakefileGenerator` (`snakewriter.py`) only
+trusts `get_estimated_memory()`/`get_estimated_time()`'s return value for a task whose
+concrete class sets the matching flag `True` -- every other task's existing hardcoded,
+never-used constant is left exactly as harmless dead code, untouched. When trusted, the
+generated Snakefile rule's `mem_mb`/`runtime` is the estimate times
+`snakewriter.RESOURCE_ESTIMATE_MARGIN` (`1.2`) UNLESS that specific rule has its own
+explicit entry in `cluster_resource_allocation_*.json` (an entry only inherited from
+`__default__` does not count as an override) -- that stays a manual escape hatch. Applies
+only to a task's own rule, never its 'Done' rule.
+
+Opted in (real formulas, in new `merlin/util/resourceestimate.py`, shared math): `Warp`'s
+`FiducialCorrelationWarp` (memory + time; memory's `kTask` is the only constant in this
+whole feature calibrated against a real measurement, backed out from the 855 MB
+`FiducialCorrelationWarp` peak documented below), `Decode` (memory + time, conditional on
+`decode_3d`), `DeconvolutionPreprocess`/`CAREPreprocess` (+ `DeconvolutionPreprocessGuo`,
+inherits both unchanged), `CellPoseSegmentSAM` (memory only -- its time is dominated by
+per-cell post-processing, i.e. cell count, not frame geometry, per the entry below).
+Every other constant is a documented, uncalibrated first-pass guess.
+
+**Correction to last night's "confirmed movie-size-scaling" list**, found while actually
+reading each task's code before implementing rather than trusting the earlier
+investigation: `DeconvolutionPreprocess`/`CAREPreprocess`/`FiducialCorrelationWarp` do
+NOT hold a whole z-stack in memory at any point -- each processes and writes one frame at
+a time, so their memory is frame-size-driven only, not z/channel-count-driven.
+`GenerateAdaptiveThreshold` isn't image/movie-driven at all (reads small column slices
+from the decoded barcode database into small fixed-size histogram bins) and was dropped
+from scope entirely. Only `CellPoseSegmentSAM` and `Decode` (and only when
+`decode_3d: true`) actually hold a full z-stack in memory at once.
+
+**Not done**: none of the `kTask`/`secondsPerFrame` constants besides
+`FiducialCorrelationWarp`'s memory one are calibrated against a real job; merging/pushing
+this branch (`feature/estimated-cluster-resources`, off `master`). Full detail in this
+project's own request-history log, dated 2026-08-31 13:22.
+
 ## SmfishSignal/SmfishColocalizationSignal: bounded-memory streaming write (2026-08-31)
 
 Follow-up on `docs/bc555-oom-findings-and-merci-handoff`'s cluster-mem-sizing

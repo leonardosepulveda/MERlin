@@ -178,7 +178,7 @@ def merlin():
             snakemakeParameters = json.load(f)
         if snakemakeParameters.get('cluster_config'):
             with open(snakemakeParameters['cluster_config']) as f:
-                clusterConfig = json.load(f)
+                clusterConfig = _load_json_or_yaml(f)
 
     snakefilePath = None
     if args.analysis_parameters:
@@ -210,20 +210,30 @@ def merlin():
                                snakemakeParameters, clusterConfig)
 
 
-def _load_analysis_parameters(parametersFile: TextIO) -> Dict:
-    """Parse an analysis-parameters recipe from an open file handle.
-
-    Recipes are the same list-of-task-dicts structure ({"analysis_tasks":
-    [...]}) whether written as JSON or YAML -- the two formats share the same
-    mapping/sequence/scalar data model, so this is purely a choice of parser,
-    dispatched on the file's own extension (`.yaml`/`.yml` vs anything else,
-    which is parsed as JSON as before -- this keeps every existing .json
-    recipe and any caller that doesn't set an extension working unchanged).
+def _load_json_or_yaml(fileObj: TextIO) -> Dict:
+    """Parse an open file handle as YAML or JSON depending on its own
+    extension (`.yaml`/`.yml` vs anything else, parsed as JSON as
+    before). Shared by analysis-parameter recipes and
+    cluster-resource-allocation configs -- both are plain JSON/YAML-
+    compatible mapping/sequence structures, so this is purely a choice
+    of parser, and dispatching on extension keeps every existing .json
+    file (and any caller that doesn't set an extension) working
+    unchanged. YAML's native `#` comments are the main reason to use it
+    for a cluster-resource-allocation file: a per-task calculated
+    mem/time value can be left as a commented-out reference line,
+    uncommented to override it.
     """
-    _, extension = os.path.splitext(parametersFile.name)
+    _, extension = os.path.splitext(fileObj.name)
     if extension.lower() in ('.yaml', '.yml'):
-        return yaml.safe_load(parametersFile)
-    return json.load(parametersFile)
+        return yaml.safe_load(fileObj)
+    return json.load(fileObj)
+
+
+def _load_analysis_parameters(parametersFile: TextIO) -> Dict:
+    """Parse an analysis-parameters recipe from an open file handle. See
+    _load_json_or_yaml for the format-dispatch details.
+    """
+    return _load_json_or_yaml(parametersFile)
 
 
 def generate_analysis_tasks_and_snakefile(

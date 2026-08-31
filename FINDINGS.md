@@ -3,6 +3,44 @@
 Curated current-state summary. See `prompt_history/` for full provenance of each item
 below; this file only tracks what's true *now* and the open next step.
 
+## SlurmReport per-fov table: validated against real BC555_sample_05, formula gaps found (2026-08-31)
+
+Added `SlurmReport._save_per_fov_resource_table()` (parquet, one row per fov, two
+columns per `ParallelAnalysisTask`) and ran it for real against `BC555_sample_05`
+`epi`/`disk`. Found and fixed two real, pre-existing bugs in `_clean_slurm_dataframe`
+along the way (both also affected the existing per-task CSV/plots, not just the new
+table): `MaxRSS` aggregation took the first sacct job-step value instead of the max
+across steps (a `python3.12` srun sub-step commonly uses far more memory than the outer
+`batch` step sacct lists first -- confirmed 120.53M vs the real 3452.07M on one job); and
+an all-NaN column for any single job raised `IndexError`, aborting the whole query
+(silent at small scale, real once querying an experiment's full ~600-job count).
+
+**A third issue, flagged not fixed**: a chunk of `disk`'s `FiducialCorrelationWarp`/
+`DeconvolutionPreprocess` rows are contaminated by fragments that were run inside a
+long-lived interactive SLURM session (confirmed: `sacct` shows `JobName=vscode.job` for
+one, with the environment file's own `SLURM_JOB_START_TIME` matching sacct's `Start`
+exactly -- not a stale job id, that fragment genuinely ran inside a VS Code tunnel job)
+rather than merlin's own dedicated per-fragment submission -- `sacct` then reports that
+whole session's near-idle usage instead. Median-level contamination on those two columns
+for `disk`; only the upper tail is trustworthy. `epi` and both runs' `CellPoseSegmentSAM`
+show no such contamination.
+
+**Calibration comparison against the real, clean data** (raw `get_estimated_memory()`,
+no margin applied): `FiducialCorrelationWarp` on `epi` and `disk` both check out well
+(margined value covers the real max). `DeconvolutionPreprocess` on `epi`: predicted
+426 MB, real median 605 MB, real max 696 MB -- **too low even after the 1.2x margin**.
+`CellPoseSegmentSAM` on `disk` (`do_3D: true`, the deeper stack): predicted 4327 MB, real
+median 5347 MB, real max 9741 MB (p90 8368 MB) -- **too low, seriously**, margined value
+barely covers the median and falls far short of the tail. Concrete, data-backed grounds
+to tighten these two constants specifically before trusting the memory-estimate wiring,
+on top of the already-flagged zero-calibration risk on the time side (see the entry
+above/below on the estimated-cluster-resources feature itself). Not yet recalibrated --
+awaiting the user's direction.
+
+**Not done**: no fix for the interactive-session-job contamination; no recalibration of
+the constants found to be too low; merging/pushing `feature/estimated-cluster-resources`.
+Full detail in this project's own request-history log, dated 2026-08-31 13:43 and 14:04.
+
 ## get_estimated_memory()/get_estimated_time() implemented for movie-size-scaling tasks (2026-08-31)
 
 `AnalysisTask.providesMemoryEstimate`/`providesTimeEstimate` (new class attributes,

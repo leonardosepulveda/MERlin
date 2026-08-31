@@ -75,11 +75,36 @@ class SlurmReport(analysistask.AnalysisTask):
             JobID=outputDF['JobID'].str.partition('.')[0])
 
         def get_not_nan(listIn):
-            return listIn.dropna().iloc[0]
+            # a group can be entirely NaN for a given column (e.g. a
+            # requeued or otherwise irregularly-accounted job) --
+            # .dropna().iloc[0] on an empty result used to raise
+            # IndexError and abort the whole query; NaN is a legitimate
+            # "unknown" for that one job/column instead.
+            nonNan = listIn.dropna()
+            return nonNan.iloc[0] if len(nonNan) > 0 else np.nan
 
-        outputDF = outputDF.groupby('JobID').aggregate(get_not_nan)
+        def get_max_mb(listIn):
+            # a job's real peak MaxRSS is the max across its steps, not
+            # the first non-nan one: e.g. a 'python3.12' srun sub-step
+            # commonly uses far more memory than the outer 'batch' step,
+            # and sacct lists 'batch' first -- get_not_nan alone would
+            # silently report the batch step's much lower value as the
+            # job's usage (confirmed against a real BC555_sample_05
+            # CellPoseSegmentSAM job: batch=120.53M vs the actual
+            # python3.12 step's 3452.07M).
+            numeric = pandas.to_numeric(
+                listIn.dropna().str.rstrip('M'), errors='coerce').dropna()
+            if numeric.empty:
+                return np.nan
+            return '%gM' % numeric.max()
+
+        aggregators = {c: get_max_mb if c == 'MaxRSS' else get_not_nan
+                      for c in outputDF.columns if c != 'JobID'}
+        outputDF = outputDF.groupby('JobID').aggregate(aggregators)
 
         def reformat_timedelta(elapsedIn):
+            if pandas.isna(elapsedIn):
+                return np.nan
             splitElapsed = elapsedIn.split('-')
             if len(splitElapsed) > 1:
                 return splitElapsed[0] + ' days ' + splitElapsed[1]

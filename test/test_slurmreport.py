@@ -125,6 +125,34 @@ def test_generate_per_fov_slurm_usage_parses_sacct_output(
         or '1002,1001' in recordedArgs['args'][-1]
 
 
+def test_generate_per_fov_slurm_usage_takes_max_rss_across_job_steps(
+        monkeypatch, slurm_report_task, simple_data, upstream_task):
+    # real sacct output for a job that runs 'srun python ...' inside an
+    # sbatch script has (at least) a 'batch' step and a numbered srun
+    # sub-step -- the actual analysis code runs in the sub-step, which
+    # commonly uses far more memory than the outer 'batch' wrapper.
+    # Confirmed against a real BC555_sample_05 CellPoseSegmentSAM job:
+    # batch=120.53M, the real python step=3452.07M.
+    monkeypatch.setattr(
+        type(simple_data), 'get_analysis_environment',
+        lambda self, task, fragmentIndex=None: (
+            {'SLURM_JOB_ID': '1001'} if fragmentIndex == 0 else None))
+
+    fakeOutput = _fake_sacct_output([
+        _fake_sacct_row('1001', '', '00:05:00'),
+        _fake_sacct_row('1001.batch', '120.53M', '00:05:00'),
+        _fake_sacct_row('1001.0', '3452.07M', '00:04:50'),
+    ])
+
+    class FakeResult:
+        stdout = fakeOutput.encode('utf-8')
+
+    monkeypatch.setattr(subprocess, 'run', lambda *a, **k: FakeResult())
+
+    usage = slurm_report_task._generate_per_fov_slurm_usage(upstream_task)
+    assert usage.loc[0, 'mem_mb'] == pytest.approx(3452.07)
+
+
 def test_save_per_fov_resource_table_combines_tasks_and_skips_others(
         monkeypatch, slurm_report_task, simple_data, upstream_task):
     upstream_task.save()

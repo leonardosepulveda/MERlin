@@ -379,19 +379,17 @@ class SmfishSignal(analysistask.ParallelAnalysisTask):
         spots_subpixel = np.stack(spots_subpixel)
         return spots_subpixel
 
-    def _load_feature_database(self, fragmentIndex):
+    def _get_feature_database_zIndex(self, fragmentIndex, zIndex):
+        """Build a GeoDataFrame of this fov's segmented-cell boundaries at
+        a single z index, reading only that z-plane's geometry from the
+        feature database instead of the whole 3D cell set -- _run_analysis
+        processes one z at a time, so only one z-plane's boundaries are
+        ever needed in memory."""
         sTask = self.dataSet.load_analysis_task(self.parameters['segment_task'])
-        self.cells = sTask.get_feature_database().read_features(fragmentIndex)
-        self.cellids_all = [str(cell.get_feature_id()) for cell in self.cells]
-
-    def _get_feature_database_zIndex(self, zIndex):
-        polys = [cell.get_boundaries()[zIndex] for cell in self.cells]
-        # only take valid polygons
-        mask = [len(p) > 0 for p in polys]
-        cellids = [cid for cid, m in zip(self.cellids_all, mask) if m]
-        polys = [poly[0] for poly, m in zip(polys, mask) if m]
-        gdf_polys = gpd.GeoDataFrame(index = cellids, geometry = polys)
-        return gdf_polys
+        cellids, boundaries = sTask.get_feature_database()\
+            .read_feature_ids_and_boundaries_at_z(zIndex, fragmentIndex)
+        polys = [b[0] for b in boundaries]
+        return gpd.GeoDataFrame(index = cellids, geometry = polys)
 
     def _make_geodataframe_points(self, fragmentIndex, spots):
         # convert these spots to global coordinates
@@ -431,87 +429,104 @@ class SmfishSignal(analysistask.ParallelAnalysisTask):
 
     def _run_analysis(self, fragmentIndex):
 
-        # load the features if segmentation is provided
-        if self.parameters['segment_task'] is not None:
-            self._load_feature_database(fragmentIndex)
-
-        # place to store output dataframes
-        results = []
-
         zIndexes = self._resolve_z_indexes(fragmentIndex)
 
-        # analysis loop
-        for channel_name in self.parameters['channel_names']:
-            ch = self.dataSet.get_data_organization().get_data_channel_index(channel_name) # channel id
+        # z is the outer loop (not channel), and each z plane's results are
+        # written to disk as soon as that z is done, so at most one z
+        # plane's worth of detected spots and one z plane's worth of
+        # segmentation boundaries are ever held in memory at once --
+        # previously every z plane for every channel was accumulated in a
+        # single list before one final write, which for a dense fov could
+        # reach several GB before anything was ever written to disk.
+        with self.dataSet.open_parquet_chunk_writer(
+                'smfish_signal', self.get_analysis_name(), fragmentIndex,
+                'signals') as writer:
             for zIndex in zIndexes:
 
-                # get the aligned image
-                img = self.warpTask.get_aligned_image(fragmentIndex, ch, zIndex)
+                # place to store results for this z plane
+                resultsZ = []
 
-                # bigfish analysis step by step
-                # LoG filter
-                img_log = bigfish.stack.log_filter(img, sigma = self.spot_radius_px)
-                # local maximum detection
-                img_mask = bigfish.detection.local_maximum_detection(img_log, 
-                                                                     min_distance = self.spot_radius_px)
-                
-                # determine threshold automatically or use provided one
-                for threshold in self.parameters['spot_threshold']:
-                    if threshold is None:
-                        # determine an automatic thresholding
-                        threshold = bigfish.detection.automated_threshold_setting(img_log, img_mask)
-                        spots, _ = bigfish.detection.spots_thresholding(img_log, img_mask, threshold)
-                    else:
-                        spots, _ = bigfish.detection.spots_thresholding(img_log, img_mask, threshold)
+                # segmentation boundaries for this z only, read once and
+                # reused across every channel at this z
+                if self.parameters['segment_task'] is not None:
+                    gdf_polys = self._get_feature_database_zIndex(
+                        fragmentIndex, zIndex)
 
-                    # just in case we find no spots...
-                    if len(spots) == 0:
-                        print(f'No spots found in FOV {fragmentIndex}, channel {channel_name}, z {zIndex} at threshold {threshold}')
-                        continue
+                # analysis loop
+                for channel_name in self.parameters['channel_names']:
+                    ch = self.dataSet.get_data_organization().get_data_channel_index(channel_name) # channel id
 
-                    # convert these spots to geodataframe
-                    gdf_pts = self._make_geodataframe_points(fragmentIndex, spots)
-                    gdf_pts['zIndex'] = zIndex
-                    gdf_pts['channel'] = channel_name
-                    gdf_pts['threshold'] = threshold
+                    # get the aligned image
+                    img = self.warpTask.get_aligned_image(fragmentIndex, ch, zIndex)
 
-                    # do subpixel fitting if requested
-                    if self.parameters['subpixel_fitting']:
-                        spots_fitted = self.fit_subpixel(
-                            image=img,
-                            spots=spots,
-                            voxel_size=self.voxel_size_nm,
-                            spot_radius=self.spot_radius_nm)
-                        # add fitting parameters to dataframe
-                        gdf_pts['subpixel_y'] = spots_fitted[:,0]
-                        gdf_pts['subpixel_x'] = spots_fitted[:,1]
-                        gdf_pts['sigma_yx'] = spots_fitted[:,2]
-                        gdf_pts['amplitude'] = spots_fitted[:,3]
-                        gdf_pts['background'] = spots_fitted[:,4]
-                        gdf_pts['fit_successful'] = spots_fitted[:,5]
+                    # bigfish analysis step by step
+                    # LoG filter
+                    img_log = bigfish.stack.log_filter(img, sigma = self.spot_radius_px)
+                    # local maximum detection
+                    img_mask = bigfish.detection.local_maximum_detection(img_log,
+                                                                         min_distance = self.spot_radius_px)
 
-                    if self.parameters['segment_task'] is None:
-                        result = gdf_pts
-                        result['index_right'] = -1  # no cell id
-                    else: # do sjoin with segmentation
-                        # get the polygons from a specific z index
-                        gdf_polys = self._get_feature_database_zIndex(zIndex)
-                        # points are assigned a cell id if they are within
-                        result = gpd.sjoin(gdf_pts, gdf_polys, predicate='within', how='left')
-                        result['index_right'] = result['index_right'].fillna(-1) #
+                    # determine threshold automatically or use provided one
+                    for threshold in self.parameters['spot_threshold']:
+                        if threshold is None:
+                            # determine an automatic thresholding
+                            threshold = bigfish.detection.automated_threshold_setting(img_log, img_mask)
+                            spots, _ = bigfish.detection.spots_thresholding(img_log, img_mask, threshold)
+                        else:
+                            spots, _ = bigfish.detection.spots_thresholding(img_log, img_mask, threshold)
 
-                    results.append(result)
+                        # just in case we find no spots...
+                        if len(spots) == 0:
+                            print(f'No spots found in FOV {fragmentIndex}, channel {channel_name}, z {zIndex} at threshold {threshold}')
+                            continue
 
-        # final dataframe
-        df = pandas.concat(results, axis = 0, ignore_index = True)
-        df.drop(columns = ['geometry'], inplace = True)
+                        # convert these spots to geodataframe
+                        gdf_pts = self._make_geodataframe_points(fragmentIndex, spots)
+                        gdf_pts['zIndex'] = zIndex
+                        gdf_pts['channel'] = channel_name
+                        gdf_pts['threshold'] = threshold
 
-        # seems like parquet has some issues saving index as int
-        df['index_right'] = df['index_right'].astype(str)
+                        # do subpixel fitting if requested
+                        if self.parameters['subpixel_fitting']:
+                            spots_fitted = self.fit_subpixel(
+                                image=img,
+                                spots=spots,
+                                voxel_size=self.voxel_size_nm,
+                                spot_radius=self.spot_radius_nm)
+                            # add fitting parameters to dataframe
+                            gdf_pts['subpixel_y'] = spots_fitted[:,0]
+                            gdf_pts['subpixel_x'] = spots_fitted[:,1]
+                            gdf_pts['sigma_yx'] = spots_fitted[:,2]
+                            gdf_pts['amplitude'] = spots_fitted[:,3]
+                            gdf_pts['background'] = spots_fitted[:,4]
+                            gdf_pts['fit_successful'] = spots_fitted[:,5]
 
-        self.dataSet.save_dataframe_to_parquet(
-                df, 'smfish_signal', self.get_analysis_name(),
-                fragmentIndex, 'signals')
+                        if self.parameters['segment_task'] is None:
+                            result = gdf_pts
+                            result['index_right'] = -1  # no cell id
+                        else: # do sjoin with segmentation
+                            # points are assigned a cell id if they are within
+                            result = gpd.sjoin(gdf_pts, gdf_polys, predicate='within', how='left')
+                            result['index_right'] = result['index_right'].fillna(-1) #
+
+                        resultsZ.append(result)
+
+                if not resultsZ:
+                    # no spots at all in this z plane, at any channel or
+                    # threshold -- normal (e.g. a z near the tissue edge),
+                    # unlike no spots anywhere in the whole fov (below)
+                    continue
+
+                dfZ = pandas.concat(resultsZ, axis = 0, ignore_index = True)
+                dfZ.drop(columns = ['geometry'], inplace = True)
+                # seems like parquet has some issues saving index as int
+                dfZ['index_right'] = dfZ['index_right'].astype(str)
+                writer.write(dfZ)
+
+        if not writer.wrote_any:
+            raise ValueError(
+                'No spots detected in any z plane/channel/threshold for '
+                'fov %i' % fragmentIndex)
 
 class SmfishColocalizationSignal(SmfishSignal):
 
@@ -565,18 +580,31 @@ class SmfishColocalizationSignal(SmfishSignal):
 
     def _run_analysis(self, fragmentIndex):
 
-        if self.parameters['segment_task'] is not None:
-            self._load_feature_database(fragmentIndex)
-
-        # place to store output dataframes
-        results = []
-
         # analysis loops
-        # we are going to loop over z indexes first
+        # we are going to loop over z indexes first, writing each z plane's
+        # results to disk as soon as it's done instead of accumulating
+        # every z plane's spots in memory before one final write.
+        with self.dataSet.open_parquet_chunk_writer(
+                'smfish_signal', self.get_analysis_name(), fragmentIndex,
+                'signals') as writer:
+            self._run_analysis_streaming(fragmentIndex, writer)
+
+        if not writer.wrote_any:
+            raise ValueError(
+                'No spots detected in any z plane/channel pair for fov '
+                '%i' % fragmentIndex)
+
+    def _run_analysis_streaming(self, fragmentIndex, writer):
         for zIndex in self._resolve_z_indexes(fragmentIndex):
 
             # place to store results for this z plane
             results_z = []
+
+            # segmentation boundaries for this z only, read once and
+            # reused across every channel pair at this z
+            if self.parameters['segment_task'] is not None:
+                gdf_polys = self._get_feature_database_zIndex(
+                    fragmentIndex, zIndex)
 
             # then loop over channel pairs
             for c1_name, c2_name, c1_thresh, c2_thresh in zip(self.parameters['channel_1_names'],
@@ -668,7 +696,6 @@ class SmfishColocalizationSignal(SmfishSignal):
                         result = gdf_pts
                         result['index_right'] = -1  # no cell id
                     else: # do sjoin with segmentation
-                        gdf_polys = self._get_feature_database_zIndex(zIndex)
                         # points are assigned a cell id if they are within
                         result = gpd.sjoin(gdf_pts, gdf_polys, predicate='within', how='left')
                         result['index_right'] = result['index_right'].fillna(-1)
@@ -739,19 +766,12 @@ class SmfishColocalizationSignal(SmfishSignal):
                     results_z.loc[df_c2.index[c2_indices], 'anti_colocalization_distance'] = distances
                 # end of anti-colocalization loop
 
-            # finally add the results for this z plane to the overall results
-            results.append(results_z)
-
-        # final dataframe of raw spots
-        df = pandas.concat(results, axis = 0, ignore_index = True)
-        df.drop(columns = ['geometry'], inplace = True)
-
-        # seems like parquet has some issues saving index as int
-        df['index_right'] = df['index_right'].astype(str)
-
-        self.dataSet.save_dataframe_to_parquet(
-                df, 'smfish_signal', self.get_analysis_name(),
-                fragmentIndex, 'signals')
+            # write this z plane's results to disk now instead of holding
+            # every z plane's results in memory until the fov is done
+            results_z.drop(columns = ['geometry'], inplace = True)
+            # seems like parquet has some issues saving index as int
+            results_z['index_right'] = results_z['index_right'].astype(str)
+            writer.write(results_z)
 
 class ExportSumSignals(analysistask.AnalysisTask):
     def __init__(self, dataSet, parameters=None, analysisName=None):

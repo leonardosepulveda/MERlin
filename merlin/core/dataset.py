@@ -2,6 +2,8 @@ import os
 import json
 import shutil
 import pandas
+import pyarrow as pa
+import pyarrow.parquet as pq
 import numpy as np
 import scipy as sp
 import tifffile
@@ -34,6 +36,53 @@ TaskOrName = Union[analysistask.AnalysisTask, str]
 
 class DataFormatException(Exception):
     pass
+
+
+class ParquetChunkWriter(object):
+    """Writes a single parquet output across multiple chunks (row groups)
+    instead of requiring the full result in memory at once before one
+    dataframe.to_parquet() call.
+
+    Meant for an analysis task whose per-fragment result can be assembled
+    incrementally (e.g. one z-plane at a time) but would otherwise need to
+    hold the whole, uncombined result in memory before writing it. Obtain
+    an instance via DataSet.open_parquet_chunk_writer() rather than
+    constructing directly.
+
+    All chunks passed to write() must share the same columns/dtypes as
+    the first non-empty chunk written -- that chunk fixes the parquet
+    file's schema.
+    """
+
+    def __init__(self, savePath: str):
+        self._savePath = savePath
+        self._writer = None
+
+    def write(self, dataframe: pandas.DataFrame) -> None:
+        """Write one chunk of the result as a new row group. A chunk with
+        no rows is skipped (writing a zero-row table would still fix the
+        schema from an otherwise-arbitrary empty chunk)."""
+        if dataframe.empty:
+            return
+        table = pa.Table.from_pandas(dataframe, preserve_index=False)
+        if self._writer is None:
+            self._writer = pq.ParquetWriter(self._savePath, table.schema)
+        self._writer.write_table(table)
+
+    @property
+    def wrote_any(self) -> bool:
+        """Whether at least one non-empty chunk has been written."""
+        return self._writer is not None
+
+    def close(self) -> None:
+        if self._writer is not None:
+            self._writer.close()
+
+    def __enter__(self) -> 'ParquetChunkWriter':
+        return self
+
+    def __exit__(self, excType, excValue, traceback) -> None:
+        self.close()
 
 
 class DataSet(object):
@@ -481,9 +530,27 @@ class DataSet(object):
                 FileNotFoundError: if the file does not exist
             """
             savePath = self._analysis_result_save_path(
-                    resultName, analysisTask, resultIndex, subdirectory, '.parquet') \
-            
-            #return pandas.read_parquet(savePath, **kwargs) # do we need kwargs               
+                    resultName, analysisTask, resultIndex, subdirectory, '.parquet')
+
+            return pandas.read_parquet(savePath)
+
+    def open_parquet_chunk_writer(
+                self, resultName: str, analysisTask: TaskOrName = None,
+                resultIndex: int = None, subdirectory: str = None
+                ) -> 'ParquetChunkWriter':
+            """Open a ParquetChunkWriter that streams a per-fragment result
+            to the same destination save_dataframe_to_parquet() would use,
+            for a task whose full result should not be held in memory all
+            at once before writing (e.g. SmfishSignal, which used to
+            accumulate every detected spot in a fov before one write).
+
+            Args: same as save_dataframe_to_parquet, minus the dataframe
+                itself -- pass each chunk to the returned writer's write()
+                method as it becomes available instead.
+            """
+            savePath = self._analysis_result_save_path(
+                    resultName, analysisTask, resultIndex, subdirectory, '.parquet')
+            return ParquetChunkWriter(savePath)
             return pandas.read_parquet(savePath)
 
     def open_pandas_hdfstore(self, mode: str, resultName: str,

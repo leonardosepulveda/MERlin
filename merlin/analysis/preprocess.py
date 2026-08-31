@@ -242,18 +242,23 @@ class DeconvolutionPreprocess(Preprocess):
             self.dataSet, frameCount=1, kTask=56, baselineMb=230)
 
     def get_estimated_time(self):
-        # Uncalibrated. One deconvolve_lucyrichardson() call per (bit, z)
-        # frame, each iterating decon_iterations times -- the dominant,
-        # genuinely parameter-driven cost, so it's folded into
-        # secondsPerFrame rather than left as a flat per-frame guess.
+        # baselineMinutes=4 and the flat 0.094 sec/(bit,z)-frame term are
+        # calibrated against BC555_sample_05 epi/disk's real max time
+        # (see FINDINGS.md) -- both real runs use decon_iterations=0, so
+        # what's actually being measured there is everything BUT
+        # deconvolution itself (TIF write, highpass filter, pixel-
+        # histogram binning). The decon_iterations term is NOT
+        # calibrated -- no real data exists at decon_iterations > 0 --
+        # and stays an uncalibrated additive guess on top of the now-real
+        # base cost.
         bitCount = self.get_codebook().get_bit_count()
         zCount = len(self.dataSet.get_z_positions())
         secondsPerIteration = 0.2  # uncalibrated guess
+        secondsPerFrame = 0.094 + (
+            self.parameters['decon_iterations'] * secondsPerIteration)
         return resourceestimate.estimate_stack_time_minutes(
-            frameCount=bitCount * zCount,
-            secondsPerFrame=(
-                self.parameters['decon_iterations'] * secondsPerIteration),
-            baselineMinutes=2)
+            frameCount=bitCount * zCount, secondsPerFrame=secondsPerFrame,
+            baselineMinutes=4)
 
     def get_dependencies(self):
         return [self.parameters['warp_task']]

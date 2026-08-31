@@ -35,6 +35,27 @@ class SlurmReport(analysistask.AnalysisTask):
     def get_dependencies(self):
         return [self.parameters['run_after_task']]
 
+    _SACCT_FORMAT = (
+        'AssocID,Account,Cluster,User,JobID,JobName,'
+        'NodeList,AveCPU,AveCPUFreq,MaxPages,MaxDiskRead,MaxDiskWrite,'
+        'MaxRSS,ReqMem,CPUTime,Elapsed,Submit,Start,End,Timelimit')
+
+    def _query_sacct(self, jobIds) -> pandas.DataFrame:
+        """Run sacct for the given SLURM job IDs and return the cleaned,
+        per-JobID dataframe (see _clean_slurm_dataframe). Shared by
+        _generate_slurm_report and _generate_per_fov_slurm_usage so both
+        query/parse sacct output the same way.
+        """
+        queryResult = subprocess.run(
+            ['sacct', '--format=' + self._SACCT_FORMAT,
+             '--units=M', '-P', '-j', ','.join(jobIds)],
+            stdout=subprocess.PIPE)
+
+        slurmJobDF = pandas.read_csv(
+            io.StringIO(queryResult.stdout.decode('utf-8')), sep='|')
+
+        return self._clean_slurm_dataframe(slurmJobDF)
+
     def _generate_slurm_report(self, task: analysistask.AnalysisTask):
         if isinstance(task, analysistask.ParallelAnalysisTask):
             idList = [
@@ -44,16 +65,7 @@ class SlurmReport(analysistask.AnalysisTask):
             idList = [
                 self.dataSet.get_analysis_environment(task)['SLURM_JOB_ID']]
 
-        queryResult = subprocess.run(
-            ['sacct', '--format=AssocID,Account,Cluster,User,JobID,JobName,'
-             + 'NodeList,AveCPU,AveCPUFreq,MaxPages,MaxDiskRead,MaxDiskWrite,'
-             + 'MaxRSS,ReqMem,CPUTime,Elapsed,Submit,Start,End,Timelimit',
-             '--units=M', '-P', '-j', ','.join(idList)], stdout=subprocess.PIPE)
-
-        slurmJobDF = pandas.read_csv(
-            io.StringIO(queryResult.stdout.decode('utf-8')), sep='|')
-
-        return self._clean_slurm_dataframe(slurmJobDF)
+        return self._query_sacct(idList)
 
     @staticmethod
     def _clean_slurm_dataframe(inputDataFrame):
@@ -63,11 +75,36 @@ class SlurmReport(analysistask.AnalysisTask):
             JobID=outputDF['JobID'].str.partition('.')[0])
 
         def get_not_nan(listIn):
-            return listIn.dropna().iloc[0]
+            # a group can be entirely NaN for a given column (e.g. a
+            # requeued or otherwise irregularly-accounted job) --
+            # .dropna().iloc[0] on an empty result used to raise
+            # IndexError and abort the whole query; NaN is a legitimate
+            # "unknown" for that one job/column instead.
+            nonNan = listIn.dropna()
+            return nonNan.iloc[0] if len(nonNan) > 0 else np.nan
 
-        outputDF = outputDF.groupby('JobID').aggregate(get_not_nan)
+        def get_max_mb(listIn):
+            # a job's real peak MaxRSS is the max across its steps, not
+            # the first non-nan one: e.g. a 'python3.12' srun sub-step
+            # commonly uses far more memory than the outer 'batch' step,
+            # and sacct lists 'batch' first -- get_not_nan alone would
+            # silently report the batch step's much lower value as the
+            # job's usage (confirmed against a real BC555_sample_05
+            # CellPoseSegmentSAM job: batch=120.53M vs the actual
+            # python3.12 step's 3452.07M).
+            numeric = pandas.to_numeric(
+                listIn.dropna().str.rstrip('M'), errors='coerce').dropna()
+            if numeric.empty:
+                return np.nan
+            return '%gM' % numeric.max()
+
+        aggregators = {c: get_max_mb if c == 'MaxRSS' else get_not_nan
+                      for c in outputDF.columns if c != 'JobID'}
+        outputDF = outputDF.groupby('JobID').aggregate(aggregators)
 
         def reformat_timedelta(elapsedIn):
+            if pandas.isna(elapsedIn):
+                return np.nan
             splitElapsed = elapsedIn.split('-')
             if len(splitElapsed) > 1:
                 return splitElapsed[0] + ' days ' + splitElapsed[1]
@@ -188,8 +225,93 @@ class SlurmReport(analysistask.AnalysisTask):
         plt.tight_layout(pad=1)
         self.dataSet.save_figure(self, fig, 'time_summary')
 
+    def _fragment_slurm_job_ids(self, task: analysistask.ParallelAnalysisTask):
+        """Map each fragment (fov) of a ParallelAnalysisTask to its SLURM
+        job ID, skipping any fragment with no recorded environment (still
+        pending, or never run) instead of raising -- unlike
+        _generate_slurm_report, which assumes every fragment finished and
+        errors out entirely otherwise (real, partially-complete
+        experiments routinely have a handful of such fragments).
+        """
+        fragmentJobIds = {}
+        for i in range(task.fragment_count()):
+            env = self.dataSet.get_analysis_environment(task, i)
+            if env is not None and 'SLURM_JOB_ID' in env:
+                fragmentJobIds[i] = env['SLURM_JOB_ID']
+        return fragmentJobIds
+
+    def _generate_per_fov_slurm_usage(
+            self, task: analysistask.ParallelAnalysisTask) -> pandas.DataFrame:
+        """Per-fragment (fov) memory/time usage for one
+        ParallelAnalysisTask, as a small dataframe indexed by fov with
+        numeric 'mem_mb'/'time_min' columns.
+
+        Unlike _generate_slurm_report's per-task report (grouped by
+        JobID, string-formatted, no fov column, and only for fully
+        complete tasks), this keeps each row tagged with the fov it came
+        from and tolerates incomplete fragments -- meant to be combined
+        across tasks into one per-experiment table (see
+        _save_per_fov_resource_table) for comparing real usage against
+        AnalysisTask.get_estimated_memory()/get_estimated_time().
+        """
+        fragmentJobIds = self._fragment_slurm_job_ids(task)
+        if not fragmentJobIds:
+            return pandas.DataFrame(columns=['mem_mb', 'time_min'])
+
+        jobIdToFragment = {v: k for k, v in fragmentJobIds.items()}
+        slurmDF = self._query_sacct(list(fragmentJobIds.values()))
+
+        fov = slurmDF.index.to_series().map(jobIdToFragment)
+        memMb = pandas.to_numeric(
+            slurmDF['MaxRSS'].astype(str).str.extract(r'([\d.]+)')[0],
+            errors='coerce')
+        timeMin = slurmDF['Elapsed'] / np.timedelta64(1, 'm')
+
+        result = pandas.DataFrame(
+            {'fov': fov, 'mem_mb': memMb, 'time_min': timeMin})
+        return result.dropna(subset=['fov']).set_index('fov').sort_index()
+
+    def _save_per_fov_resource_table(self, taskList) -> None:
+        """Write one parquet table -- rows are fov, and each
+        ParallelAnalysisTask in taskList that has any completed fragment
+        contributes two columns, '<task>_mem_mb'/'<task>_time_min' -- so
+        real, per-fov SLURM memory/time usage across every task in the
+        run can be compared directly against
+        AnalysisTask.get_estimated_memory()/get_estimated_time() (or a
+        candidate replacement formula) for a fov of known frame/z-stack
+        size, instead of guessing at calibration constants.
+
+        A task with no completed fragments (or that isn't a
+        ParallelAnalysisTask -- e.g. GenerateAdaptiveThreshold,
+        ExportBarcodes, which run once for the whole dataset rather than
+        once per fov) simply contributes no columns rather than blocking
+        the rest of the table.
+        """
+        columns = {}
+        for t in taskList:
+            currentTask = self.dataSet.load_analysis_task(t)
+            if not isinstance(currentTask, analysistask.ParallelAnalysisTask):
+                continue
+            try:
+                usage = self._generate_per_fov_slurm_usage(currentTask)
+            except Exception:
+                continue
+            if usage.empty:
+                continue
+            columns[t + '_mem_mb'] = usage['mem_mb']
+            columns[t + '_time_min'] = usage['time_min']
+
+        if not columns:
+            return
+        wideDF = pandas.DataFrame(columns)
+        wideDF.index.name = 'fov'
+        self.dataSet.save_dataframe_to_parquet(
+            wideDF, 'per_fov_resource_usage', self, subdirectory='reports')
+
     def _run_analysis(self):
         taskList = self.dataSet.get_analysis_tasks()
+
+        self._save_per_fov_resource_table(taskList)
 
         reportTime = int(time.time())
         reportDict = {}

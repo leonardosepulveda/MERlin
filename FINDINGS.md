@@ -3,6 +3,137 @@
 Curated current-state summary. See `prompt_history/` for full provenance of each item
 below; this file only tracks what's true *now* and the open next step.
 
+## DeconvolutionPreprocess/CellPoseSegmentSAM memory recalibrated from real data (2026-08-31)
+
+Follow-up on the entry below (real per-fov calibration comparison): recalibrated both
+constants that were found too low, fitting to each run's real **max** observed fov (not
+median) -- a generated Snakefile rule applies one static `mem_mb` to every fragment of a
+task, so fitting to the median would leave denser-than-typical fovs under-provisioned,
+exactly the failure this recalibration fixes.
+
+- `DeconvolutionPreprocess`: one clean real data point (`epi`, 476 fovs, real max
+  695.91 MB). `baselineMb` fixed at 230 (the same measured "import merlin alone" baseline
+  used for `FiducialCorrelationWarp` -- one data point can't independently solve two free
+  parameters). Solved `kTask = 56` (was an unvalidated guess of 15). New raw estimate for
+  `epi`: 700 MB (margined 840 MB) -- covers the real max, still well under the static
+  JSON's 3000 MB.
+- `CellPoseSegmentSAM`: two clean real data points at different z-depths (`epi`: 25 z,
+  real max 3678.80 MB; `disk`: 100 z, `do_3D: true`, real max 9741.16 MB, only 71/603
+  fovs completed so far -- provisional) -- enough to solve `baselineMb`/`kTask` jointly:
+  `baselineMb = 2190`, `kTask = 114` (was an unvalidated guess of 3000/20). New raw
+  estimates exactly reproduce both real maxes; margined, `epi` = 4421 MB, `disk` =
+  11705 MB -- both far below the static JSON's blanket 32000 MB for this task, while now
+  safely covering the worst fov actually observed (unlike the un-calibrated version,
+  which fell short of even the *median*).
+
+Overshoot vs. the typical (median) fov -- the real cost of fitting to the max: `epi`
+`CellPoseSegmentSAM` 1.06x (tight), `disk` `CellPoseSegmentSAM` 1.82x (`disk`'s fovs vary
+more in cell density). Verified via the actual `get_estimated_memory()` call against the
+real dataset, not a hand recomputation.
+
+**Not done**: `CAREPreprocess`/`Decode` remain uncalibrated (no real data exists for
+either yet); `disk`'s `CellPoseSegmentSAM` fit is provisional (71/603 fovs); the
+2-channel (`channel_2_name` set) case is unverified (both real runs use 1 channel); the
+time-estimate wiring is still not recommended for merging (separate, still fully
+uncalibrated). Full detail in this project's own request-history log, dated 2026-08-31
+14:32.
+
+## SlurmReport per-fov table: validated against real BC555_sample_05, formula gaps found (2026-08-31)
+
+## SlurmReport per-fov table: validated against real BC555_sample_05, formula gaps found (2026-08-31)
+
+Added `SlurmReport._save_per_fov_resource_table()` (parquet, one row per fov, two
+columns per `ParallelAnalysisTask`) and ran it for real against `BC555_sample_05`
+`epi`/`disk`. Found and fixed two real, pre-existing bugs in `_clean_slurm_dataframe`
+along the way (both also affected the existing per-task CSV/plots, not just the new
+table): `MaxRSS` aggregation took the first sacct job-step value instead of the max
+across steps (a `python3.12` srun sub-step commonly uses far more memory than the outer
+`batch` step sacct lists first -- confirmed 120.53M vs the real 3452.07M on one job); and
+an all-NaN column for any single job raised `IndexError`, aborting the whole query
+(silent at small scale, real once querying an experiment's full ~600-job count).
+
+**A third issue, flagged not fixed**: a chunk of `disk`'s `FiducialCorrelationWarp`/
+`DeconvolutionPreprocess` rows are contaminated by fragments that were run inside a
+long-lived interactive SLURM session (confirmed: `sacct` shows `JobName=vscode.job` for
+one, with the environment file's own `SLURM_JOB_START_TIME` matching sacct's `Start`
+exactly -- not a stale job id, that fragment genuinely ran inside a VS Code tunnel job)
+rather than merlin's own dedicated per-fragment submission -- `sacct` then reports that
+whole session's near-idle usage instead. Median-level contamination on those two columns
+for `disk`; only the upper tail is trustworthy. `epi` and both runs' `CellPoseSegmentSAM`
+show no such contamination.
+
+**Calibration comparison against the real, clean data** (raw `get_estimated_memory()`,
+no margin applied): `FiducialCorrelationWarp` on `epi` and `disk` both check out well
+(margined value covers the real max). `DeconvolutionPreprocess` on `epi`: predicted
+426 MB, real median 605 MB, real max 696 MB -- **too low even after the 1.2x margin**.
+`CellPoseSegmentSAM` on `disk` (`do_3D: true`, the deeper stack): predicted 4327 MB, real
+median 5347 MB, real max 9741 MB (p90 8368 MB) -- **too low, seriously**, margined value
+barely covers the median and falls far short of the tail. Concrete, data-backed grounds
+to tighten these two constants specifically before trusting the memory-estimate wiring,
+on top of the already-flagged zero-calibration risk on the time side (see the entry
+above/below on the estimated-cluster-resources feature itself). Not yet recalibrated --
+awaiting the user's direction.
+
+**Not done**: no fix for the interactive-session-job contamination; no recalibration of
+the constants found to be too low; merging/pushing `feature/estimated-cluster-resources`.
+Full detail in this project's own request-history log, dated 2026-08-31 13:43 and 14:04.
+
+## get_estimated_memory()/get_estimated_time() implemented for movie-size-scaling tasks (2026-08-31)
+
+`AnalysisTask.providesMemoryEstimate`/`providesTimeEstimate` (new class attributes,
+default `False`) are the opt-in contract: `SnakefileGenerator` (`snakewriter.py`) only
+trusts `get_estimated_memory()`/`get_estimated_time()`'s return value for a task whose
+concrete class sets the matching flag `True` -- every other task's existing hardcoded,
+never-used constant is left exactly as harmless dead code, untouched. When trusted, the
+generated Snakefile rule's `mem_mb`/`runtime` is the estimate times
+`snakewriter.RESOURCE_ESTIMATE_MARGIN` (`1.2`) UNLESS that specific rule has its own
+explicit entry in `cluster_resource_allocation_*.json` (an entry only inherited from
+`__default__` does not count as an override) -- that stays a manual escape hatch. Applies
+only to a task's own rule, never its 'Done' rule.
+
+Opted in (real formulas, in new `merlin/util/resourceestimate.py`, shared math): `Warp`'s
+`FiducialCorrelationWarp` (memory + time; memory's `kTask` is the only constant in this
+whole feature calibrated against a real measurement, backed out from the 855 MB
+`FiducialCorrelationWarp` peak documented below), `Decode` (memory + time, conditional on
+`decode_3d`), `DeconvolutionPreprocess`/`CAREPreprocess` (+ `DeconvolutionPreprocessGuo`,
+inherits both unchanged), `CellPoseSegmentSAM` (memory only -- its time is dominated by
+per-cell post-processing, i.e. cell count, not frame geometry, per the entry below).
+Every other constant is a documented, uncalibrated first-pass guess.
+
+**Correction to last night's "confirmed movie-size-scaling" list**, found while actually
+reading each task's code before implementing rather than trusting the earlier
+investigation: `DeconvolutionPreprocess`/`CAREPreprocess`/`FiducialCorrelationWarp` do
+NOT hold a whole z-stack in memory at any point -- each processes and writes one frame at
+a time, so their memory is frame-size-driven only, not z/channel-count-driven.
+`GenerateAdaptiveThreshold` isn't image/movie-driven at all (reads small column slices
+from the decoded barcode database into small fixed-size histogram bins) and was dropped
+from scope entirely. Only `CellPoseSegmentSAM` and `Decode` (and only when
+`decode_3d: true`) actually hold a full z-stack in memory at once.
+
+**Not done**: none of the `kTask`/`secondsPerFrame` constants besides
+`FiducialCorrelationWarp`'s memory one are calibrated against a real job; merging/pushing
+this branch (`feature/estimated-cluster-resources`, off `master`). Full detail in this
+project's own request-history log, dated 2026-08-31 13:22.
+
+**Follow-up, run against the real experiment (2026-08-31)**: loaded the actual, already-run
+`FiducialCorrelationWarp`/`DeconvolutionPreprocess`/`Decode`/`CellPoseSegmentSAM` task
+instances for both `BC555_sample_05` sub-runs (`epi`: 2048x2048, 25 z; `disk`: 2304x2304,
+100 z -- the deep stack is `disk` specifically, correcting an ambiguity in this file's
+earlier wording) and called the real `SnakemakeRule._cluster_resources_for_rule()` with
+`useComputedEstimate` both ways. **Memory** is unchanged from today for all 4 (each
+already has its own explicit JSON `mem` entry, which the override policy keeps
+authoritative -- the estimates are informative-only unless that entry is removed).
+**Time is live today and risky**: none of the three non-CellPose tasks has its own JSON
+`time` entry (only `__default__`'s blanket `3:00:00` applies), so the computed time
+estimate *would* immediately replace it if this branch were merged -- 180 min -> ~2-6 min
+for each, a 30-40x cut, backed by zero real timing measurements (every `secondsPerFrame`
+constant is a pure guess, unlike the one calibrated memory constant). **Recommendation
+given to the user: do not merge this branch's time-estimate wiring without first
+calibrating `secondsPerFrame` against at least one real timed job per task** -- if any
+task's real per-fragment runtime exceeds a few minutes (including SLURM queue/cold-start
+overhead), this would reproduce the exact TIMEOUT problem this feature exists to fix, at
+scale. Not yet decided/actioned by the user.
+
 ## SmfishSignal/SmfishColocalizationSignal: bounded-memory streaming write (2026-08-31)
 
 Follow-up on `docs/bc555-oom-findings-and-merci-handoff`'s cluster-mem-sizing

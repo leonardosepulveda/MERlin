@@ -12,6 +12,7 @@ import cv2
 
 from merlin.core import analysistask
 from merlin.util import aberration
+from merlin.util import resourceestimate
 
 
 class Warp(analysistask.ParallelAnalysisTask):
@@ -235,11 +236,38 @@ class FiducialCorrelationWarp(Warp):
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
 
+    #: Only one fiducial image is ever held per channel (the offset loop
+    #: keeps just the shared fixedImage plus whichever channel's filtered
+    #: image is currently being correlated against it -- see
+    #: _run_analysis), in both the write_aligned_images branches -- see
+    #: Warp._process_transformations, which also writes one frame at a
+    #: time. So peak memory doesn't scale with channel or z count, only
+    #: with a single frame's size (dominated by skimage's FFT-based
+    #: phase_cross_correlation buffers, not the uint16 input frames
+    #: themselves).
+    providesMemoryEstimate = True
+    providesTimeEstimate = True
+
     def get_estimated_memory(self):
-        return 2048
+        # kTask backed out from one real measurement (855 MB peak RSS for
+        # a real BC555_sample_05 disk fov, 2304x2304 frames, write_
+        # aligned_images: false, against a 227 MB "import merlin" alone
+        # baseline -- see FINDINGS.md) rather than derived theoretically.
+        # Not re-measured with write_aligned_images: true, but that
+        # branch also only ever holds one frame at a time (see the
+        # comment above this class's providesMemoryEstimate/
+        # providesTimeEstimate), so the same estimate is used for both.
+        return resourceestimate.estimate_stack_memory_mb(
+            self.dataSet, frameCount=1, kTask=59, baselineMb=230)
 
     def get_estimated_time(self):
-        return 5
+        # Uncalibrated -- no FiducialCorrelationWarp job's wall-clock time
+        # has been measured. One phase_cross_correlation call per data
+        # channel, run serially.
+        channelCount = len(
+            self.dataSet.get_data_organization().get_data_channels())
+        return resourceestimate.estimate_stack_time_minutes(
+            frameCount=channelCount, secondsPerFrame=3, baselineMinutes=2)
 
     def get_dependencies(self):
         return []
@@ -321,12 +349,19 @@ class FiducialCorrelationWarp3D(FiducialCorrelationWarp):
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
 
+    # This 3D variant does real piezo/bead-stack registration work the 2D
+    # parent doesn't (see the class docstring) -- its cost shape hasn't
+    # been examined, so it keeps its own placeholder constants instead of
+    # inheriting the 2D parent's real, frame-only estimate.
+    providesMemoryEstimate = False
+    providesTimeEstimate = False
+
     def get_estimated_memory(self):
         return 4096
 
     def get_estimated_time(self):
         return 5
-        
+
     def load_piezo_parameters(self, path):
         
         if os.path.exists(path):

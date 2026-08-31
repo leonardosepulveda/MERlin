@@ -7,6 +7,7 @@ from snakemake.settings.types import ExecutionSettings, OutputSettings, \
     ResourceSettings
 
 from merlin.util import snakewriter
+from merlin.analysis import testtask
 
 
 def _run_snakefile_locally(snakefilePath):
@@ -143,6 +144,66 @@ def test_snakemake_rule_resources_block(simple_merfish_task):
     # while __default__'s account/time/partition still apply
     assert "resources: mem_mb=5000, slurm_partition='zhuang', " \
         "slurm_account='zhuang_lab', runtime=180" in ruleString
+
+
+def test_snakemake_rule_resources_uses_computed_estimate_with_margin(
+        simple_merfish_data):
+    task = testtask.SimpleAnalysisTaskWithResourceEstimate(
+        simple_merfish_data,
+        parameters={'estimated_memory': 1000, 'estimated_time': 10})
+    snakeRule = snakewriter.SnakemakeRule(task)
+    ruleString = snakeRule.as_string()
+    # 1000 * 1.2 = 1200, 10 * 1.2 = 12 (RESOURCE_ESTIMATE_MARGIN)
+    assert 'resources: mem_mb=1200, runtime=12' in ruleString
+    simple_merfish_data.delete_analysis(task)
+
+
+def test_snakemake_rule_resources_explicit_override_wins_over_estimate(
+        simple_merfish_data):
+    task = testtask.SimpleAnalysisTaskWithResourceEstimate(
+        simple_merfish_data,
+        parameters={'estimated_memory': 1000, 'estimated_time': 10})
+    clusterConfig = {task.get_analysis_name(): {'mem': 5000, 'time': '0:20:00'}}
+    snakeRule = snakewriter.SnakemakeRule(task, clusterConfig=clusterConfig)
+    ruleString = snakeRule.as_string()
+    # the rule's own explicit mem/time entry wins over the computed
+    # estimate entirely -- not even margined
+    assert 'mem_mb=5000' in ruleString
+    assert 'runtime=20' in ruleString
+    assert 'mem_mb=1200' not in ruleString
+    simple_merfish_data.delete_analysis(task)
+
+
+def test_snakemake_rule_resources_default_only_does_not_override_estimate(
+        simple_merfish_data):
+    # __default__ is a fallback for every rule, not a real per-rule
+    # override -- a computed estimate should still win over it.
+    task = testtask.SimpleAnalysisTaskWithResourceEstimate(
+        simple_merfish_data,
+        parameters={'estimated_memory': 1000, 'estimated_time': 10})
+    clusterConfig = {'__default__': {'mem': 8000, 'time': '3:00:00'}}
+    snakeRule = snakewriter.SnakemakeRule(task, clusterConfig=clusterConfig)
+    ruleString = snakeRule.as_string()
+    assert 'mem_mb=1200' in ruleString
+    assert 'runtime=12' in ruleString
+    simple_merfish_data.delete_analysis(task)
+
+
+def test_snakemake_rule_resources_done_rule_ignores_computed_estimate(
+        simple_merfish_data):
+    task = testtask.SimpleParallelAnalysisTaskWithResourceEstimate(
+        simple_merfish_data,
+        parameters={'estimated_memory': 1000, 'estimated_time': 10})
+    clusterConfig = {'__default__': {'mem': 8000, 'time': '3:00:00'}}
+    snakeRule = snakewriter.SnakemakeRule(task, clusterConfig=clusterConfig)
+    ruleString = snakeRule.as_string()
+    ruleBlock, doneBlock = ruleString.split(
+        'rule %sDone:' % task.get_analysis_name())
+    # the task's own rule uses the computed estimate (margined)
+    assert 'mem_mb=1200, runtime=12' in ruleBlock
+    # the Done rule keeps the plain __default__-derived resources
+    assert 'mem_mb=8000, runtime=180' in doneBlock
+    simple_merfish_data.delete_analysis(task)
 
 
 def test_snakemake_generator_embeds_cluster_resources(simple_merfish_data):

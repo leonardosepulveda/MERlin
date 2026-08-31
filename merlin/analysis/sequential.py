@@ -16,6 +16,7 @@ import bigfish.stack
 import bigfish.multistack
 
 from shapely.geometry import Point
+from shapely.ops import unary_union
 
 class SumSignal(analysistask.ParallelAnalysisTask):
 
@@ -388,8 +389,19 @@ class SmfishSignal(analysistask.ParallelAnalysisTask):
         sTask = self.dataSet.load_analysis_task(self.parameters['segment_task'])
         cellids, boundaries = sTask.get_feature_database()\
             .read_feature_ids_and_boundaries_at_z(zIndex, fragmentIndex)
-        polys = [b[0] for b in boundaries]
-        return gpd.GeoDataFrame(index = cellids, geometry = polys)
+        # each cell can have zero polygon pieces at this z (no boundary was
+        # stored for it here) or more than one (the cell splits into
+        # multiple regions at this z) -- drop the former and union the
+        # latter into a single geometry so every kept cell id maps to
+        # exactly one row.
+        keptIds = []
+        polys = []
+        for cellid, b in zip(cellids, boundaries):
+            if not b:
+                continue
+            keptIds.append(cellid)
+            polys.append(b[0] if len(b) == 1 else unary_union(b))
+        return gpd.GeoDataFrame(index = keptIds, geometry = polys)
 
     def _make_geodataframe_points(self, fragmentIndex, spots):
         # convert these spots to global coordinates

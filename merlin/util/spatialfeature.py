@@ -664,10 +664,42 @@ class HDF5SpatialFeatureDB(SpatialFeatureDB):
             that feature's get_boundaries()), for features that have a
             zIndex_<zIndex> group. Features without one are skipped.
         """
-        if fov is None:
-            return [b for x in self._dataSet.get_fovs()
-                   for b in self.read_feature_boundaries_at_z(zIndex, x)]
+        return self.read_feature_ids_and_boundaries_at_z(zIndex, fov)[1]
 
+    def read_feature_ids_and_boundaries_at_z(
+            self, zIndex: int, fov: int = None
+            ) -> Tuple[List[str], List[List[geometry.Polygon]]]:
+        """Read feature ids together with their boundary polygons at a
+        single z index, for every feature, without loading any other
+        z-plane's geometry.
+
+        Companion to read_feature_boundaries_at_z() for a caller that also
+        needs to know which feature each polygon set belongs to (e.g.
+        SmfishSignal joining detected spots against segmentation
+        boundaries one z-plane at a time instead of loading the whole 3D
+        cell set with read_features() up front).
+
+        Args:
+            zIndex: the z index to read boundaries for.
+            fov: if not None, only the boundaries for the specified fov are
+                returned.
+        Returns: a (featureIds, boundaries) pair of equal-length lists --
+            one feature id (the same string read_features() would report
+            via get_feature_id()) and one list of polygons (the z=zIndex
+            entry of that feature's get_boundaries()) per feature that has
+            a zIndex_<zIndex> group. Features without one are skipped.
+        """
+        if fov is None:
+            featureIds: List[str] = []
+            boundaryList: List[List[geometry.Polygon]] = []
+            for x in self._dataSet.get_fovs():
+                fIds, fBoundaries = \
+                    self.read_feature_ids_and_boundaries_at_z(zIndex, x)
+                featureIds.extend(fIds)
+                boundaryList.extend(fBoundaries)
+            return featureIds, boundaryList
+
+        featureIds = []
         boundaryList = []
         zGroupName = 'zIndex_' + str(zIndex)
         try:
@@ -682,6 +714,7 @@ class HDF5SpatialFeatureDB(SpatialFeatureDB):
                     zGroup = featG[zGroupName]
                     pCount = len([x for x in zGroup.keys()
                                  if x[:2] == 'p_'])
+                    featureIds.append(k)
                     boundaryList.append([
                         self._load_geometry_from_hdf5_group(
                             zGroup['p_' + str(p)])
@@ -689,7 +722,7 @@ class HDF5SpatialFeatureDB(SpatialFeatureDB):
         except FileNotFoundError:
             pass
 
-        return boundaryList
+        return featureIds, boundaryList
 
     def empty_database(self, fov: int = None) -> None:
         if fov is None:

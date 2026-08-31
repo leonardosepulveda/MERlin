@@ -3,6 +3,40 @@
 Curated current-state summary. See `prompt_history/` for full provenance of each item
 below; this file only tracks what's true *now* and the open next step.
 
+## SmfishSignal/SmfishColocalizationSignal: bounded-memory streaming write (2026-08-31)
+
+Follow-up on `docs/bc555-oom-findings-and-merci-handoff`'s cluster-mem-sizing
+investigation (that branch's own FINDINGS.md section, not yet merged here), which
+measured `SmfishSignal` climbing to 5.65 GB and still rising for one dense
+`BC555_sample_05` `epi` FOV and concluded no movie-size formula could safely bound it,
+since it accumulated every detected spot for the whole FOV (`sequential.py`, ~100
+z-planes x 11 channels for that experiment) in a Python list before one final
+`pandas.concat` + `to_parquet` write. `_load_feature_database` compounded this by
+loading every z-plane's segmentation boundary for every cell up front
+(`HDF5SpatialFeatureDB.read_features()`) just to filter to one z-plane at a time.
+
+**Fix** (branch `fix/smfish-signal-streaming-memory`, off `master`): both
+`SmfishSignal._run_analysis` and `SmfishColocalizationSignal._run_analysis` now loop z
+as the outer loop, read that z's segmentation boundaries once via a new
+`HDF5SpatialFeatureDB.read_feature_ids_and_boundaries_at_z(zIndex, fov)`, and stream
+each z-plane's result to disk immediately via a new `DataSet.open_parquet_chunk_writer`
+(`ParquetChunkWriter`, one parquet row group per chunk) instead of accumulating across
+the whole FOV. Peak memory is now bounded by one z-plane's worth of spots + boundaries
+instead of the whole FOV -- roughly two orders of magnitude less for a ~100-z-plane
+stack. Not re-measured against a real job in this pass (structural fix only, not a
+recalibration of the `mem: 32000` stopgap already applied to the live experiment's own
+config).
+
+**Found and fixed in passing**: `DataSet.load_dataframe_from_parquet` computed its save
+path but had `return pandas.read_parquet(...)` commented out, so it always silently
+returned `None`. Trivial one-line completion, needed to test the new writer.
+
+**Not done**: the `get_estimated_memory()`/`get_estimated_time()` implementation this
+was blocking (deferred to a follow-up turn, same session); re-measuring `SmfishSignal`
+against a real job; `SmfishColocalizationSignal`'s pre-existing (unrelated,
+unchanged) crash-on-all-empty-z-plane behavior; merging this branch. Full detail in this
+project's own request-history log, dated 2026-08-31 12:45.
+
 ## CreateFfc task: flat-field correction, wired into GenerateMosaic (2026-08-30)
 
 Implements the flat-field-correction (FFC) handoff written up on 2026-08-27

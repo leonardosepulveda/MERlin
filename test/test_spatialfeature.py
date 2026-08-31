@@ -181,6 +181,41 @@ def test_feature_hdf5_db_read_boundaries_at_z_matches_read_features(
     assert featureDB.read_feature_boundaries_at_z(0, fov=0) == []
 
 
+def test_feature_hdf5_db_read_ids_and_boundaries_at_z_matches_read_features(
+        single_task, simple_merfish_data):
+    """read_feature_ids_and_boundaries_at_z() (used by SmfishSignal to join
+    detected spots against segmentation one z-plane at a time, instead of
+    loading the whole 3D cell set up front) must pair each returned
+    feature id with the same polygons a full read_features() call would
+    report at that z.
+    """
+    featureDB = spatialfeature.HDF5SpatialFeatureDB(
+        simple_merfish_data, single_task)
+    featureDB.write_features([feature3, feature4], fov=0)
+
+    fullFeatures = featureDB.read_features(fov=0)
+    idToFeature = {str(f.get_feature_id()): f for f in fullFeatures}
+    zCount = featureDB.get_feature_z_count(fov=0)
+    assert zCount == 2
+
+    for z in range(zCount):
+        ids, boundariesAtZ = \
+            featureDB.read_feature_ids_and_boundaries_at_z(z, fov=0)
+        assert len(ids) == len(boundariesAtZ) == len(idToFeature)
+        assert set(ids) == set(idToFeature.keys())
+        for featureId, actualPolys in zip(ids, boundariesAtZ):
+            expectedPolys = idToFeature[featureId].get_boundaries()[z]
+            assert len(actualPolys) == len(expectedPolys)
+            for actualPoly, expectedPoly in zip(actualPolys, expectedPolys):
+                assert actualPoly.equals(expectedPoly)
+
+    featureDB.empty_database(0)
+    emptyIds, emptyBoundaries = \
+        featureDB.read_feature_ids_and_boundaries_at_z(0, fov=0)
+    assert emptyIds == []
+    assert emptyBoundaries == []
+
+
 def test_feature_contained_within_boundary():
     interiorLabels = np.zeros((1, 8, 8))
     interiorLabels[0, 2:6, 2:6] = 1

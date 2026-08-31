@@ -3,6 +3,14 @@ import os
 import glob
 import json
 import importlib
+# Import sqlite3 before pandas (imported below via merlin.core.dataset).
+# pandas' wheel links against whatever libstdc++ is resolved at that point
+# rather than bundling its own; importing sqlite3 first makes that the
+# environment's own (newer, ABI-compatible) libstdc++ instead of an older
+# system copy, which some conda-installed dependencies (e.g. icu, needed by
+# snakemake's own sqlite3 usage) require a newer symbol from than the
+# system copy provides.
+import sqlite3
 from typing import List
 
 from merlin.core import dataset

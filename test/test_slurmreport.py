@@ -188,3 +188,48 @@ def test_save_per_fov_resource_table_combines_tasks_and_skips_others(
     simple_data.delete_analysis(upstream_task)
     simple_data.delete_analysis(otherTask)
     simple_data.delete_analysis(slurm_report_task)
+
+
+def test_save_per_fov_resource_table_skips_task_missing_task_json(
+        monkeypatch, slurm_report_task, simple_data, upstream_task):
+    # get_analysis_tasks() lists any output/<name>/ with a tasks/
+    # subdirectory, including stray leftovers (e.g. from a renamed or
+    # removed analysis module) that never got a task.json written --
+    # load_analysis_task raises FileNotFoundError for those, and that
+    # must not abort the whole report. Real case: BC555_sample_05 had
+    # several such directories (e.g. 'AsignCellFOV'). Not persisted to
+    # disk (unlike test_save_per_fov_resource_table_combines_tasks_and_
+    # skips_others above) to avoid a second create/delete cycle in the
+    # same session-scoped dataset dir, which trips a filesystem teardown
+    # race on this repo's shared/NFS test storage.
+    def fake_load_analysis_task(self, name):
+        if name == 'StrayLeftover':
+            raise FileNotFoundError(name)
+        return upstream_task
+
+    monkeypatch.setattr(
+        type(simple_data), 'load_analysis_task', fake_load_analysis_task)
+
+    fakeUsage = pandas.DataFrame(
+        {'mem_mb': [100.0], 'time_min': [1.0]},
+        index=pandas.Index([0], name='fov'))
+    monkeypatch.setattr(
+        slurmreport.SlurmReport, '_generate_per_fov_slurm_usage',
+        lambda self, task: fakeUsage)
+
+    savedFrames = {}
+
+    def fake_save_dataframe_to_parquet(self, df, name, task, subdirectory):
+        savedFrames[name] = df
+
+    monkeypatch.setattr(
+        type(simple_data), 'save_dataframe_to_parquet',
+        fake_save_dataframe_to_parquet)
+
+    taskName = upstream_task.get_analysis_name()
+    slurm_report_task._save_per_fov_resource_table(
+        ['StrayLeftover', taskName])
+
+    wideDF = savedFrames['per_fov_resource_usage']
+    assert list(wideDF.columns) == [
+        taskName + '_mem_mb', taskName + '_time_min']

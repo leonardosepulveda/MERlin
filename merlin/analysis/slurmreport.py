@@ -289,7 +289,10 @@ class SlurmReport(analysistask.AnalysisTask):
         """
         columns = {}
         for t in taskList:
-            currentTask = self.dataSet.load_analysis_task(t)
+            try:
+                currentTask = self.dataSet.load_analysis_task(t)
+            except Exception:
+                continue
             if not isinstance(currentTask, analysistask.ParallelAnalysisTask):
                 continue
             try:
@@ -317,7 +320,10 @@ class SlurmReport(analysistask.AnalysisTask):
         reportDict = {}
         analysisParameters = {}
         for t in taskList:
-            currentTask = self.dataSet.load_analysis_task(t)
+            try:
+                currentTask = self.dataSet.load_analysis_task(t)
+            except Exception:
+                continue
             try:
                 if currentTask.is_complete():
                     slurmDF = self._generate_slurm_report(currentTask)

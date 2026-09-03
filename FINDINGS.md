@@ -1006,6 +1006,37 @@ trivial import/pin conflicts).
   **That job was user-cancelled (2026-08-18 15:50)** after hitting a third,
   unrelated real bug -- see the "Optimize02 chromatic-correction" entry
   below. Not yet resubmitted again; pending user confirmation of that fix.
+- **Production's own copy of this bug finally fixed and resolved
+  (2026-09-03)**. A real production run
+  (`BC553_sample_02/epi/merlin`) had every `DeconvolutionPreprocess`
+  fragment crash with this identical `bN-`-prefix error -- confirming the
+  "pending user go-ahead" fix noted above was still outstanding in
+  production 2.5 weeks later. Applied the same fix directly to production's
+  `dataorganization/data_organization_MF3_BC553_sample_02.csv` (backup kept
+  as `.bak_bN_prefix`): stripped `^b\d+-` from all 27 `readoutName` values,
+  verified against the real `C3v1_codebook.csv` (all 16 runtime bit names
+  now resolve, no duplicates), verified via pandas that no other column or
+  row order changed. Resubmitted (job 44215423) -- this exposed a **second,
+  previously-masked bug**: with the naming lookup fixed, `DeconvolutionPreprocess`
+  fragments finally did real work, and 268 of ~298 attempted fragments were
+  silently OOM-killed by the SLURM cgroup killer at the calculated 840MB
+  limit (`cluster_resource_allocation_BC553_sample_02.yaml`'s
+  `DeconvolutionPreprocess: {}` entry, 1.2x-margin default) -- this never
+  raises a Python exception (cgroup kills are invisible to the app), so
+  scanning task logs for `ERROR` lines completely misses it; only `sacct`
+  (`State=OUT_OF_MEMORY` on the `.0` job step) shows it. sacct's own
+  periodic `MaxRSS` sampling only ever caught ~690MB between polls, well
+  under the 840MB limit, meaning the real trigger is a brief spike between
+  samples (plausibly the FFT-based high-pass filter + iterative
+  Richardson-Lucy deconvolution, run across all 16 bits x 25 z per fragment)
+  -- the exact same failure shape already documented above for
+  `FiducialCorrelationWarp` in this same yaml. Cancelled the run (driver +
+  all in-flight child jobs), forced `DeconvolutionPreprocess: {mem: 3000}`
+  in production's yaml (comment added in-file), resubmitted (job 44222104):
+  confirmed clean -- 15+ fragments completed with 0 failures/0 OOM before
+  the run was left to continue on its own. No MERlin repo files were
+  touched; both fixes are entirely in the production experiment's own
+  config files (outside this git repo).
 
 ## Optimize02 chromatic-correction KeyError bug (2026-08-18, feature/slurm-job-naming-verbosity)
 

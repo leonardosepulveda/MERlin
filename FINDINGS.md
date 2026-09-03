@@ -3,6 +3,57 @@
 Curated current-state summary. See `prompt_history/` for full provenance of each item
 below; this file only tracks what's true *now* and the open next step.
 
+## LeastSquaresGlobalAlignment OOM on BC553_sample_02/epi; stopgap applied, refactor in progress (2026-09-03)
+
+`LeastSquaresGlobalAlignment` (`merlin/analysis/globalalign.py`) OOM-killed on every one
+of 6 attempts today against real `BC553_sample_02/epi` (jobs 44117159, 44122230,
+44129463, 44236639, 44239102, 44239650 -- `sacct` on the last: `ReqMem 8000M`, `MaxRSS`
+~7710 MB at kill, step `.0` `OUT_OF_MEMORY`). Not a code-error crash.
+
+**Root cause**: this task extends plain `AnalysisTask` (not `ParallelAnalysisTask`), so
+it runs as a single job over the whole experiment's 1651 fovs at once. Its
+`_run_analysis` calls `merlin.util.globalpositions.sample_neighbor_correspondences` and
+`compute_overlap_correlations`, each of which caches every loaded fiducial frame in a
+plain dict (`frameCache`) for the life of the call with no eviction -- by the end of the
+anchor loop, nearly all 1651 fovs' frames (2048x2048 uint16, 8.389 MB each, confirmed
+against a real raw `.zarr` frame) sit in memory simultaneously: ~13.8 GB, well past the
+8000 MB `__default__` this task fell back to (it has no `providesMemoryEstimate` opt-in;
+`get_estimated_memory()` is still `SimpleGlobalAlignment`'s hardcoded, unused `1000`
+placeholder). Also affects the second `compute_overlap_correlations` pass identically.
+
+**Stopgap applied** (unblocks this run only, no repo code touched): forced
+`LeastSquaresGlobalAlignment: {mem: 17000}` in production's own
+`cluster_resource_allocation_BC553_sample_02.yaml` (1651 * 8.389 MB + 300 MB baseline,
+x1.2 margin, rounded up to the nearest GB), comment added in-file. Confirmed the live
+`parameters_BC553_sample_02.json`'s `cluster_config` points at this `.yaml`, not the
+sibling (unread, historical) `.json` of the same name. Resubmitted directly via `sbatch`
+(job 44267625, `-t LeastSquaresGlobalAlignment` single-task invocation, `--mem 17000`)
+rather than through the full snakemake pipeline, since a `PlotPerformance` job
+(44232883) was already independently running against this experiment at investigation
+time and the top-level pipeline driver's live state was unclear -- lets this task's
+`.done` marker satisfy any concurrent/future automatic rerun without resubmitting it
+again.
+
+**Real fix in progress** (branch `fix/globalalign-oom-and-parallelize`): split into a
+per-fov `ParallelAnalysisTask` (pairwise neighbor registration, bounded memory -- holds
+only the current anchor + one neighbor frame, not the whole dataset) plus a small reduce
+`AnalysisTask` (the joint least-squares fit over all fovs' correspondences, which
+inherently cannot be parallelized further -- mirrors the existing `CleanCellBoundaries`
+[per-fov] -> `CombineCleanedBoundaries` [reduce] pattern in `segment.py`). Both new tasks
+to get real `get_estimated_memory()`/`get_estimated_time()` formulas
+(`providesMemoryEstimate`/`providesTimeEstimate = True`, via `merlin.util.
+resourceestimate`) rather than placeholder constants. Old `LeastSquaresGlobalAlignment`
+name/output path is referenced by other tasks' `global_align_task`/`alignment_task`
+parameters throughout `merlin_analysis_*.json` configs -- naming choice for the new
+reduce task needs to preserve or update every such reference.
+
+**Handoff to MERci**: needed because MERci's `create_cluster_resource_allocation()`
+generates these per-experiment yaml configs for new experiments (same generator flagged
+in the entry below) and its own analysis-parameter-recipe templates reference
+`LeastSquaresGlobalAlignment` by name as `global_align_task` -- both need to learn about
+the new task(s) once named. Not yet logged (this entry predates the split landing); to
+be added to MERci's `prompt_history/` once the new task names are final.
+
 ## YAML support for cluster_resource_allocation configs; BC555_sample_05 converted (2026-08-31)
 
 `merlin.merlin._load_json_or_yaml` (new, shared with the existing analysis-parameter

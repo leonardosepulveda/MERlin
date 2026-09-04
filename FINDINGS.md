@@ -34,25 +34,49 @@ time and the top-level pipeline driver's live state was unclear -- lets this tas
 `.done` marker satisfy any concurrent/future automatic rerun without resubmitting it
 again.
 
-**Real fix in progress** (branch `fix/globalalign-oom-and-parallelize`): split into a
-per-fov `ParallelAnalysisTask` (pairwise neighbor registration, bounded memory -- holds
-only the current anchor + one neighbor frame, not the whole dataset) plus a small reduce
-`AnalysisTask` (the joint least-squares fit over all fovs' correspondences, which
-inherently cannot be parallelized further -- mirrors the existing `CleanCellBoundaries`
-[per-fov] -> `CombineCleanedBoundaries` [reduce] pattern in `segment.py`). Both new tasks
-to get real `get_estimated_memory()`/`get_estimated_time()` formulas
-(`providesMemoryEstimate`/`providesTimeEstimate = True`, via `merlin.util.
-resourceestimate`) rather than placeholder constants. Old `LeastSquaresGlobalAlignment`
-name/output path is referenced by other tasks' `global_align_task`/`alignment_task`
-parameters throughout `merlin_analysis_*.json` configs -- naming choice for the new
-reduce task needs to preserve or update every such reference.
+**Stopgap confirmed successful**: job 44267625 `COMPLETED` in 13m53s, `sacct` `MaxRSS`
+14453812K (~14.45 GB) -- within the 4% of the 13.85 GB raw (pre-margin) estimate above,
+confirming the frame-cache-size root-cause model directly. Real output: 6370
+correspondences (6328 kept, 42 rejected), 1 connected component, `residual_rms_um`
+0.168 -- a clean, healthy result, `LeastSquaresGlobalAlignment.done` written.
+
+**Real fix landed** (branch `fix/globalalign-oom-and-parallelize`, not yet merged/deployed
+to any production experiment -- BC553_sample_02/epi's own run above used only the
+stopgap, not this): split into `RegisterFovNeighbors` (new `ParallelAnalysisTask`, one
+fragment per fov, pairwise neighbor registration -- bounds each fragment to at most the
+anchor + one neighbor frame, not the whole dataset) plus `LeastSquaresGlobalAlignment`
+(kept as the reduce step -- same name/output paths as before, so nothing downstream that
+already reads its outputs needs to change) doing only the joint least-squares fit, which
+inherently cannot be parallelized further since it needs every fov's correspondences at
+once -- mirrors the existing `CleanCellBoundaries` [per-fov] -> `CombineCleanedBoundaries`
+[reduce] pattern in `segment.py`. `LeastSquaresGlobalAlignment` gained a
+`neighbor_registration_task` parameter (defaults to `'RegisterFovNeighbors'`, so any
+existing config with no parameters at all -- e.g. BC553_sample_02's own -- keeps working
+once the new task is added to its `merlin_analysis_*.json`/`.yaml` task list). Also fixed
+the same unbounded-cache bug at its root in `globalpositions.py` (both
+`sample_neighbor_correspondences` and `compute_overlap_correlations` now share a bounded
+`_BoundedFrameCache`, maxsize 8). Both new/changed tasks opted into real
+`get_estimated_memory()`/`get_estimated_time()` formulas (`providesMemoryEstimate`/
+`providesTimeEstimate = True`, via `merlin.util.resourceestimate`) instead of the old
+placeholder constants -- explicitly marked uncalibrated (first-pass guesses) pending a
+real measured job on the new task shape. `test_globalalign.py` updated and passing
+(existing suite otherwise unaffected -- verified against a clean `master` checkout that
+the handful of unrelated `test_core.py`/`test_dataset.py`/`test_snakemake.py` failures
+seen in this session are pre-existing test-isolation flakiness, not a regression).
+
+**Not yet done**: deploying this to BC553_sample_02/epi's own config (today's run is
+already unblocked by the stopgap alone; the new task list entry can be added on some
+future rerun rather than disrupting the currently-running production pipeline) or to any
+other production experiment; merging the branch to `master`; the MERci handoff below.
 
 **Handoff to MERci**: needed because MERci's `create_cluster_resource_allocation()`
 generates these per-experiment yaml configs for new experiments (same generator flagged
 in the entry below) and its own analysis-parameter-recipe templates reference
 `LeastSquaresGlobalAlignment` by name as `global_align_task` -- both need to learn about
-the new task(s) once named. Not yet logged (this entry predates the split landing); to
-be added to MERci's `prompt_history/` once the new task names are final.
+the new `RegisterFovNeighbors` task (a new top-level entry in the generated
+`merlin_analysis_*.json`/`.yaml` task list, plus its own `cluster_resource_allocation`
+entry) now that its name is final. Logged in MERci's own `prompt_history/`, dated
+2026-09-03 (status: pending).
 
 ## YAML support for cluster_resource_allocation configs; BC555_sample_05 converted (2026-08-31)
 

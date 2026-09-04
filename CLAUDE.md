@@ -113,10 +113,10 @@ inherently tied to a dataset-wide z list; `segment.py`'s `CleanCellBoundaries`/
 (z-plane duplicate removal among other filters) before `filterbarcodes.py` and
 `partition.py` assign them to segmented cells.
 
-## History records (three tiers)
+## History records (two tiers)
 
-This project keeps three complementary, local-only histories. All live *inside*
-the project, and all three are gitignored.
+This project keeps two complementary, local-only histories. Both live *inside*
+the project, and both are gitignored.
 
 1. **`verbatim_history/`** — *uncompressed*. The exact text Claude writes each turn,
    appended automatically by a `Stop` hook (`.claude/hooks/save_verbatim.ps1`). No
@@ -125,13 +125,9 @@ the project, and all three are gitignored.
 2. **`prompt_history/`** — *compressed summary*. One file per request (format below).
    The append-only source of truth: records the verbatim prompt, plan, what was
    done, and the dead-ends. **Never edit past entries** — their value is provenance.
-3. **`FINDINGS.md`** — *current state*. Curated, deduplicated head: what is true now,
-   what was wrong, and the open next step. Read this first when resuming.
 
 **Maintenance habit:** for **every user question/request**, write a tier-2
-`prompt_history` entry (format below). When that entry changes a conclusion or
-project state, also update the relevant `FINDINGS.md` section. Keep
-`prompt_history` append-only.
+`prompt_history` entry (format below). Keep `prompt_history` append-only.
 
 ### `prompt_history/` entry format
 

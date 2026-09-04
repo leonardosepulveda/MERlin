@@ -28,6 +28,7 @@ images handed to this module are already correctly oriented).
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -216,6 +217,95 @@ def register_neighbor_pair(
     return (anchor_xy[0] + measDx, anchor_xy[1] + measDy), float(error)
 
 
+class _BoundedFrameCache:
+    """A small LRU cache over ``load_frame``, bounded to *maxsize* frames --
+    used in place of an unbounded per-call dict so a whole-grid pass
+    (`sample_neighbor_correspondences`/`compute_overlap_correlations`) can't
+    grow to hold every fov's frame at once. That unbounded growth was the
+    root cause of a real OOM kill on a real 1651-fov experiment (see
+    FINDINGS.md in the MERlin repo, 2026-09-03): with every fov visited as
+    both an anchor and a neighbour, an uncapped cache ends up holding
+    nearly the whole dataset's frames simultaneously by the end of the
+    loop. A neighbour fov reused across two anchors close together in
+    iteration order still gets a cache hit; one far apart just gets
+    reloaded -- a bounded amount of extra I/O traded for a bounded memory
+    footprint, not a correctness issue either way. `merlin.analysis.
+    globalalign.RegisterFovNeighbors` sidesteps this entirely by
+    registering one fov's neighbours per (Slurm-parallel) fragment, where
+    at most two frames (the anchor plus the current neighbour) are ever
+    live at once -- this cache remains for the whole-grid entry points
+    below, still used directly on small datasets and by
+    `LeastSquaresGlobalAlignment`'s own final `compute_overlap_correlations`
+    QC pass.
+    """
+
+    def __init__(self, load_frame: Callable[[int], np.ndarray], maxsize: int = 8):
+        self._load_frame = load_frame
+        self._maxsize = maxsize
+        self._cache: "OrderedDict[int, np.ndarray]" = OrderedDict()
+
+    def get(self, fov: int) -> np.ndarray:
+        if fov in self._cache:
+            self._cache.move_to_end(fov)
+            return self._cache[fov]
+        frame = self._load_frame(fov)
+        self._cache[fov] = frame
+        if len(self._cache) > self._maxsize:
+            self._cache.popitem(last=False)
+        return frame
+
+
+def register_fov_against_neighbors(
+    anchor_fov:         int,
+    positions:          Dict[int, Tuple[float, float]],
+    load_frame:         Callable[[int], np.ndarray],
+    pixel_size_um:      float,
+    overlap_fraction:   float,
+    tolerance_fraction: float = 0.25,
+    upsample_factor:    int = 100,
+) -> List[NeighborCorrespondence]:
+    """
+    Register *anchor_fov* against each of its present 4-connected
+    neighbours (see `sample_neighbor_correspondences` for why this is
+    exhaustive, not a sparse sample, and why an interior fov's edges end
+    up measured twice). Holds at most the anchor's own frame plus one
+    neighbour frame at a time -- no cache needed, since within one call
+    each neighbour is loaded at most once.
+
+    This is the single-fov unit of work behind `merlin.analysis.
+    globalalign.RegisterFovNeighbors`'s per-fov Slurm parallelism, and is
+    also what `sample_neighbor_correspondences` below loops over for its
+    whole-grid, non-parallel entry point.
+
+    Parameters
+    ----------
+    anchor_fov  : the fov to use as anchor
+    positions   : ``{fov_id: (x, y)}`` nominal grid positions (microns),
+                  covering *anchor_fov* and its neighbours
+    load_frame  : ``load_frame(fov_id) -> np.ndarray``, returning the 2-D
+                  registration image for one fov
+    pixel_size_um, overlap_fraction : grid/camera geometry (see
+                  `find_grid_neighbor` for how each anchor's own local step
+                  size is derived from *positions* directly, rather than
+                  taken as a dataset-wide value)
+    """
+    anchorImg = load_frame(anchor_fov)
+    correspondences: List[NeighborCorrespondence] = []
+    for direction, dx, dy in _DIRECTIONS:
+        neighborFov = find_grid_neighbor(
+            anchor_fov, positions, dx, dy, tolerance_fraction)
+        if neighborFov is None:
+            continue
+        neighborImg = load_frame(neighborFov)
+        measuredXY, error = register_neighbor_pair(
+            anchorImg, neighborImg, positions[anchor_fov], positions[neighborFov],
+            dx, dy, overlap_fraction, pixel_size_um, upsample_factor)
+        correspondences.append(NeighborCorrespondence(
+            anchor_fov=anchor_fov, neighbor_fov=neighborFov, direction=direction,
+            nominal_xy=positions[neighborFov], measured_xy=measuredXY, error=error))
+    return correspondences
+
+
 def sample_neighbor_correspondences(
     fov_ids:            List[int],
     positions:          Dict[int, Tuple[float, float]],
@@ -234,6 +324,14 @@ def sample_neighbor_correspondences(
     edges are measured twice, independently, once from each side -- a free
     redundancy check, not wasted work.
 
+    Whole-grid, non-parallel entry point: delegates each anchor to
+    `register_fov_against_neighbors`, sharing one `_BoundedFrameCache`
+    (not an unbounded cache -- see that class's docstring) across the
+    whole call. `merlin.analysis.globalalign.RegisterFovNeighbors` is the
+    per-fov-parallel equivalent used in production instead of this
+    function, for any dataset large enough that a single job's memory
+    matters.
+
     Parameters
     ----------
     fov_ids     : the fovs to use as anchors (typically every fov in the
@@ -241,36 +339,18 @@ def sample_neighbor_correspondences(
     positions   : ``{fov_id: (x, y)}`` nominal grid positions (microns),
                   covering every id in *fov_ids* and its neighbours
     load_frame  : ``load_frame(fov_id) -> np.ndarray``, returning the 2-D
-                  registration image for one fov (results are cached per
-                  fov id, since a neighbour can also be sampled as another
-                  anchor's neighbour)
+                  registration image for one fov
     pixel_size_um, overlap_fraction : grid/camera geometry (see
                   `find_grid_neighbor` for how each anchor's own local step
                   size is derived from *positions* directly, rather than
                   taken as a dataset-wide value)
     """
-    frameCache: Dict[int, np.ndarray] = {}
-
-    def _get_frame(fov: int) -> np.ndarray:
-        if fov not in frameCache:
-            frameCache[fov] = load_frame(fov)
-        return frameCache[fov]
-
+    cache = _BoundedFrameCache(load_frame)
     correspondences: List[NeighborCorrespondence] = []
     for anchorFov in fov_ids:
-        anchorImg = _get_frame(anchorFov)
-        for direction, dx, dy in _DIRECTIONS:
-            neighborFov = find_grid_neighbor(
-                anchorFov, positions, dx, dy, tolerance_fraction)
-            if neighborFov is None:
-                continue
-            neighborImg = _get_frame(neighborFov)
-            measuredXY, error = register_neighbor_pair(
-                anchorImg, neighborImg, positions[anchorFov], positions[neighborFov],
-                dx, dy, overlap_fraction, pixel_size_um, upsample_factor)
-            correspondences.append(NeighborCorrespondence(
-                anchor_fov=anchorFov, neighbor_fov=neighborFov, direction=direction,
-                nominal_xy=positions[neighborFov], measured_xy=measuredXY, error=error))
+        correspondences.extend(register_fov_against_neighbors(
+            anchorFov, positions, cache.get, pixel_size_um, overlap_fraction,
+            tolerance_fraction, upsample_factor))
     return correspondences
 
 
@@ -542,19 +622,14 @@ def compute_overlap_correlations(
     zero-variance crop has no real correlation to report, and ``NaN``
     would silently corrupt any downstream mean/plot.
     """
-    frameCache: Dict[int, np.ndarray] = {}
-
-    def _get_frame(fov: int) -> np.ndarray:
-        if fov not in frameCache:
-            frameCache[fov] = load_frame(fov)
-        return frameCache[fov]
+    cache = _BoundedFrameCache(load_frame)
 
     directionToDxDy = {label: (dx, dy) for label, dx, dy in _DIRECTIONS}
     correlations: Dict[Tuple[int, int, str], float] = {}
     for c in correspondences:
         dx, dy = directionToDxDy[c.direction]
         anchorCrop, neighborCrop = crop_overlap(
-            _get_frame(c.anchor_fov), _get_frame(c.neighbor_fov), dx, dy, overlap_fraction)
+            cache.get(c.anchor_fov), cache.get(c.neighbor_fov), dx, dy, overlap_fraction)
         anchorCrop = anchorCrop.astype(np.float64)
         neighborCrop = neighborCrop.astype(np.float64)
 

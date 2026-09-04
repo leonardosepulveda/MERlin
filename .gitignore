@@ -12,6 +12,7 @@ pip-delete-this-directory.txt
 
 # Local-only history records (see CLAUDE.md)
 prompt_history/
+prompt_new/
 verbatim_history/
 .claude/settings.local.json
 SOMEDAY.md

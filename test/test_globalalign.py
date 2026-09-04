@@ -21,11 +21,21 @@ def test_simple_global_alignment_fov_coordinates_to_global(simple_merfish_data):
 def test_least_squares_global_alignment_runs_and_persists(simple_merfish_data):
     # test_positions.csv places the 2 fovs 195um apart in y with 0 offset in
     # x -- the synthetic fixture images have no real overlapping tissue
-    # content, but this still exercises the full real code path: neighbour
-    # lookup, registration, outlier filtering, the joint lsqr solve, and the
-    # corrected_positions CSV round-trip.
+    # content, but this still exercises the full real code path: per-fov
+    # neighbour lookup + registration (RegisterFovNeighbors, run first since
+    # LeastSquaresGlobalAlignment now only consumes its output), outlier
+    # filtering, the joint lsqr solve, and the corrected_positions CSV
+    # round-trip.
+    registrationTask = globalalign.RegisterFovNeighbors(
+        simple_merfish_data, parameters={},
+        analysisName='registerFovNeighbors_runsAndPersists')
+    registrationTask.save()
+    registrationTask.run()
+
     task = globalalign.LeastSquaresGlobalAlignment(
-        simple_merfish_data, parameters={}, analysisName='leastSquaresGlobalAlign')
+        simple_merfish_data,
+        parameters={'neighbor_registration_task': registrationTask.analysisName},
+        analysisName='leastSquaresGlobalAlign')
     task.save()
     task._run_analysis()
 
@@ -63,8 +73,18 @@ def test_least_squares_global_alignment_runs_and_persists(simple_merfish_data):
 
 def test_least_squares_global_alignment_requires_run_before_offset_lookup(
         simple_merfish_data):
+    # LeastSquaresGlobalAlignment.__init__ loads its neighbor_registration_task
+    # dependency eagerly, so that dependency must exist (saved) even though
+    # this test never runs either task.
+    registrationTask = globalalign.RegisterFovNeighbors(
+        simple_merfish_data, parameters={},
+        analysisName='registerFovNeighbors_requiresRun')
+    registrationTask.save()
+
     task = globalalign.LeastSquaresGlobalAlignment(
-        simple_merfish_data, parameters={}, analysisName='leastSquaresGlobalAlignUnrun')
+        simple_merfish_data,
+        parameters={'neighbor_registration_task': registrationTask.analysisName},
+        analysisName='leastSquaresGlobalAlignUnrun')
     task.save()
     with pytest.raises(FileNotFoundError):
         task._get_fov_offset(0)
@@ -74,8 +94,16 @@ def test_least_squares_global_alignment_generates_verification_figures(
         simple_merfish_data):
     # Full task.run() (not _run_analysis() directly), so the
     # generate-figures-after-completion hook actually fires.
+    registrationTask = globalalign.RegisterFovNeighbors(
+        simple_merfish_data, parameters={},
+        analysisName='registerFovNeighbors_figures')
+    registrationTask.save()
+    registrationTask.run()
+
     task = globalalign.LeastSquaresGlobalAlignment(
-        simple_merfish_data, parameters={}, analysisName='leastSquaresGlobalAlignFigures')
+        simple_merfish_data,
+        parameters={'neighbor_registration_task': registrationTask.analysisName},
+        analysisName='leastSquaresGlobalAlignFigures')
     task.save()
     task.run()
     assert task.is_complete()

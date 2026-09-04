@@ -7,6 +7,30 @@ from shapely import geometry
 
 from merlin.core import analysistask
 from merlin.util import globalpositions
+from merlin.util import resourceestimate
+
+
+def _nominal_positions_and_overlap(dataSet, overlapFractionParam):
+    """Shared setup for `RegisterFovNeighbors` and `LeastSquaresGlobalAlignment`:
+    every fov's nominal (stage-reported) position, and the overlap fraction
+    to register/score against (the given value, or -- if None -- inferred
+    from the measured grid step size vs. the fov's own width, same
+    convention the real-data comparison `merlin.util.globalpositions` is
+    ported from used). Factored out so both tasks derive this identically
+    rather than each keeping their own copy to drift apart.
+    """
+    fovs = dataSet.get_fovs()
+    nominalPositions = {f: tuple(dataSet.get_fov_offset(f)) for f in fovs}
+    micronsPerPixel = dataSet.get_microns_per_pixel()
+    frameWidthUm = dataSet.get_image_dimensions()[0] * micronsPerPixel
+
+    stepSizeUm = globalpositions.estimate_step_size_um(nominalPositions)
+    overlapFraction = overlapFractionParam
+    if overlapFraction is None:
+        overlapFraction = max(
+            0.0, 1.0 - stepSizeUm / frameWidthUm) if frameWidthUm > 0 else 0.0
+
+    return fovs, nominalPositions, micronsPerPixel, stepSizeUm, overlapFraction
 
 
 class GlobalAlignment(analysistask.AnalysisTask):
@@ -276,6 +300,119 @@ class CorrelationGlobalAlignment(GlobalAlignment):
         return fov1, fov2
 
 
+class RegisterFovNeighbors(analysistask.ParallelAnalysisTask):
+
+    """
+    Registers one fov against each of its present 4-connected neighbours
+    (`merlin.util.globalpositions.register_fov_against_neighbors`), one
+    fragment per fov.
+
+    This is the per-fov, Slurm-parallel map half of `LeastSquaresGlobalAlignment`'s
+    two-task split -- see that class's own docstring, and FINDINGS.md
+    (2026-09-03), for why: the original single-job
+    `LeastSquaresGlobalAlignment._run_analysis` cached every fov's fiducial
+    frame for the life of the call, OOM-killing on a real 1651-fov
+    experiment. Splitting the frame-heavy registration step into one
+    fragment per fov bounds each fragment's own memory to at most two
+    frames (the fov's own plus its current neighbour's) instead of the
+    whole dataset, and gets real cluster parallelism for what was
+    previously a single serial job.
+
+    Writes one CSV per fov of that fov's own correspondences as anchor
+    (empty, header-only, if the fov has no surviving neighbour -- e.g. an
+    isolated fov); `return_exported_data` reads it back as a list of
+    `NeighborCorrespondence`.
+    """
+
+    def __init__(self, dataSet, parameters=None, analysisName=None):
+        super().__init__(dataSet, parameters, analysisName)
+
+        if 'fiducial_data_channel' not in self.parameters:
+            self.parameters['fiducial_data_channel'] = 0
+        if 'overlap_fraction' not in self.parameters:
+            # None -> inferred in _run_analysis (see
+            # _nominal_positions_and_overlap).
+            self.parameters['overlap_fraction'] = None
+        if 'tolerance_fraction' not in self.parameters:
+            self.parameters['tolerance_fraction'] = 0.25
+        if 'upsample_factor' not in self.parameters:
+            self.parameters['upsample_factor'] = 100
+
+    def fragment_count(self):
+        return len(self.dataSet.get_fovs())
+
+    #: A fov's own frame plus (up to) one neighbour frame are ever held at
+    #: once -- see `globalpositions.register_fov_against_neighbors` -- so
+    #: peak memory doesn't scale with the experiment's total fov count,
+    #: only with a single frame's size.
+    providesMemoryEstimate = True
+    providesTimeEstimate = True
+
+    def get_estimated_memory(self):
+        # Uncalibrated -- no real job measured yet. Reuses
+        # FiducialCorrelationWarp's own calibrated kTask (warp.py; same
+        # skimage.registration.phase_cross_correlation algorithm family)
+        # as a conservative proxy against 2 full frames (anchor +
+        # neighbour) -- this task's crops are smaller than a full frame
+        # (just the overlap band), so real usage should be lower.
+        return resourceestimate.estimate_stack_memory_mb(
+            self.dataSet, frameCount=2, kTask=59, baselineMb=230)
+
+    def get_estimated_time(self):
+        # Uncalibrated -- no real job measured yet. Up to 4 neighbour
+        # registrations per fov (one per direction), each assumed to cost
+        # about as much as one FiducialCorrelationWarp channel registration
+        # (same secondsPerFrame guess, warp.py).
+        return resourceestimate.estimate_stack_time_minutes(
+            frameCount=4, secondsPerFrame=3, baselineMinutes=2)
+
+    def get_dependencies(self):
+        return []
+
+    _CORRESPONDENCE_COLUMNS = [
+        'anchor_fov', 'neighbor_fov', 'direction',
+        'nominal_x', 'nominal_y', 'measured_x', 'measured_y', 'error']
+
+    def return_exported_data(
+            self, fragmentIndex) -> List[globalpositions.NeighborCorrespondence]:
+        df = self.dataSet.load_dataframe_from_csv(
+            'neighbor_correspondences_raw', self, resultIndex=fragmentIndex)
+        return [
+            globalpositions.NeighborCorrespondence(
+                anchor_fov=int(row.anchor_fov), neighbor_fov=int(row.neighbor_fov),
+                direction=row.direction, nominal_xy=(row.nominal_x, row.nominal_y),
+                measured_xy=(row.measured_x, row.measured_y), error=row.error)
+            for row in df.itertuples()
+        ]
+
+    def _run_analysis(self, fragmentIndex):
+        _, nominalPositions, micronsPerPixel, _, overlapFraction = \
+            _nominal_positions_and_overlap(
+                self.dataSet, self.parameters['overlap_fraction'])
+
+        fiducialChannel = self.parameters['fiducial_data_channel']
+
+        def load_frame(fov):
+            return self.dataSet.get_fiducial_image(fiducialChannel, fov)
+
+        correspondences = globalpositions.register_fov_against_neighbors(
+            fragmentIndex, nominalPositions, load_frame,
+            pixel_size_um=micronsPerPixel, overlap_fraction=overlapFraction,
+            tolerance_fraction=self.parameters['tolerance_fraction'],
+            upsample_factor=self.parameters['upsample_factor'])
+
+        self.dataSet.save_dataframe_to_csv(
+            pd.DataFrame([
+                {'anchor_fov': c.anchor_fov, 'neighbor_fov': c.neighbor_fov,
+                 'direction': c.direction,
+                 'nominal_x': c.nominal_xy[0], 'nominal_y': c.nominal_xy[1],
+                 'measured_x': c.measured_xy[0], 'measured_y': c.measured_xy[1],
+                 'error': c.error}
+                for c in correspondences
+            ], columns=self._CORRESPONDENCE_COLUMNS),
+            'neighbor_correspondences_raw', self, resultIndex=fragmentIndex)
+
+
 class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
 
     """
@@ -297,11 +434,25 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
     unchanged (`fov_coordinates_to_global`, `fov_to_global_transform`,
     `get_global_extent`, etc.) by overriding only `_get_fov_offset` to
     return the corrected position once `_run_analysis` has computed it.
+
+    The per-fov pairwise registration this task's joint fit consumes is
+    computed by its `RegisterFovNeighbors` dependency (see that class's
+    own docstring for why this is a separate, per-fov-parallel task and
+    not inlined here as it originally was) -- this task itself only
+    gathers each fov's already-registered correspondences, runs the joint
+    least-squares solve (which, unlike registration, is not parallelizable
+    per-fov: it needs every fov's correspondences at once), and scores the
+    result.
     """
 
     def __init__(self, dataSet, parameters=None, analysisName=None):
         super().__init__(dataSet, parameters, analysisName)
         self._correctedPositions = None
+
+        if 'neighbor_registration_task' not in self.parameters:
+            self.parameters['neighbor_registration_task'] = 'RegisterFovNeighbors'
+        self.registrationTask = self.dataSet.load_analysis_task(
+            self.parameters['neighbor_registration_task'])
 
         if 'fiducial_data_channel' not in self.parameters:
             self.parameters['fiducial_data_channel'] = 0
@@ -310,25 +461,45 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
             # size vs. the fov's own width, same convention the real-data
             # comparison this method is ported from used.
             self.parameters['overlap_fraction'] = None
-        if 'tolerance_fraction' not in self.parameters:
-            self.parameters['tolerance_fraction'] = 0.25
         if 'mad_threshold' not in self.parameters:
             self.parameters['mad_threshold'] = 5.0
-        if 'upsample_factor' not in self.parameters:
-            self.parameters['upsample_factor'] = 100
         if 'lsqr_atol' not in self.parameters:
             self.parameters['lsqr_atol'] = 1e-12
         if 'lsqr_btol' not in self.parameters:
             self.parameters['lsqr_btol'] = 1e-12
 
+    #: No frame is ever held beyond the bounded `_BoundedFrameCache` used
+    #: by this task's own final `compute_overlap_correlations` QC pass
+    #: (globalpositions.py) -- the frame-heavy registration step now lives
+    #: entirely in `RegisterFovNeighbors`. So, unlike before this task's
+    #: split, memory here is roughly constant in fov count rather than
+    #: scaling with it.
+    providesMemoryEstimate = True
+    providesTimeEstimate = True
+
     def get_estimated_memory(self):
-        return 1000
+        # Uncalibrated -- no real job measured yet. `_BoundedFrameCache`'s
+        # default maxsize (8) full frames, plus a higher baseline than
+        # FiducialCorrelationWarp's measured 230 MB to cover pandas/scipy
+        # (the sparse lsqr solve, correspondence dataframes) -- kTask=2
+        # rather than 1 since compute_overlap_correlations promotes crops
+        # to float64.
+        return resourceestimate.estimate_stack_memory_mb(
+            self.dataSet, frameCount=8, kTask=2, baselineMb=500)
 
     def get_estimated_time(self):
-        return 60
+        # Uncalibrated -- no real job measured yet. Dominated by reading
+        # every fov's small RegisterFovNeighbors CSV plus the final
+        # compute_overlap_correlations QC pass over the kept
+        # correspondences -- both roughly linear in fov count, not frame-
+        # count, so this (ab)uses frameCount as a fov-count proxy rather
+        # than a real frame count.
+        return resourceestimate.estimate_stack_time_minutes(
+            frameCount=len(self.dataSet.get_fovs()), secondsPerFrame=0.2,
+            baselineMinutes=5)
 
     def get_dependencies(self):
-        return []
+        return [self.parameters['neighbor_registration_task']]
 
     def _get_fov_offset(self, fov: int) -> Tuple[float, float]:
         return self._load_corrected_positions()[fov]
@@ -344,29 +515,18 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
         return self._correctedPositions
 
     def _run_analysis(self):
-        fovs = self.dataSet.get_fovs()
-        nominalPositions = {f: tuple(self.dataSet.get_fov_offset(f))
-                            for f in fovs}
-        micronsPerPixel = self.dataSet.get_microns_per_pixel()
-        frameWidthUm = self.dataSet.get_image_dimensions()[0] * micronsPerPixel
-
-        stepSizeUm = globalpositions.estimate_step_size_um(nominalPositions)
-        overlapFraction = self.parameters['overlap_fraction']
-        if overlapFraction is None:
-            overlapFraction = max(
-                0.0, 1.0 - stepSizeUm / frameWidthUm) if frameWidthUm > 0 else 0.0
+        fovs, nominalPositions, micronsPerPixel, stepSizeUm, overlapFraction = \
+            _nominal_positions_and_overlap(
+                self.dataSet, self.parameters['overlap_fraction'])
 
         fiducialChannel = self.parameters['fiducial_data_channel']
 
         def load_frame(fov):
             return self.dataSet.get_fiducial_image(fiducialChannel, fov)
 
-        correspondences = globalpositions.sample_neighbor_correspondences(
-            fov_ids=fovs, positions=nominalPositions, load_frame=load_frame,
-            pixel_size_um=micronsPerPixel,
-            overlap_fraction=overlapFraction,
-            tolerance_fraction=self.parameters['tolerance_fraction'],
-            upsample_factor=self.parameters['upsample_factor'])
+        correspondences = []
+        for fov in fovs:
+            correspondences.extend(self.registrationTask.return_exported_data(fov))
 
         kept, rejected = globalpositions.filter_correspondence_outliers(
             correspondences, mad_threshold=self.parameters['mad_threshold'])

@@ -64,10 +64,29 @@ real measured job on the new task shape. `test_globalalign.py` updated and passi
 the handful of unrelated `test_core.py`/`test_dataset.py`/`test_snakemake.py` failures
 seen in this session are pre-existing test-isolation flakiness, not a regression).
 
-**Not yet done**: deploying this to BC553_sample_02/epi's own config (today's run is
-already unblocked by the stopgap alone; the new task list entry can be added on some
-future rerun rather than disrupting the currently-running production pipeline) or to any
-other production experiment; merging the branch to `master`; the MERci handoff below.
+**Update (2026-09-04)**: this branch being checked out in `merlin_cc_env`'s editable
+install turned out to deploy itself involuntarily -- any `merlin` invocation on the
+cluster runs whatever's checked out here, config or no. A manual resubmit of
+BC553_sample_02/epi (job 44403135, 12:07-12:11) crashed at Snakefile generation with
+`FileNotFoundError` on `RegisterFovNeighbors/tasks/task.json`, since the live
+`merlin_analysis_BC553_sample_02.yaml` (`merlin/analysis/`, not the stale
+`parameters_home/analysis/` copy) had no entry for the new task yet. Fixed by adding
+the `RegisterFovNeighbors` entry there, then reconciling the stopgap-run's
+`LeastSquaresGlobalAlignment/tasks/task.json` (old pre-split parameter shape) to the
+new one in place (backed up alongside it) so the already-completed, already-validated
+result and everything downstream stayed intact rather than being invalidated for a
+recompute. Full writeup: `prompt_history/
+2026_09_04_1225_fix_bc553_registerfovneighbors_deploy_crash.md`. Still not done: the
+now-oversized 17 GB forced `mem` override for `LeastSquaresGlobalAlignment` in that
+experiment's `cluster_resource_allocation` yaml (harmless while its `.done` marker
+stands, but worth relaxing eventually); deploying to any other production experiment;
+merging the branch to `master`; the MERci handoff below.
+
+**Not yet done (as of 2026-09-03)**: deploying this to BC553_sample_02/epi's own config
+(today's run is already unblocked by the stopgap alone; the new task list entry can be
+added on some future rerun rather than disrupting the currently-running production
+pipeline) or to any other production experiment; merging the branch to `master`; the
+MERci handoff below.
 
 **Handoff to MERci**: needed because MERci's `create_cluster_resource_allocation()`
 generates these per-experiment yaml configs for new experiments (same generator flagged

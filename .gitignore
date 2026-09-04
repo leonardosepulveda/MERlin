@@ -14,6 +14,8 @@ pip-delete-this-directory.txt
 prompt_history/
 verbatim_history/
 .claude/settings.local.json
+SOMEDAY.md
+FINDINGS.md
 
 # Local-only scratch/reference material (notebooks, benchmark data, ...)
 cache/

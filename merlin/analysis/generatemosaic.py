@@ -139,8 +139,20 @@ class GenerateMosaic(analysistask.AnalysisTask):
     @staticmethod
     def _accumulate(mosaicSum: np.ndarray, mosaicCount: np.ndarray,
                     tile: np.ndarray, x0: int, y0: int) -> None:
-        ySlice = slice(y0, y0 + tile.shape[0])
-        xSlice = slice(x0, x0 + tile.shape[1])
+        # mosaicShape is floor(total micron extent), so a tile placed at the
+        # canvas's far edge can extend past it by a pixel or two (and, in
+        # principle, a fov could floor to just below 0 on the near edge);
+        # clip the placement to the canvas so those pixels are simply
+        # dropped instead of mismatching mosaicSum's slice shape.
+        height, width = mosaicSum.shape
+        yStart, xStart = max(y0, 0), max(x0, 0)
+        yEnd = min(y0 + tile.shape[0], height)
+        xEnd = min(x0 + tile.shape[1], width)
+        if yEnd <= yStart or xEnd <= xStart:
+            return
+        tile = tile[yStart - y0:yEnd - y0, xStart - x0:xEnd - x0]
+        ySlice = slice(yStart, yEnd)
+        xSlice = slice(xStart, xEnd)
         mosaicSum[ySlice, xSlice] += tile
         mosaicCount[ySlice, xSlice][tile > 0] += 1
 

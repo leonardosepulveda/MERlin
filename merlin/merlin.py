@@ -351,12 +351,22 @@ def run_with_snakemake(
     name itself, to support its own `sacct`/`squeue --name`-based status
     polling, so this prefix is the only per-run customization the plugin
     exposes -- it does not vary per rule/fragment).
+
+    keep_going=True is set unconditionally so a failure in one job (e.g. a
+    bad fragment in Decode) doesn't stop snakemake from scheduling any
+    further new jobs: unrelated branches (segmentation, global alignment,
+    ...) keep running to completion, and only jobs actually downstream of
+    the failure are skipped. Without it, an error partway through an
+    unattended overnight run leaves every other branch untouched even
+    though nothing about them failed. The run still ends with a nonzero
+    exit/a reported failure, so a genuine error is not hidden -- it just no
+    longer stops healthy branches from finishing.
     """
     print('Running MERlin pipeline through snakemake')
     if snakemakeParameters:
         executorName = 'slurm'
         executionSettings = ExecutionSettings(
-            lock=False, latency_wait=10,
+            lock=False, latency_wait=10, keep_going=True,
             retries=snakemakeParameters.get('restart_times', 0))
         resourceSettings = ResourceSettings(
             cores=coreCount, nodes=snakemakeParameters.get('nodes'))
@@ -371,7 +381,8 @@ def run_with_snakemake(
             _SlurmDriverLogFilter(dataSet.get_snakemake_path()))
     else:
         executorName = 'local'
-        executionSettings = ExecutionSettings(lock=False, latency_wait=10)
+        executionSettings = ExecutionSettings(
+            lock=False, latency_wait=10, keep_going=True)
         resourceSettings = ResourceSettings(cores=coreCount)
         executorSettings = None
 

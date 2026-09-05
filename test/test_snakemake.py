@@ -23,7 +23,8 @@ def _run_snakefile_locally(snakefilePath):
         dagApi.execute_workflow(
             executor='local',
             execution_settings=ExecutionSettings(lock=False,
-                                                  latency_wait=10))
+                                                  latency_wait=10,
+                                                  keep_going=True))
 
 
 def test_run_single_task(simple_merfish_task):

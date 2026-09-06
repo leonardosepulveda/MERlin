@@ -33,7 +33,8 @@ class DataOrganization(object):
     """
 
     def __init__(self, dataSet, filePath: str = None,
-                 allowRaggedZStacks: bool = False):
+                 allowRaggedZStacks: bool = False,
+                 allowMissingChannels: bool = False):
         """
         Create a new DataOrganization for the data in the specified data set.
 
@@ -51,6 +52,14 @@ class DataOrganization(object):
                     get_z_positions) instead of raising InputDataError.
                     Defaults to False to preserve prior behavior for
                     datasets where every fov shares the same z range.
+            allowMissingChannels: if True, a data channel with no raw files
+                    on disk at all (e.g. an imaging round that hasn't been
+                    acquired yet) is tolerated instead of raising -- that
+                    channel is simply left unmapped, so any task that
+                    doesn't need it (e.g. segmenting on an already-acquired
+                    DAPI/polyT round before decode rounds exist) can still
+                    run. Defaults to False to preserve prior behavior of
+                    requiring every configured channel to be present.
         Raises:
             InputDataError: If the set of raw data is incomplete or the
                     format of the raw data deviates from expectations.
@@ -58,6 +67,7 @@ class DataOrganization(object):
 
         self._dataSet = dataSet
         self._allowRaggedZStacks = allowRaggedZStacks
+        self._allowMissingChannels = allowMissingChannels
         # caches the per-(imageType, imagingRound, fov) raw frame count so
         # repeated get_z_positions(fov) calls during analysis don't re-parse
         # the same file header multiple times
@@ -373,7 +383,21 @@ class DataOrganization(object):
                 # a channel with a single scalar zPos/frame has no z sweep
                 # and so does not constrain which z positions are available
                 continue
-            frameCount = self._get_fov_frame_count(dataChannel, fov)
+            try:
+                frameCount = self._get_fov_frame_count(dataChannel, fov)
+            except IndexError:
+                if not self._allowMissingChannels:
+                    raise
+                # this channel has no raw file mapped at all (see
+                # allowMissingChannels/_validate_file_map) -- it can't
+                # constrain which z positions are available for this fov,
+                # same as a channel with no z sweep above
+                warnings.warn(
+                    ('No raw file found for data channel {0}, fov {1}; '
+                     'excluding it from the available z positions for '
+                     'this fov since allowMissingChannels is enabled.')
+                    .format(dataChannel, fov))
+                continue
             availableZSets.append(set(zPosArray[frames < frameCount].tolist()))
 
         if not availableZSets:
@@ -516,11 +540,17 @@ class DataOrganization(object):
                             fileData.append(transformedName)
 
                 if not matchingFiles:
-                    raise dataset.DataFormatException(
-                        'Unable to identify image files matching regular '
-                        + 'expression %s for image type %s.'
-                        % (currentRegExp,
-                           currentType))
+                    if not self._allowMissingChannels:
+                        raise dataset.DataFormatException(
+                            'Unable to identify image files matching regular '
+                            + 'expression %s for image type %s.'
+                            % (currentRegExp,
+                               currentType))
+                    warnings.warn(
+                        ('No image files found matching regular expression '
+                         '{0} for image type {1}; leaving this image type '
+                         'unmapped since allowMissingChannels is enabled.')
+                        .format(currentRegExp, currentType))
             
             # drop duplicates to remove duplicate file names
             self.fileMap = pandas.DataFrame(fileData).drop_duplicates() 
@@ -554,10 +584,19 @@ class DataOrganization(object):
                         channelInfo['imageType'], fov,
                         channelInfo['imagingRound'])
                 except IndexError:
-                    raise FileNotFoundError(
-                        'Unable to find image path for %s, fov=%i, round=%i' %
-                        (channelInfo['imageType'], fov,
-                         channelInfo['imagingRound']))
+                    if not self._allowMissingChannels:
+                        raise FileNotFoundError(
+                            'Unable to find image path for %s, fov=%i, '
+                            'round=%i' %
+                            (channelInfo['imageType'], fov,
+                             channelInfo['imagingRound']))
+                    warnings.warn(
+                        ('Unable to find image path for {0}, fov={1}, '
+                         'round={2}; leaving this channel/fov unmapped '
+                         'since allowMissingChannels is enabled.')
+                        .format(channelInfo['imageType'], fov,
+                                channelInfo['imagingRound']))
+                    continue
 
                 if not self._dataSet.rawDataPortal.open_file(
                         imagePath).exists():

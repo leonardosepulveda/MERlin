@@ -196,3 +196,85 @@ def test_dataorganization_ragged_validate_file_map_tolerates_with_flag(
             allowRaggedZStacks=True)
 
     assert raggedData.get_data_organization().get_z_positions(1) == [0, 1]
+
+
+def test_dataorganization_missing_type_map_image_files_requires_flag(
+        merfish_files, tmp_path):
+    # test_data_organization_missing_type.csv is test_data_organization.csv
+    # plus one channel (bitMissingType) whose imageType/regex matches no
+    # raw file anywhere -- e.g. a decode round that hasn't been imaged yet
+    # at all. This is the earlier of the two gates a fully-unacquired
+    # channel can hit (_map_image_files, before a file map even exists).
+    with pytest.raises(dataset.DataFormatException):
+        dataset.MERFISHDataSet(
+            'merfish_test',
+            dataOrganizationName='test_data_organization_missing_type.csv',
+            codebookNames=['test_codebook.csv'],
+            positionFileName='test_positions.csv',
+            analysisHome=str(tmp_path / 'strict'),
+            microscopeParametersName='test_microscope_parameters.json',
+            allowMissingChannels=False)
+
+
+def test_dataorganization_missing_type_map_image_files_tolerates_with_flag(
+        merfish_files, tmp_path):
+    with pytest.warns(UserWarning):
+        missingTypeData = dataset.MERFISHDataSet(
+            'merfish_test',
+            dataOrganizationName='test_data_organization_missing_type.csv',
+            codebookNames=['test_codebook.csv'],
+            positionFileName='test_positions.csv',
+            analysisHome=str(tmp_path / 'lenient'),
+            microscopeParametersName='test_microscope_parameters.json',
+            allowMissingChannels=True)
+
+    dataOrg = missingTypeData.get_data_organization()
+    # the channel is still configured (allowMissingChannels only affects
+    # whether its raw files were mapped, not the channel list)
+    assert len(dataOrg.get_data_channels()) == 19
+    # an existing, actually-acquired channel is unaffected
+    assert list(dataOrg.get_z_positions(0)) == [0]
+    # actually requesting the unmapped channel's file still raises --
+    # allowMissingChannels defers the error to first use, it doesn't
+    # fabricate data for a channel that was never imaged
+    missingTypeIndex = dataOrg.get_data_channel_index('bitMissingType')
+    with pytest.raises(IndexError):
+        dataOrg.get_image_filename(missingTypeIndex, 0)
+
+
+def test_dataorganization_missing_round_validate_file_map_requires_flag(
+        merfish_files, tmp_path):
+    # test_data_organization_missing_channel.csv is test_data_organization.csv
+    # plus one channel (bitMissingRound) sharing a real imageType/regex with
+    # other channels, but whose specific imagingRound has no matching file
+    # for any fov. This is the later of the two gates a fully-unacquired
+    # channel can hit (_validate_file_map, once a file map already exists).
+    with pytest.raises(FileNotFoundError):
+        dataset.MERFISHDataSet(
+            'merfish_test',
+            dataOrganizationName='test_data_organization_missing_channel.csv',
+            codebookNames=['test_codebook.csv'],
+            positionFileName='test_positions.csv',
+            analysisHome=str(tmp_path / 'strict'),
+            microscopeParametersName='test_microscope_parameters.json',
+            allowMissingChannels=False)
+
+
+def test_dataorganization_missing_round_validate_file_map_tolerates_with_flag(
+        merfish_files, tmp_path):
+    with pytest.warns(UserWarning):
+        missingRoundData = dataset.MERFISHDataSet(
+            'merfish_test',
+            dataOrganizationName='test_data_organization_missing_channel.csv',
+            codebookNames=['test_codebook.csv'],
+            positionFileName='test_positions.csv',
+            analysisHome=str(tmp_path / 'lenient'),
+            microscopeParametersName='test_microscope_parameters.json',
+            allowMissingChannels=True)
+
+    dataOrg = missingRoundData.get_data_organization()
+    assert len(dataOrg.get_data_channels()) == 19
+    assert list(dataOrg.get_z_positions(0)) == [0]
+    missingRoundIndex = dataOrg.get_data_channel_index('bitMissingRound')
+    with pytest.raises(IndexError):
+        dataOrg.get_image_filename(missingRoundIndex, 0)

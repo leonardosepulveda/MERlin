@@ -34,7 +34,8 @@ class DataOrganization(object):
 
     def __init__(self, dataSet, filePath: str = None,
                  allowRaggedZStacks: bool = False,
-                 allowMissingChannels: bool = False):
+                 allowMissingChannels: bool = False,
+                 recalculateFileMap: bool = False):
         """
         Create a new DataOrganization for the data in the specified data set.
 
@@ -60,6 +61,15 @@ class DataOrganization(object):
                     DAPI/polyT round before decode rounds exist) can still
                     run. Defaults to False to preserve prior behavior of
                     requiring every configured channel to be present.
+            recalculateFileMap: if True, ignore any previously cached
+                    fileMap (see _map_image_files) and rebuild it from the
+                    raw data directory's current contents instead -- e.g.
+                    after running with allowMissingChannels against a
+                    partial experiment, then rerunning once the remaining
+                    rounds have been imaged, so the newly-arrived files are
+                    picked up rather than reusing the earlier, incomplete
+                    file map. Defaults to False to preserve prior behavior
+                    of reusing a cached file map when one exists.
         Raises:
             InputDataError: If the set of raw data is incomplete or the
                     format of the raw data deviates from expectations.
@@ -68,6 +78,7 @@ class DataOrganization(object):
         self._dataSet = dataSet
         self._allowRaggedZStacks = allowRaggedZStacks
         self._allowMissingChannels = allowMissingChannels
+        self._recalculateFileMap = recalculateFileMap
         # caches the per-(imageType, imagingRound, fov) raw frame count so
         # repeated get_z_positions(fov) calls during analysis don't re-parse
         # the same file header multiple times
@@ -488,12 +499,17 @@ class DataOrganization(object):
         # standard image types.
 
         try:
+            # recalculateFileMap forces this into the rebuild branch below
+            # instead of reusing a previously cached file map, as if none
+            # had been saved yet -- see recalculateFileMap's docstring.
+            if self._recalculateFileMap:
+                raise FileNotFoundError
             self.fileMap = self._dataSet.load_dataframe_from_csv('filemap')
             self.fileMap['imagePath'] = self.fileMap['imagePath'].apply(
                 self._truncate_file_path)
 
         except FileNotFoundError:
-        
+
             # this should now handle adding fiducial files
             # note that some may get added twice - remove them later
             uniqueTypes = []

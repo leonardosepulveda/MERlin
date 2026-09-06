@@ -92,6 +92,13 @@ def build_parser():
                         'disk at all, instead of raising an error (e.g. '
                         'running a segmentation-only analysis before the '
                         'decode rounds have been imaged)')
+    parser.add_argument('--recalculate-filemap', action='store_true',
+                        help='rebuild the cached map of raw data files '
+                        'instead of reusing a previously cached one, e.g. '
+                        'when rerunning against the full experiment after '
+                        'an earlier --allow-missing-channels run cached a '
+                        'file map missing the rounds that have since been '
+                        'imaged')
 
     return parser
 
@@ -162,6 +169,7 @@ def merlin():
         microscopeParametersName=_clean_string_arg(args.microscope_parameters),
         allowRaggedZStacks=args.allow_ragged_z_stacks,
         allowMissingChannels=args.allow_missing_channels,
+        recalculateFileMap=args.recalculate_filemap,
         figuresPath=_clean_string_arg(args.figures_path),
         analysisName=_clean_string_arg(args.analysis_name)
     )

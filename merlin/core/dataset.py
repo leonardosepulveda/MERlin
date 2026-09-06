@@ -1206,6 +1206,7 @@ class MERFISHDataSet(ImageDataSet):
                  microscopeParametersName: str = None,
                  allowRaggedZStacks: bool = False,
                  allowMissingChannels: bool = False,
+                 recalculateFileMap: bool = False,
                  figuresPath: str = None, analysisName: str = None):
         """Create a MERFISH dataset for the specified raw data.
 
@@ -1246,6 +1247,11 @@ class MERFISHDataSet(ImageDataSet):
                     on disk at all is tolerated instead of raising; see
                     DataOrganization. Defaults to False to preserve behavior
                     requiring every configured channel to be present.
+            recalculateFileMap: if True, rebuild the cached raw-file map
+                    from the data directory's current contents instead of
+                    reusing a previously cached one; see DataOrganization.
+                    Defaults to False to preserve behavior of reusing a
+                    cached file map when one exists.
             figuresPath: the directory to save per-task verification figures
                     into, used as-is. Defaults to analysisPath/figures.
             analysisName: the subdirectory name under analysisHome to store
@@ -1258,7 +1264,8 @@ class MERFISHDataSet(ImageDataSet):
         self.dataOrganization = dataorganization.DataOrganization(
                 self, dataOrganizationName,
                 allowRaggedZStacks=allowRaggedZStacks,
-                allowMissingChannels=allowMissingChannels)
+                allowMissingChannels=allowMissingChannels,
+                recalculateFileMap=recalculateFileMap)
         if codebookNames:
             self.codebooks = [codebook.Codebook(self, name, i)
                               for i, name in enumerate(codebookNames)]

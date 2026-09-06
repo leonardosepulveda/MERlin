@@ -1,7 +1,9 @@
 import os
+import shutil
 import numpy as np
 import pytest
 
+import merlin
 from merlin.core import dataset
 from merlin.data import dataorganization
 
@@ -278,3 +280,51 @@ def test_dataorganization_missing_round_validate_file_map_tolerates_with_flag(
     missingRoundIndex = dataOrg.get_data_channel_index('bitMissingRound')
     with pytest.raises(IndexError):
         dataOrg.get_image_filename(missingRoundIndex, 0)
+
+
+def test_dataorganization_recalculate_filemap_picks_up_new_files(
+        merfish_files, tmp_path):
+    # Simulates the two-phase workflow allowMissingChannels exists for:
+    # construct once while bitMissingType's round hasn't been imaged yet
+    # (caching a file map that doesn't cover it), "image" it by dropping a
+    # matching raw file into place, then confirm a plain rerun keeps
+    # reusing the stale cached file map while recalculateFileMap rebuilds
+    # it and picks up the new file.
+    analysisHome = str(tmp_path / 'recalc')
+    datasetKwargs = dict(
+        dataOrganizationName='test_data_organization_missing_type.csv',
+        codebookNames=['test_codebook.csv'],
+        positionFileName='test_positions.csv',
+        analysisHome=analysisHome,
+        microscopeParametersName='test_microscope_parameters.json')
+
+    with pytest.warns(UserWarning):
+        dataset.MERFISHDataSet(
+            'merfish_test', allowMissingChannels=True, **datasetKwargs)
+
+    merfishDataDirectory = os.path.join(merlin.DATA_HOME, 'merfish_test')
+    newFiles = [os.path.join(merfishDataDirectory, 'missingtype_0_97.tif'),
+               os.path.join(merfishDataDirectory, 'missingtype_1_97.tif')]
+    try:
+        for newFile in newFiles:
+            shutil.copy(
+                os.path.join(merfishDataDirectory, 'test_0_7.tif'), newFile)
+
+        # a plain rerun against the same analysisHome reuses the stale
+        # cached file map -- the newly "imaged" round still isn't seen
+        staleData = dataset.MERFISHDataSet('merfish_test', **datasetKwargs)
+        missingTypeIndex = staleData.get_data_organization()\
+            .get_data_channel_index('bitMissingType')
+        with pytest.raises(IndexError):
+            staleData.get_data_organization().get_image_filename(
+                missingTypeIndex, 0)
+
+        # recalculateFileMap rebuilds it, picking up the new file --
+        # allowMissingChannels is no longer even needed
+        freshData = dataset.MERFISHDataSet(
+            'merfish_test', recalculateFileMap=True, **datasetKwargs)
+        assert freshData.get_data_organization().get_image_filename(
+            missingTypeIndex, 0) == newFiles[0]
+    finally:
+        for newFile in newFiles:
+            os.remove(newFile)

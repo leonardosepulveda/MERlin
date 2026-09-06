@@ -47,6 +47,19 @@ def base_files():
              'test_data_organization_ragged.csv']))
     shutil.copyfile(
         os.sep.join(
+            [root, 'auxiliary_files',
+             'test_data_organization_missing_channel.csv']),
+        os.sep.join(
+            [merlin.DATA_ORGANIZATION_HOME,
+             'test_data_organization_missing_channel.csv']))
+    shutil.copyfile(
+        os.sep.join(
+            [root, 'auxiliary_files', 'test_data_organization_missing_type.csv']),
+        os.sep.join(
+            [merlin.DATA_ORGANIZATION_HOME,
+             'test_data_organization_missing_type.csv']))
+    shutil.copyfile(
+        os.sep.join(
             [root, 'auxiliary_files', 'test_codebook.csv']),
         os.sep.join(
             [merlin.CODEBOOK_HOME, 'test_codebook.csv']))

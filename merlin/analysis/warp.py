@@ -20,6 +20,15 @@ class Warp(analysistask.ParallelAnalysisTask):
     """
     An abstract class for warping a set of images so that the corresponding
     pixels align between images taken in different imaging rounds.
+
+    Parameters:
+        channels_to_process: an optional list of data channel names (see
+            get_data_channel_index) to restrict this task instance to --
+            e.g. just the segmentation channels, so it can run (with
+            allowMissingChannels) before the decode rounds are imaged. If
+            unset (the default), every data channel is processed, matching
+            prior behavior. Requesting the transformation for any other
+            channel from this task instance raises (see get_transformation).
     """
 
     def __init__(self, dataSet, parameters=None, analysisName=None):
@@ -41,7 +50,25 @@ class Warp(analysistask.ParallelAnalysisTask):
         if 'ignore_fiducial_correction' not in self.parameters: #ALWAYS leave this FALSE
             # only activate in special situation
             self.parameters['ignore_fiducial_correction'] = False
-            
+
+        if 'channels_to_process' not in self.parameters:
+            # None means every data channel, preserving prior behavior
+            self.parameters['channels_to_process'] = None
+
+    def _channels_to_process(self) -> List[int]:
+        """The data channel indices this warp task instance actually
+        computes/serves transformations for.
+
+        Resolved from the 'channels_to_process' parameter (a list of
+        channel names, matching the convention of seed_channel_name/
+        channel_1_name elsewhere) if set, otherwise every data channel --
+        so an instance with this left unset behaves exactly as before.
+        """
+        names = self.parameters['channels_to_process']
+        if names is None:
+            return list(self.dataSet.get_data_organization().get_data_channels())
+        return [self.dataSet.get_data_organization().get_data_channel_index(n)
+                for n in names]
 
     def get_aligned_image_set(
             self, fov: int,
@@ -128,7 +155,11 @@ class Warp(analysistask.ParallelAnalysisTask):
             fov: The fov that is being transformed.
         """
 
-        dataChannels = self.dataSet.get_data_organization().get_data_channels()
+        # restricted to the channels this task instance actually processed
+        # (see channels_to_process/_channels_to_process): transformationList
+        # is indexed by absolute channel id, so index into it rather than
+        # zipping positionally against this narrowed channel list.
+        dataChannels = self._channels_to_process()
 
         if self.parameters['write_aligned_images']:
             zPositions = self.dataSet.get_z_positions()
@@ -138,7 +169,8 @@ class Warp(analysistask.ParallelAnalysisTask):
 
             with self.dataSet.writer_for_analysis_images(
                     self, 'aligned_images', fov) as outputTif:
-                for t, x in zip(transformationList, dataChannels):
+                for x in dataChannels:
+                    t = transformationList[x]
                     for z in zPositions:
                         inputImage = self.dataSet.get_raw_image(x, fov, z)
                         transformedImage = transform.warp(
@@ -157,7 +189,8 @@ class Warp(analysistask.ParallelAnalysisTask):
 
             with self.dataSet.writer_for_analysis_images(
                     self, 'aligned_fiducial_images', fov) as outputTif:
-                for t, x in zip(transformationList, dataChannels):
+                for x in dataChannels:
+                    t = transformationList[x]
                     inputImage = self.dataSet.get_fiducial_image(x, fov)
                     transformedImage = transform.warp(
                             inputImage, t, preserve_range=True) \
@@ -206,6 +239,13 @@ class Warp(analysistask.ParallelAnalysisTask):
         transformationMatrices = [transform.SimilarityTransform(mat) for mat in transformationMatrices]
         
         if dataChannel is not None:
+            if dataChannel not in self._channels_to_process():
+                raise ValueError(
+                    ('Data channel {0} was not processed by warp task {1} '
+                     '(channels_to_process restricts it to {2}); its stored '
+                     'transformation is a placeholder, not a real alignment.')
+                    .format(dataChannel, self.analysisName,
+                            self._channels_to_process()))
             return transformationMatrices[dataChannel]
         else:
             return transformationMatrices
@@ -262,10 +302,9 @@ class FiducialCorrelationWarp(Warp):
 
     def get_estimated_time(self):
         # Uncalibrated -- no FiducialCorrelationWarp job's wall-clock time
-        # has been measured. One phase_cross_correlation call per data
-        # channel, run serially.
-        channelCount = len(
-            self.dataSet.get_data_organization().get_data_channels())
+        # has been measured. One phase_cross_correlation call per processed
+        # data channel (see channels_to_process), run serially.
+        channelCount = len(self._channels_to_process())
         return resourceestimate.estimate_stack_time_minutes(
             frameCount=channelCount, secondsPerFrame=3, baselineMinutes=2)
 
@@ -302,16 +341,32 @@ class FiducialCorrelationWarp(Warp):
     def _run_analysis(self, fragmentIndex: int):
         # TODO - this can be more efficient since some images should
         # use the same alignment if they are from the same imaging round
+
+        # restricted to channels_to_process when set, so this never touches
+        # a channel whose round hasn't been imaged yet -- the reference
+        # image is the first such channel rather than always absolute
+        # channel 0, since channel 0 may not be one of them (this is a
+        # no-op change when channels_to_process is unset, since that case
+        # still resolves to every channel starting at 0).
+        channels = self._channels_to_process()
         fixedImage = self._filter(
-            self.dataSet.get_fiducial_image(0, fragmentIndex))
+            self.dataSet.get_fiducial_image(channels[0], fragmentIndex))
         offsets = [registration.phase_cross_correlation(
             fixedImage,
             self._filter(self.dataSet.get_fiducial_image(x, fragmentIndex)),
-            upsample_factor = 100)[0] for x in
-
-                   self.dataSet.get_data_organization().get_data_channels()]
-        transformations = [transform.SimilarityTransform(
+            upsample_factor = 100)[0] for x in channels]
+        computedTransformations = [transform.SimilarityTransform(
             translation=[-x[1], -x[0]]) for x in offsets]
+
+        # transformations is indexed by absolute channel id (see
+        # get_transformation/_process_transformations), so channels not in
+        # channels_to_process get an identity placeholder that is never
+        # meant to be read -- get_transformation raises if one is requested.
+        allChannels = list(self.dataSet.get_data_organization().get_data_channels())
+        transformations = [transform.SimilarityTransform() for _ in allChannels]
+        for channel, t in zip(channels, computedTransformations):
+            transformations[channel] = t
+
         self._process_transformations(transformations, fragmentIndex)
 
     def _generate_verification_figures(self) -> None:
@@ -339,7 +394,17 @@ class FiducialCorrelationWarp3D(FiducialCorrelationWarp):
 
     def __init__(self, dataSet, parameters=None, analysisName=None):
         super().__init__(dataSet, parameters, analysisName)
-        
+
+        # unlike FiducialCorrelationWarp, this class's _run_analysis/
+        # get_transformation/get_aligned_image are all overridden below and
+        # never consult channels_to_process, so silently accepting it would
+        # let a caller believe channels are being restricted when they
+        # aren't.
+        if self.parameters['channels_to_process'] is not None:
+            raise NotImplementedError(
+                'channels_to_process is not supported by '
+                'FiducialCorrelationWarp3D.')
+
         if 'piezo_correction_filepath' not in self.parameters:
             self.parameters['piezo_correction_filepath'] = None
 

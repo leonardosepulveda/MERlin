@@ -145,7 +145,7 @@ footprint's centroid). One field is estimated per color (not per data
 channel), since vignetting is a fixed property of the microscope/objective/
 color; every data channel sharing a color reuses the same field. Reads raw
 frames directly, so it has no dependency on Warp/GlobalAlign. Consumption is
-opt-in: a task that wants FFC applied (e.g. GenerateMosaic's ffc\_task
+opt-in: a task that wants FFC applied (e.g. GenerateMosaicTile's ffc\_task
 parameter below) loads this task and calls get\_ffc\_field/
 get\_ffc\_field\_for\_channel on it.
 
@@ -156,30 +156,54 @@ Parameters:
 * normalize\_percentile -- The percentile of the smoothed field used to normalize it to a ~1.0 peak.
 * minimum\_value -- The floor value the normalized field is clipped to, to avoid near-zero divisors at the field's dim edges.
 
-generatemosaic.GenerateMosaic
+generatemosaic.GenerateMosaicTile
 -------------------------------
 
-Description: Assembles the images from each field of view into a mosaic. Each fov
+Description: Computes one fov's contribution to the mosaic, for every requested
+data channel at a single, fixed z index -- one Slurm fragment per fov. Each fov
 is placed using the configured global\_align\_task's fov position (so a corrected,
 non-regular fov grid, e.g. from LeastSquaresGlobalAlignment, is placed correctly),
 which must be a translation/scale alignment -- one with rotation or shear is not
-supported. GenerateMosaicSimple is a deprecated alias of this class kept for
-backward compatibility; it only changes the defaults below (fov\_crop\_width=100,
-output\_format="ome", downsample=1).
+supported. Each channel's tile is loaded already fiducial-warped (via
+warp\_task's own already-computed offsets -- no alignment is recomputed here),
+optionally further deconvolved/filtered (image\_source="preprocessed"),
+optionally flat-field corrected (ffc\_task, on by default -- see use\_ffc), and
+downsampled at each requested resolution; it is then trimmed to this fov's own
+non-overlapping region (the pixel-accurate midpoint to each present
+4-connected neighbour, so CombineMosaicTiles can place every fov directly with
+no blending). Each (fov, channel, downsample) tile is cached to disk before
+moving to the next one, so a fragment resubmitted after a timeout or failure
+resumes instead of recomputing already-finished tiles.
 
 Parameters:
 
-* microns\_per\_pixel -- The number of microns to correspond with a pixel in the mosaic. If set to "full_resolution", the mosaic is generated with the same resolution as the input images. Mutually exclusive with downsample.
-* downsample -- An integer (1 or an even number) multiple of the input images' native resolution to set the mosaic resolution. Mutually exclusive with microns\_per\_pixel.
-* data\_channels -- The names of the data channels to export, corresponding to the data organization. If not provided, all data channels are exported.
-* z\_indexes -- The z index to export. If not provided all z indexes are exported.
-* fov\_crop\_width -- The number of pixels to remove from each edge of each fov before inserting it into the mosaic.
-* draw\_fov\_labels -- Flag indicating if the fov index should be drawn on top of each fov in the mosaic
-* separate\_files -- If true, writes one tiff per data channel/z index instead of a single multi-page tiff. Forced true when output\_format is "ome".
-* output\_format -- Either "imagej" (default) for a single ImageJ-compatible tiff, or "ome" for one OME-tiff per data channel/z index.
+* global\_align\_task -- The name of the GlobalAlignment task providing each fov's position.
+* warp\_task -- The name of the Warp task providing each fov's fiducial-corrected images.
+* preprocess\_task -- The name of a Preprocess task; always a dependency, used to source tiles when image\_source is "preprocessed".
+* use\_ffc -- Whether to flat-field correct each tile (default true).
+* ffc\_task -- The name of a CreateFfc task; required and applied (per data channel color) before downsampling when use\_ffc is true, unused otherwise.
+* image\_source -- Either "raw" (default) to use warp\_task's fiducial-corrected image directly, or "preprocessed" to additionally deconvolve/filter it via preprocess\_task.
+* downsample -- A positive integer, or a list of them (e.g. [1, 2, 4]) to generate several resolutions of the same mosaic in one pass. Each factor must evenly divide the input images' pixel dimensions on both sides; 1 means the mosaic's native (full) resolution.
+* z\_index -- The single z index to generate the mosaic at.
+* data\_channels -- The names or indexes of the data channels to generate.
+* neighbor\_tolerance\_fraction -- Passed to the same 4-connected-neighbour detection RegisterFovNeighbors uses, to decide how far a candidate fov may sit from this fov's own local step size and still count as a true neighbour (default 0.25).
+
+generatemosaic.CombineMosaicTiles
+-------------------------------
+
+Description: Assembles the final mosaic tiff(s) from GenerateMosaicTile's
+cached, already-trimmed per-fov tiles. Every fov's tile occupies disjoint
+pixels in the canvas, so placing it is a direct array write, not a warp or a
+blend -- no image processing happens in this task, which is what makes it safe
+to leave serial even though GenerateMosaicTile itself is fully parallel.
+
+Parameters:
+
+* tile\_task -- The name of the GenerateMosaicTile task to assemble.
+* separate\_files -- If true, writes one tiff per data channel instead of a single multi-page tiff. Forced true when output\_format is "ome".
+* output\_format -- Either "imagej" (default) for a single ImageJ-compatible tiff, or "ome" for one OME-tiff per data channel.
 * write\_pyramidal\_tiff -- If true (requires output\_format="ome"), writes each mosaic as a pyramidal tiff with pyramidal\_levels subresolutions.
 * pyramidal\_levels -- The number of subresolution levels to write when write\_pyramidal\_tiff is true.
-* ffc\_task -- The name of a CreateFfc task. If provided, each fov's aligned image is flat-field corrected (per data channel color) before being placed into the mosaic. If not provided, no flat-field correction is applied.
 sequential.SumSignal
 -------------------------------
 

@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+import skimage.transform
 
 from merlin.analysis import createffc
 from merlin.analysis import generatemosaic
@@ -60,36 +61,42 @@ def test_apply_ffc_matches_manual_division():
     np.testing.assert_array_almost_equal(corrected, expected)
 
 
-def test_generatemosaic_get_ffc_field_none_without_ffc_task(simple_merfish_data):
-    task = generatemosaic.GenerateMosaic(
+def _mosaic_tile_parameters(**overrides):
+    parameters = {
+        'global_align_task': 'globalAlign', 'warp_task': 'warp',
+        'preprocess_task': 'preprocess', 'downsample': 2, 'z_index': 0,
+        'data_channels': ['bit1']}
+    parameters.update(overrides)
+    return parameters
+
+
+def test_generatemosaictile_requires_ffc_task(simple_merfish_data):
+    # use_ffc defaults to true, and ffc_task has no default -- so a config
+    # that omits ffc_task without explicitly opting out (use_ffc=False)
+    # must fail rather than silently skipping the correction.
+    task = generatemosaic.GenerateMosaicTile(
+        simple_merfish_data, parameters=_mosaic_tile_parameters())
+    with pytest.raises(KeyError):
+        task.get_dependencies()
+
+
+def test_generatemosaictile_use_ffc_false_skips_ffc_task_dependency(
+        simple_merfish_data):
+    # with use_ffc explicitly disabled, ffc_task is neither required nor a
+    # dependency
+    task = generatemosaic.GenerateMosaicTile(
         simple_merfish_data,
-        parameters={'global_align_task': 'globalAlign', 'warp_task': 'warp'})
-    assert task._get_ffc_field(0) is None
+        parameters=_mosaic_tile_parameters(use_ffc=False))
+    assert set(task.get_dependencies()) == {'globalAlign', 'warp', 'preprocess'}
 
 
-def test_generatemosaic_get_ffc_field_from_ffc_task(simple_merfish_data):
-    ffcTask = _run_ffc_task(simple_merfish_data, 'createFfcForMosaicLookup')
-
-    mosaicTask = generatemosaic.GenerateMosaic(
-        simple_merfish_data,
-        parameters={'global_align_task': 'globalAlign', 'warp_task': 'warp',
-                    'ffc_task': ffcTask.analysisName})
-
-    dataOrganization = simple_merfish_data.get_data_organization()
-    bit1 = dataOrganization.get_data_channel_index('bit1')
-    np.testing.assert_array_equal(
-        mosaicTask._get_ffc_field(bit1),
-        ffcTask.get_ffc_field_for_channel(bit1))
-
-
-def test_generatemosaic_load_tile_applies_ffc(simple_merfish_data):
+def test_generatemosaictile_load_tile_applies_ffc(simple_merfish_data):
     ffcTask = _run_ffc_task(
         simple_merfish_data, 'createFfcForMosaicLoadTile', minimum_value=0.5)
 
-    mosaicTask = generatemosaic.GenerateMosaic(
+    mosaicTask = generatemosaic.GenerateMosaicTile(
         simple_merfish_data,
-        parameters={'global_align_task': 'globalAlign', 'warp_task': 'warp',
-                    'ffc_task': ffcTask.analysisName, 'downsample': 1})
+        parameters=_mosaic_tile_parameters(ffc_task=ffcTask.analysisName))
 
     dataOrganization = simple_merfish_data.get_data_organization()
     bit1 = dataOrganization.get_data_channel_index('bit1')
@@ -102,9 +109,38 @@ def test_generatemosaic_load_tile_applies_ffc(simple_merfish_data):
             return rawTile
 
     mosaicTask.warpTask = FakeWarpTask()
-    tile = mosaicTask.load_tile(0, 0, bit1)
+    mosaicTask.ffcTask = ffcTask
+    tile = mosaicTask._load_tile(0, bit1, 2)
 
     field = ffcTask.get_ffc_field_for_channel(bit1)
-    expected = createffc.CreateFfc.apply_ffc(rawTile, field).astype(
-        rawTile.dtype)
-    np.testing.assert_array_equal(tile, expected)
+    expected = skimage.transform.resize(
+        createffc.CreateFfc.apply_ffc(rawTile, field),
+        mosaicTask.get_tile_shape(2), anti_aliasing=True,
+        preserve_range=True).astype(np.float32)
+    np.testing.assert_array_almost_equal(tile, expected)
+
+
+def test_generatemosaictile_use_ffc_false_skips_correction(simple_merfish_data):
+    mosaicTask = generatemosaic.GenerateMosaicTile(
+        simple_merfish_data,
+        parameters=_mosaic_tile_parameters(use_ffc=False))
+
+    dataOrganization = simple_merfish_data.get_data_organization()
+    bit1 = dataOrganization.get_data_channel_index('bit1')
+    imageDimensions = simple_merfish_data.get_image_dimensions()
+    rawTile = np.full(tuple(imageDimensions), 100, dtype=np.uint16)
+
+    class FakeWarpTask:
+        def get_aligned_image(self, fov, dataChannel, zIndex,
+                               chromaticCorrector=None):
+            return rawTile
+
+    mosaicTask.warpTask = FakeWarpTask()
+    # ffcTask is never loaded/consulted when use_ffc is false
+    mosaicTask.ffcTask = None
+    tile = mosaicTask._load_tile(0, bit1, 2)
+
+    expected = skimage.transform.resize(
+        rawTile.astype(np.float32), mosaicTask.get_tile_shape(2),
+        anti_aliasing=True, preserve_range=True).astype(np.float32)
+    np.testing.assert_array_almost_equal(tile, expected)

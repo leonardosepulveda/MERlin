@@ -161,7 +161,7 @@ def test_sumsignal_ragged_per_fov_z_index_raises_for_thin_fov(
 
 class _StubWarpTask:
     """A minimal stand-in for a Warp task's get_aligned_image, used to test
-    GenerateMosaicSimple.load_tile's zero-fill gate without needing a real
+    GenerateMosaicTile._load_tile's zero-fill gate without needing a real
     warp task or raw images."""
 
     def __init__(self, imageShape):
@@ -173,27 +173,44 @@ class _StubWarpTask:
         return np.full(self.imageShape, 100, dtype=np.uint16)
 
 
-def test_generatemosaic_ragged_zero_fill(ragged_merfish_data):
-    task = generatemosaic.GenerateMosaicSimple(
+class _StubFfcTask:
+    """A no-op flat-field correction (a field of all ones), so _load_tile's
+    ffc step doesn't change the stub image's values."""
+
+    def __init__(self, imageShape):
+        self.field = np.ones(imageShape, dtype=np.float32)
+
+    def get_ffc_field_for_channel(self, dataChannel):
+        return self.field
+
+
+def test_generatemosaictile_ragged_zero_fill(ragged_merfish_data):
+    task = generatemosaic.GenerateMosaicTile(
         ragged_merfish_data,
-        parameters={'warp_task': 'raggedWarp', 'global_align_task': 'raggedGlobalAlign',
-                    'downsample': 1, 'fov_crop_width': 0},
-        analysisName='raggedMosaic')
-    stub = _StubWarpTask(ragged_merfish_data.get_image_dimensions())
+        parameters={'warp_task': 'raggedWarp',
+                    'global_align_task': 'raggedGlobalAlign',
+                    'preprocess_task': 'raggedPreprocess',
+                    'downsample': 2, 'z_index': 3, 'data_channels': ['bit1']},
+        analysisName='raggedMosaicTile')
+    imageShape = ragged_merfish_data.get_image_dimensions()
+    stub = _StubWarpTask(imageShape)
     task.warpTask = stub
+    task.ffcTask = _StubFfcTask(imageShape)
+    bit1 = ragged_merfish_data.get_data_organization().get_data_channel_index('bit1')
 
     # fov 0 has z-index 3 available -- the stub's real (non-zero) image is
     # used, and get_aligned_image is actually called
-    tile = task.load_tile(0, 3, 0)
+    tile = task._load_tile(0, bit1, 2)
     assert np.any(tile > 0)
-    assert stub.calls == [(0, 0, 3)]
+    assert stub.calls == [(0, bit1, 3)]
 
     # fov 1 only has z=[0,1] -- z-index 3 is beyond its depth, so a blank
-    # tile of the correct shape is returned WITHOUT calling get_aligned_image
+    # tile of the correct (downsampled) shape is returned WITHOUT calling
+    # get_aligned_image
     stub.calls = []
-    tile = task.load_tile(1, 3, 0)
+    tile = task._load_tile(1, bit1, 2)
     assert np.all(tile == 0)
-    assert tile.shape == tuple(ragged_merfish_data.get_image_dimensions())
+    assert tile.shape == task.get_tile_shape(2)
     assert stub.calls == []
 
 

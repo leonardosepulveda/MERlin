@@ -57,11 +57,27 @@
             "module": "merlin.analysis.globalalign"
         },
         {
-            "task": "GenerateMosaic",
+            "task": "CreateFfc",
+            "module": "merlin.analysis.createffc"
+        },
+        {
+            "task": "GenerateMosaicTile",
             "module": "merlin.analysis.generatemosaic",
             "parameters": {
                 "global_align_task": "SimpleGlobalAlignment",
-                "warp_task": "FiducialCorrelationWarp"
+                "warp_task": "FiducialCorrelationWarp",
+                "preprocess_task": "DeconvolutionPreprocess",
+                "ffc_task": "CreateFfc",
+                "downsample": [1, 2],
+                "z_index": 0,
+                "data_channels": ["bit1", "bit2"]
+            }
+        },
+        {
+            "task": "CombineMosaicTiles",
+            "module": "merlin.analysis.generatemosaic",
+            "parameters": {
+                "tile_task": "GenerateMosaicTile"
             }
         },
         {

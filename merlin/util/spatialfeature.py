@@ -724,6 +724,67 @@ class HDF5SpatialFeatureDB(SpatialFeatureDB):
 
         return featureIds, boundaryList
 
+    def read_feature_boundaries_at_own_z(
+            self, fov: int) -> List[List[geometry.Polygon]]:
+        """Read each feature's boundary polygons at its own single most
+        representative z-index -- the middle of that feature's own
+        occupied (non-empty) z-planes -- rather than one fixed z-index
+        shared by every feature in the fov.
+
+        Needed because segmentation here is effectively per-z-plane: most
+        cells occupy only a handful of a fov's z-planes, not clustered at
+        the fov-wide geometric middle read_feature_boundaries_at_z() uses,
+        so a single shared z-index can silently miss most cells (see
+        FINDINGS.md's SegmentationBoundaryPlot coverage bug). Determining
+        occupancy only checks each zIndex_<i> group's key count (cheap
+        HDF5 metadata, same as num_z at write time), never loading a
+        group's actual coordinates until its z is the chosen one -- so
+        this costs about the same per feature as
+        read_feature_boundaries_at_z(), not the ~num_z multiple
+        read_features() would.
+
+        Unlike read_feature_boundaries_at_z()/read_feature_ids_and_
+        boundaries_at_z(), this always requires a specific fov (no
+        fov=None dataset-wide convenience) -- the whole point is to let a
+        caller stream one fov at a time instead of holding every fov's
+        boundaries in memory together (see
+        SegmentationBoundaryPlot._generate_plot()).
+
+        Args:
+            fov: the fov to read boundaries for.
+        Returns: one list of polygons per feature (that feature's own
+            chosen zIndex's boundaries). A feature with no occupied
+            z-plane at all is skipped.
+        """
+        boundaryList: List[List[geometry.Polygon]] = []
+        try:
+            with self._dataSet.open_hdf5_file('r', 'feature_data',
+                                              self._analysisTask, fov,
+                                              'features') as f:
+                featureGroup = f.require_group('featuredata')
+                for k in featureGroup.keys():
+                    featG = featureGroup[k]
+                    zNames = sorted(
+                        (name for name in featG.keys()
+                         if name.startswith('zIndex_')),
+                        key=lambda name: int(name.split('_')[1]))
+                    occupied = [name for name in zNames
+                               if len([x for x in featG[name].keys()
+                                      if x[:2] == 'p_']) > 0]
+                    if not occupied:
+                        continue
+                    chosenGroup = featG[occupied[len(occupied) // 2]]
+                    pCount = len([x for x in chosenGroup.keys()
+                                 if x[:2] == 'p_'])
+                    boundaryList.append([
+                        self._load_geometry_from_hdf5_group(
+                            chosenGroup['p_' + str(p)])
+                        for p in range(pCount)])
+        except FileNotFoundError:
+            pass
+
+        return boundaryList
+
     def empty_database(self, fov: int = None) -> None:
         if fov is None:
             for f in self._dataSet.get_fovs():

@@ -216,6 +216,40 @@ def test_feature_hdf5_db_read_ids_and_boundaries_at_z_matches_read_features(
     assert emptyBoundaries == []
 
 
+def test_feature_hdf5_db_read_boundaries_at_own_z_picks_own_occupied_z(
+        single_task, simple_merfish_data):
+    """read_feature_boundaries_at_own_z() (used by SegmentationBoundaryPlot
+    to stream one fov at a time) must pick each feature's own middle
+    *occupied* z-plane, not a single z-index shared across every feature --
+    a feature whose occupied z-planes don't include the dataset-wide middle
+    index (the one read_feature_boundaries_at_z() would use) must still be
+    found and read at its own z. A feature with no occupied z-plane at all
+    must be skipped rather than erroring.
+    """
+    featureOwnZ = spatialfeature.SpatialFeature(
+        [[], [geometry.Polygon(testCoords1)], [],
+         [geometry.Polygon(testCoords2)], [geometry.Polygon(testCoords2)]],
+        0, zCoordinates=np.array([0, 0.25, 0.5, 0.75, 1.0]))
+    featureNoOccupiedZ = spatialfeature.SpatialFeature([[], []], 1)
+
+    featureDB = spatialfeature.HDF5SpatialFeatureDB(
+        simple_merfish_data, single_task)
+    featureDB.write_features([featureOwnZ, featureNoOccupiedZ], fov=0)
+
+    result = featureDB.read_feature_boundaries_at_own_z(fov=0)
+
+    # featureOwnZ's occupied z-planes are [1, 3, 4] (0-indexed) -- the
+    # middle of that list is z=3, not z=2 (the dataset-wide middle of all
+    # 5 z-planes, which is empty for this feature and would have hidden it
+    # entirely under the old shared-z approach).
+    assert len(result) == 1
+    assert len(result[0]) == 1
+    assert result[0][0].equals(geometry.Polygon(testCoords2))
+
+    featureDB.empty_database(0)
+    assert featureDB.read_feature_boundaries_at_own_z(fov=0) == []
+
+
 def test_feature_contained_within_boundary():
     interiorLabels = np.zeros((1, 8, 8))
     interiorLabels[0, 2:6, 2:6] = 1

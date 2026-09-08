@@ -1,0 +1,112 @@
+digraph merlin_pipeline_flow {
+  rankdir=LR;
+  fontname="Helvetica";
+  labelloc="t";
+  fontsize=16;
+  label="MERlin analysis pipeline -- BC555_sample_05 / epi  (merlin_analysis_BC555_sample_05.yaml)";
+  nodesep=0.35;
+  ranksep=0.7;
+  node [fontname="Helvetica", shape=box, style="filled,rounded", fontsize=11, margin="0.15,0.08"];
+  edge [fontname="Helvetica", fontsize=9, color="#777777", arrowsize=0.7];
+
+  // -- colors by pipeline stage (no cluster boxes -- clusters fight the
+  // rank layout when a stage's tasks sit at different pipeline depths) --
+  FiducialCorrelationWarp   [label="FiducialCorrelationWarp\n(warp)", fillcolor="#aec6e8"];
+  LeastSquaresGlobalAlignment [label="LeastSquaresGlobalAlignment\n(globalalign)", fillcolor="#aec6e8"];
+  RegisterFovNeighbors [label="RegisterFovNeighbors\n(default parameter --\nnot listed in this file)", fillcolor="#ffffff", style="filled,rounded,dashed"];
+
+  DeconvolutionPreprocess [label="DeconvolutionPreprocess\n(preprocess)", fillcolor="#a9d8a9"];
+  OptimizeChain [label="OptimizeIteration x10\n(Optimize01 -> ... -> Optimize10,\nchained, random_seed 1-10)", fillcolor="#a9d8a9"];
+  Decode [label="Decode\n(decode)", fillcolor="#a9d8a9"];
+
+  GenerateAdaptiveThreshold [label="GenerateAdaptiveThreshold\n(filterbarcodes)", fillcolor="#f0cf8e"];
+  AdaptiveFilterBarcodes [label="AdaptiveFilterBarcodes\n(filterbarcodes)", fillcolor="#f0cf8e"];
+
+  CellPoseSegmentSAM [label="CellPoseSegmentSAM\n(segment)", fillcolor="#d3a3ca"];
+  CleanCellBoundaries [label="CleanCellBoundaries\n(segment)", fillcolor="#d3a3ca"];
+  CombineCleanedBoundaries [label="CombineCleanedBoundaries\n(segment)", fillcolor="#d3a3ca"];
+  RefineCellDatabases [label="RefineCellDatabases\n(segment)", fillcolor="#d3a3ca"];
+  ExportCellMetadata [label="ExportCellMetadata\n(segment)", fillcolor="#d3a3ca"];
+
+  PartitionBarcodes [label="PartitionBarcodes\n(partition)", fillcolor="#8fc2c9"];
+  ExportPartitionedBarcodes [label="ExportPartitionedBarcodes\n(partition)", fillcolor="#8fc2c9"];
+
+  SmfishSignal [label="SmfishSignal\n(sequential)", fillcolor="#d69a9a"];
+  SumSignal [label="SumSignal\n(sequential)", fillcolor="#d69a9a"];
+  ExportSumSignals [label="ExportSumSignals\n(sequential)", fillcolor="#d69a9a"];
+
+  ExportBarcodes [label="ExportBarcodes\n(exportbarcodes)", fillcolor="#c9c9c9"];
+  GenerateMosaic [label="GenerateMosaic\n(generatemosaic, legacy --\nsuperseded by GenerateMosaicTile\n+ CombineMosaicTiles)", fillcolor="#ffffff", style="filled,rounded,dashed"];
+  PlotPerformance [label="PlotPerformance\n(plotperformance)", fillcolor="#c9c9c9"];
+  SlurmReport [label="SlurmReport\n(slurmreport)", fillcolor="#c9c9c9"];
+
+  // -- alignment / decode --
+  FiducialCorrelationWarp -> DeconvolutionPreprocess;
+  FiducialCorrelationWarp -> OptimizeChain;
+  DeconvolutionPreprocess -> OptimizeChain;
+  DeconvolutionPreprocess -> Decode;
+  OptimizeChain -> Decode [label="Optimize10"];
+  LeastSquaresGlobalAlignment -> Decode;
+  RegisterFovNeighbors -> LeastSquaresGlobalAlignment [style=dashed];
+
+  // -- mosaic (legacy) --
+  FiducialCorrelationWarp -> GenerateMosaic [style=dashed];
+  LeastSquaresGlobalAlignment -> GenerateMosaic [style=dashed];
+
+  // -- filtering --
+  Decode -> GenerateAdaptiveThreshold [label="run_after_task"];
+  Decode -> AdaptiveFilterBarcodes;
+  GenerateAdaptiveThreshold -> AdaptiveFilterBarcodes;
+
+  // -- export / QC --
+  AdaptiveFilterBarcodes -> ExportBarcodes;
+  ExportBarcodes -> SlurmReport [label="run_after_task"];
+  DeconvolutionPreprocess -> PlotPerformance [style=dotted];
+  OptimizeChain -> PlotPerformance [style=dotted];
+  Decode -> PlotPerformance [style=dotted];
+  AdaptiveFilterBarcodes -> PlotPerformance [style=dotted];
+
+  // -- segmentation --
+  FiducialCorrelationWarp -> CellPoseSegmentSAM;
+  LeastSquaresGlobalAlignment -> CellPoseSegmentSAM;
+  CellPoseSegmentSAM -> CleanCellBoundaries;
+  LeastSquaresGlobalAlignment -> CleanCellBoundaries;
+  CleanCellBoundaries -> CombineCleanedBoundaries;
+  CellPoseSegmentSAM -> RefineCellDatabases;
+  CombineCleanedBoundaries -> RefineCellDatabases;
+  RefineCellDatabases -> ExportCellMetadata;
+
+  // -- partitioning --
+  AdaptiveFilterBarcodes -> PartitionBarcodes;
+  RefineCellDatabases -> PartitionBarcodes;
+  LeastSquaresGlobalAlignment -> PartitionBarcodes;
+  PartitionBarcodes -> ExportPartitionedBarcodes;
+
+  // -- sequential / smFISH --
+  FiducialCorrelationWarp -> SmfishSignal;
+  LeastSquaresGlobalAlignment -> SmfishSignal;
+  RefineCellDatabases -> SmfishSignal;
+  FiducialCorrelationWarp -> SumSignal;
+  LeastSquaresGlobalAlignment -> SumSignal;
+  RefineCellDatabases -> SumSignal;
+  SumSignal -> ExportSumSignals;
+
+  // -- legend (color key, not part of the dependency graph) --
+  subgraph cluster_legend {
+    label="Legend";
+    style=filled; color="#dddddd"; fillcolor="#ffffff"; fontsize=10;
+    labeljust=l;
+    node [shape=box, style=filled, fontsize=9, width=1.8, height=0.28, fixedsize=true];
+    key_align      [label="alignment", fillcolor="#aec6e8"];
+    key_decode     [label="preprocessing / decoding", fillcolor="#a9d8a9"];
+    key_filter     [label="barcode filtering", fillcolor="#f0cf8e"];
+    key_segment    [label="cell segmentation", fillcolor="#d3a3ca"];
+    key_partition  [label="cell x barcode partitioning", fillcolor="#8fc2c9"];
+    key_sequential [label="sequential / smFISH signal", fillcolor="#d69a9a"];
+    key_export     [label="export & QC", fillcolor="#c9c9c9"];
+    key_solid      [label="-> snakemake dependency", shape=plaintext, fillcolor="#ffffff", width=2.2];
+    key_dotted     [label="..> parameter read only, not\na snakemake DAG edge", shape=plaintext, fillcolor="#ffffff", width=2.2];
+    key_dashed     [label="- -> default param. / legacy class,\nnot declared in this file", shape=plaintext, fillcolor="#ffffff", width=2.2];
+    key_align -> key_decode -> key_filter -> key_segment -> key_partition -> key_sequential -> key_export -> key_solid -> key_dotted -> key_dashed [style=invis];
+  }
+}

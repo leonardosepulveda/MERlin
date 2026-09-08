@@ -11,6 +11,7 @@ MERlin
 
     installation
     usage
+    pipeline
     tasks
     contributing
     api

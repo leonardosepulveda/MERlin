@@ -282,6 +282,55 @@ def test_dataorganization_missing_round_validate_file_map_tolerates_with_flag(
         dataOrg.get_image_filename(missingRoundIndex, 0)
 
 
+def test_dataorganization_corrupt_file_validate_file_map_requires_flag(
+        corrupt_merfish_files, tmp_path):
+    # test_0_0.tif (bit1, fov 0) exists and resolves to a real path, but
+    # its content isn't a valid tiff (see corrupt_merfish_files) -- this is
+    # the third gate: a channel/fov that passes _get_image_path and the
+    # .exists() check but fails when _validate_file_map actually opens it
+    # to read its image_stack_size, e.g. because the raw file is still
+    # being written by the acquisition software.
+    with pytest.raises(dataorganization.InputDataError):
+        dataset.MERFISHDataSet(
+            'corrupt_merfish_test',
+            dataOrganizationName='test_data_organization.csv',
+            codebookNames=['test_codebook.csv'],
+            positionFileName='test_positions.csv',
+            analysisHome=str(tmp_path / 'strict'),
+            microscopeParametersName='test_microscope_parameters.json',
+            allowMissingChannels=False)
+
+
+def test_dataorganization_corrupt_file_validate_file_map_tolerates_with_flag(
+        corrupt_merfish_files, tmp_path):
+    with pytest.warns(UserWarning):
+        corruptData = dataset.MERFISHDataSet(
+            'corrupt_merfish_test',
+            dataOrganizationName='test_data_organization.csv',
+            codebookNames=['test_codebook.csv'],
+            positionFileName='test_positions.csv',
+            analysisHome=str(tmp_path / 'lenient'),
+            microscopeParametersName='test_microscope_parameters.json',
+            allowMissingChannels=True)
+
+    dataOrg = corruptData.get_data_organization()
+    assert len(dataOrg.get_data_channels()) == 18
+    # an unaffected fov for the same channel, and other channels/fovs
+    # entirely, are unaffected
+    assert list(dataOrg.get_z_positions(1)) == [0]
+    # unlike the missing-channel/missing-round cases, the corrupt file does
+    # exist and its path is still resolvable -- allowMissingChannels only
+    # skips validating it, it doesn't remove it from the file map
+    bit1Index = dataOrg.get_data_channel_index('bit1')
+    imagePath = dataOrg.get_image_filename(bit1Index, 0)
+    assert os.path.basename(imagePath) == 'test_0_0.tif'
+    # but actually reading it still fails -- allowMissingChannels defers
+    # the error to first use, it doesn't fabricate a frame count for a
+    # file that was never successfully read
+    with pytest.raises(Exception):
+        corruptData.image_stack_size(imagePath)
+
+
 def test_dataorganization_recalculate_filemap_picks_up_new_files(
         merfish_files, tmp_path):
     # Simulates the two-phase workflow allowMissingChannels exists for:

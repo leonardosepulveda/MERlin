@@ -264,7 +264,10 @@ def test_dataorganization_missing_round_validate_file_map_requires_flag(
 
 def test_dataorganization_missing_round_validate_file_map_tolerates_with_flag(
         merfish_files, tmp_path):
-    with pytest.warns(UserWarning):
+    # bitMissingRound's raw file is absent for both fovs -- confirm that's
+    # reported as a single aggregated warning (see _validate_file_map),
+    # not one warning per (data channel, fov) combination.
+    with pytest.warns(UserWarning) as recorded:
         missingRoundData = dataset.MERFISHDataSet(
             'merfish_test',
             dataOrganizationName='test_data_organization_missing_channel.csv',
@@ -273,6 +276,8 @@ def test_dataorganization_missing_round_validate_file_map_tolerates_with_flag(
             analysisHome=str(tmp_path / 'lenient'),
             microscopeParametersName='test_microscope_parameters.json',
             allowMissingChannels=True)
+    assert len(recorded) == 1
+    assert '2' in str(recorded[0].message)
 
     dataOrg = missingRoundData.get_data_organization()
     assert len(dataOrg.get_data_channels()) == 19

@@ -55,7 +55,9 @@ class DataOrganization(object):
                     datasets where every fov shares the same z range.
             allowMissingChannels: if True, a data channel with no raw files
                     on disk at all (e.g. an imaging round that hasn't been
-                    acquired yet) is tolerated instead of raising -- that
+                    acquired yet), or whose raw file exists but isn't yet
+                    readable (e.g. still being written by the acquisition
+                    software), is tolerated instead of raising -- that
                     channel is simply left unmapped, so any task that
                     doesn't need it (e.g. segmenting on an already-acquired
                     DAPI/polyT round before decode rounds exist) can still
@@ -624,10 +626,17 @@ class DataOrganization(object):
                 try:
                     imageSize = self._dataSet.image_stack_size(imagePath)
                 except Exception as e:
-                    raise InputDataError(
-                        ('Unable to determine image stack size for fov {0} from'
-                         ' data channel {1} at {2}')
+                    if not self._allowMissingChannels:
+                        raise InputDataError(
+                            ('Unable to determine image stack size for fov {0} from'
+                             ' data channel {1} at {2}')
+                            .format(dataChannel, fov, imagePath))
+                    warnings.warn(
+                        ('Unable to determine image stack size for fov {0} from '
+                         'data channel {1} at {2}; leaving this channel/fov '
+                         'unmapped since allowMissingChannels is enabled.')
                         .format(dataChannel, fov, imagePath))
+                    continue
 
                 # share this frame count with get_z_positions(fov)/
                 # get_z_positions_segmentation(fov) so they don't need to

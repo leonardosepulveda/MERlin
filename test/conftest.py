@@ -21,6 +21,8 @@ dataDirectory = os.sep.join([merlin.DATA_HOME, 'test'])
 merfishDataDirectory = os.sep.join([merlin.DATA_HOME, 'merfish_test'])
 raggedMerfishDataDirectory = os.sep.join(
     [merlin.DATA_HOME, 'ragged_merfish_test'])
+corruptMerfishDataDirectory = os.sep.join(
+    [merlin.DATA_HOME, 'corrupt_merfish_test'])
 
 
 @pytest.fixture(scope='session')
@@ -118,6 +120,29 @@ def merfish_files(base_files):
     yield
 
     shutil.rmtree(merfishDataDirectory)
+
+
+@pytest.fixture(scope='session')
+def corrupt_merfish_files(base_files):
+    # a copy of merfish_files' raw data, but with bit1/fov0's raw file
+    # (test_0_0.tif) replaced by garbage bytes -- simulates a raw file that
+    # exists on disk (path resolution and the .exists() check both succeed)
+    # but can't actually be opened, e.g. one still being written by the
+    # acquisition software.
+    os.mkdir(corruptMerfishDataDirectory)
+
+    for imageFile in glob.iglob(
+            os.sep.join([root, 'auxiliary_files', '*.tif'])):
+        if os.path.isfile(imageFile):
+            shutil.copy(imageFile, corruptMerfishDataDirectory)
+
+    with open(os.sep.join([corruptMerfishDataDirectory, 'test_0_0.tif']),
+              'wb') as f:
+        f.write(b'not a real tiff file')
+
+    yield
+
+    shutil.rmtree(corruptMerfishDataDirectory)
 
 
 @pytest.fixture(scope='session')

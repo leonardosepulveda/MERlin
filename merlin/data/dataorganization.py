@@ -593,6 +593,15 @@ class DataOrganization(object):
                     format of the raw data deviates from expectations.
         """
 
+        # allowMissingChannels can tolerate this on every (dataChannel, fov)
+        # combination in the experiment, e.g. while most decode rounds
+        # haven't been acquired yet -- warning once per combination would
+        # print thousands of near-identical lines for a real, many-fov
+        # experiment. Collect them here and warn once per gate, below,
+        # instead.
+        missingPathSkips = []
+        unreadableSkips = []
+
         expectedImageSize = None
         for dataChannel in self.get_data_channels():
             for fov in self.get_fovs():
@@ -608,12 +617,7 @@ class DataOrganization(object):
                             'round=%i' %
                             (channelInfo['imageType'], fov,
                              channelInfo['imagingRound']))
-                    warnings.warn(
-                        ('Unable to find image path for {0}, fov={1}, '
-                         'round={2}; leaving this channel/fov unmapped '
-                         'since allowMissingChannels is enabled.')
-                        .format(channelInfo['imageType'], fov,
-                                channelInfo['imagingRound']))
+                    missingPathSkips.append((dataChannel, fov))
                     continue
 
                 if not self._dataSet.rawDataPortal.open_file(
@@ -631,11 +635,7 @@ class DataOrganization(object):
                             ('Unable to determine image stack size for fov {0} from'
                              ' data channel {1} at {2}')
                             .format(dataChannel, fov, imagePath))
-                    warnings.warn(
-                        ('Unable to determine image stack size for fov {0} from '
-                         'data channel {1} at {2}; leaving this channel/fov '
-                         'unmapped since allowMissingChannels is enabled.')
-                        .format(dataChannel, fov, imagePath))
+                    unreadableSkips.append((dataChannel, fov))
                     continue
 
                 # share this frame count with get_z_positions(fov)/
@@ -678,3 +678,19 @@ class DataOrganization(object):
                             .format(dataChannel, fov, expectedImageSize[0],
                                     expectedImageSize[1], imageSize[0],
                                     imageSize[1], imagePath))
+
+        if missingPathSkips:
+            skippedChannels = sorted({c for c, _ in missingPathSkips})
+            warnings.warn(
+                ('No raw file found for {0} (data channel, fov) '
+                 'combination(s) across data channel(s) {1}; leaving them '
+                 'unmapped since allowMissingChannels is enabled.')
+                .format(len(missingPathSkips), skippedChannels))
+        if unreadableSkips:
+            skippedChannels = sorted({c for c, _ in unreadableSkips})
+            warnings.warn(
+                ('Unable to determine image stack size for {0} (data '
+                 'channel, fov) combination(s) across data channel(s) {1}; '
+                 'leaving them unmapped since allowMissingChannels is '
+                 'enabled.')
+                .format(len(unreadableSkips), skippedChannels))

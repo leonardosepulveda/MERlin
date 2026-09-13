@@ -90,8 +90,8 @@ def generate_drift_qc(warpTask) -> None:
     fig.colorbar(sc, ax=ax[0], label='data channel', fraction=0.046, pad=0.04)
 
     # (2) histogram of shift distance over [0, distanceMax], median marked.
-    binSize = 5
-    bins = np.arange(0, distanceMax + binSize, binSize)
+    nBins = 100
+    bins = np.linspace(0, distanceMax, nBins + 1)
     inRange = driftDF['distance'][driftDF['distance'] <= distanceMax]
     nOverMax = int((driftDF['distance'] > distanceMax).sum())
     ax[1].hist(inRange, bins=bins, color='slategray', edgecolor='white', lw=0.4)

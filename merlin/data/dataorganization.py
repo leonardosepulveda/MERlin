@@ -411,6 +411,21 @@ class DataOrganization(object):
                      'this fov since allowMissingChannels is enabled.')
                     .format(dataChannel, fov))
                 continue
+            except InputDataError:
+                if not self._allowMissingChannels:
+                    raise
+                # the raw file exists but couldn't be read (see
+                # allowMissingChannels/_validate_file_map) -- most commonly
+                # because it hasn't finished being written yet. Same
+                # tolerance as a missing file: exclude it rather than
+                # constrain this fov's available z positions on it.
+                warnings.warn(
+                    ('Unable to read raw file for data channel {0}, fov {1} '
+                     '(it may not have finished being written yet); '
+                     'excluding it from the available z positions for '
+                     'this fov since allowMissingChannels is enabled.')
+                    .format(dataChannel, fov))
+                continue
             availableZSets.append(set(zPosArray[frames < frameCount].tolist()))
 
         if not availableZSets:

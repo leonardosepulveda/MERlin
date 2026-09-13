@@ -172,6 +172,58 @@ def test_dataorganization_ragged_get_z_positions_segmentation_per_fov(
     assert dataOrg.get_z_positions_segmentation(3) == [0, 1]
 
 
+def test_dataorganization_ragged_corrupt_file_get_z_positions_tolerates_with_flag(
+        corrupt_ragged_merfish_files, tmp_path):
+    # fov1/round1's raw file (bit3/bit4) is unreadable -- see
+    # corrupt_ragged_merfish_files. allowRaggedZStacks is also needed since
+    # every other fov/round in this fixture has its usual real truncations
+    # (see the uncorrupted ragged tests above).
+    with pytest.warns(UserWarning):
+        corruptData = dataset.MERFISHDataSet(
+            'corrupt_ragged_merfish_test',
+            dataOrganizationName='test_data_organization_ragged.csv',
+            codebookNames=['test_codebook_ragged.csv'],
+            positionFileName='test_positions_ragged.csv',
+            analysisHome=str(tmp_path / 'lenient'),
+            microscopeParametersName='test_microscope_parameters.json',
+            allowMissingChannels=True,
+            allowRaggedZStacks=True)
+
+    dataOrg = corruptData.get_data_organization()
+    # constructing the dataset only warned and deferred -- the corrupt
+    # (fov=1, round=1) combination is still unread at this point, so
+    # get_z_positions(1) below is what actually exercises _get_fov_frame_count
+    # hitting the unreadable file for the first time.
+    with pytest.warns(UserWarning):
+        # bit3/bit4 (round 1) are excluded since their shared raw file can't
+        # be read; only bit1/bit2 (round 0, uncorrupted, full depth)
+        # constrain the result, so fov 1 now resolves to the full [0,1,2,3]
+        # instead of [0,1] (bit3/bit4's real, uncorrupted truncation for
+        # fov 1 -- see test_dataorganization_ragged_get_z_positions_per_fov)
+        assert dataOrg.get_z_positions(1) == [0, 1, 2, 3]
+    # the segmentation (DAPI/polyT) round is untouched by this corruption
+    assert dataOrg.get_z_positions_segmentation(1) == [0, 1, 2]
+    # an unaffected fov is unaffected
+    assert dataOrg.get_z_positions(0) == [0, 1, 2, 3]
+
+
+def test_dataorganization_ragged_corrupt_file_get_z_positions_requires_flag(
+        corrupt_ragged_merfish_files, tmp_path):
+    # without allowMissingChannels, the same unreadable file is fatal --
+    # already at dataset construction, via _validate_file_map (see
+    # test_dataorganization_corrupt_file_validate_file_map_requires_flag).
+    with pytest.raises(dataorganization.InputDataError):
+        dataset.MERFISHDataSet(
+            'corrupt_ragged_merfish_test',
+            dataOrganizationName='test_data_organization_ragged.csv',
+            codebookNames=['test_codebook_ragged.csv'],
+            positionFileName='test_positions_ragged.csv',
+            analysisHome=str(tmp_path / 'strict'),
+            microscopeParametersName='test_microscope_parameters.json',
+            allowMissingChannels=False,
+            allowRaggedZStacks=True)
+
+
 def test_dataorganization_ragged_validate_file_map_requires_flag(
         ragged_merfish_files, tmp_path):
     with pytest.raises(dataorganization.InputDataError):

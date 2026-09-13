@@ -9,12 +9,14 @@ digraph merlin_pipeline_flow {
   node [fontname="Helvetica", shape=box, style="filled,rounded", fontsize=11, margin="0.15,0.08"];
   edge [fontname="Helvetica", fontsize=9, color="#777777", arrowsize=0.7];
 
-  // -- shared root tasks (feed the tops of both main columns) --
-  FiducialCorrelationWarp [label="FiducialCorrelationWarp\n(warp)", fillcolor="#aec6e8", group="root"];
-  SimpleGlobalAlignment   [label="SimpleGlobalAlignment\n(globalalign)", fillcolor="#aec6e8", group="root2"];
-  {rank=same; FiducialCorrelationWarp; SimpleGlobalAlignment;}
+  // -- column 1 (leftmost): mosaic assembly + fixed-threshold barcode filtering --
+  CreateFfc [label="CreateFfc\n(createffc)", fillcolor="#e0c9a6", group="left_col"];
+  GenerateMosaicTile [label="GenerateMosaicTile\n(generatemosaic)", fillcolor="#e0c9a6", group="left_col"];
+  CombineMosaicTiles [label="CombineMosaicTiles\n(generatemosaic)", fillcolor="#e0c9a6", group="left_col"];
+  FilterBarcodes [label="FilterBarcodes\n(filterbarcodes)", fillcolor="#f0cf8e", group="left_col"];
+  ExportBarcodes [label="ExportBarcodes\n(exportbarcodes)", fillcolor="#c9c9c9", group="left_col"];
 
-  // -- main column 1: decoding (center-aligned) --
+  // -- column 2: decoding (main column 1) --
   DeconvolutionPreprocess [label="DeconvolutionPreprocess\n(preprocess)", fillcolor="#a9d8a9", group="decode"];
   OptimizeIteration [label="OptimizeIteration\n(optimize)", fillcolor="#a9d8a9", group="decode"];
   Decode [label="Decode\n(decode)", fillcolor="#a9d8a9", group="decode"];
@@ -23,28 +25,34 @@ digraph merlin_pipeline_flow {
   PartitionBarcodes [label="PartitionBarcodes\n(partition)", fillcolor="#8fc2c9", group="decode"];
   ExportPartitionedBarcodes [label="ExportPartitionedBarcodes\n(partition)", fillcolor="#8fc2c9", group="decode"];
 
-  // -- main column 2: segmentation --
+  // -- column 3: segmentation (main column 2), FiducialCorrelationWarp sits at its top --
+  FiducialCorrelationWarp [label="FiducialCorrelationWarp\n(warp)", fillcolor="#aec6e8", group="segment"];
   CellPoseSegmentSAM [label="CellPoseSegmentSAM\n(segment)", fillcolor="#d3a3ca", group="segment"];
   CleanCellBoundaries [label="CleanCellBoundaries\n(segment)", fillcolor="#d3a3ca", group="segment"];
   CombineCleanedBoundaries [label="CombineCleanedBoundaries\n(segment)", fillcolor="#d3a3ca", group="segment"];
   RefineCellDatabases [label="RefineCellDatabases\n(segment)", fillcolor="#d3a3ca", group="segment"];
+  ExportCellMetadata [label="ExportCellMetadata\n(segment)", fillcolor="#c9c9c9", group="segment"];
 
-  // -- side branches around the two main columns --
-  FilterBarcodes [label="FilterBarcodes\n(filterbarcodes)", fillcolor="#f0cf8e", group="filter_fixed"];
-  ExportBarcodes [label="ExportBarcodes\n(exportbarcodes)", fillcolor="#c9c9c9", group="filter_fixed"];
-  ExportCellMetadata [label="ExportCellMetadata\n(segment)", fillcolor="#c9c9c9", group="segment_export"];
-  SumSignal [label="SumSignal\n(sequential)", fillcolor="#d69a9a", group="sequential"];
-  ExportSumSignals [label="ExportSumSignals\n(sequential)", fillcolor="#d69a9a", group="sequential"];
-  CreateFfc [label="CreateFfc\n(createffc)", fillcolor="#e0c9a6", group="mosaic"];
-  GenerateMosaicTile [label="GenerateMosaicTile\n(generatemosaic)", fillcolor="#e0c9a6", group="mosaic"];
-  CombineMosaicTiles [label="CombineMosaicTiles\n(generatemosaic)", fillcolor="#e0c9a6", group="mosaic"];
+  // -- column 4 (rightmost): SimpleGlobalAlignment + sequential signal --
+  SimpleGlobalAlignment [label="SimpleGlobalAlignment\n(globalalign)", fillcolor="#aec6e8", group="right_col"];
+  SumSignal [label="SumSignal\n(sequential)", fillcolor="#d69a9a", group="right_col"];
+  ExportSumSignals [label="ExportSumSignals\n(sequential)", fillcolor="#d69a9a", group="right_col"];
 
-  // -- column order, left to right: mosaic | decoding (main) | filtering (side) | segmentation (main) | sequential --
-  FiducialCorrelationWarp -> CreateFfc [style=invis];
+  // -- row alignment, left to right: column1 | column2 | column3 | column4 --
+  {rank=same; CreateFfc; DeconvolutionPreprocess; FiducialCorrelationWarp;}
+  {rank=same; CellPoseSegmentSAM; SimpleGlobalAlignment;}
+  {rank=same; PartitionBarcodes; RefineCellDatabases;}
+
+  // -- invisible ordering edges reinforcing left-to-right column order --
   CreateFfc -> DeconvolutionPreprocess [style=invis];
-  DeconvolutionPreprocess -> FilterBarcodes [style=invis];
-  FilterBarcodes -> CellPoseSegmentSAM [style=invis];
-  CellPoseSegmentSAM -> SumSignal [style=invis];
+  DeconvolutionPreprocess -> FiducialCorrelationWarp [style=invis];
+  CellPoseSegmentSAM -> SimpleGlobalAlignment [style=invis];
+  PartitionBarcodes -> RefineCellDatabases [style=invis];
+  // anchor column 4's x-position off FiducialCorrelationWarp (rock-solid in
+  // column 3) so SimpleGlobalAlignment settles just to CellPoseSegmentSAM's
+  // right instead of drifting toward SumSignal below it
+  FiducialCorrelationWarp -> SimpleGlobalAlignment [style=invis, weight=100];
+  SimpleGlobalAlignment -> SumSignal [style=invis, weight=10];
 
   // -- main column 1: decoding, one incoming edge per node (own previous task) --
   FiducialCorrelationWarp -> DeconvolutionPreprocess;

@@ -3,101 +3,89 @@ digraph merlin_pipeline_flow {
   fontname="Helvetica";
   labelloc="t";
   fontsize=16;
-  label="MERlin default analysis pipeline (test/auxiliary_files/test_analysis_parameters.json)";
+  label="MERlin analysis pipeline: two main columns (decoding, segmentation),\neach node linked only to its own immediate previous task";
   nodesep=0.35;
   ranksep=0.55;
   node [fontname="Helvetica", shape=box, style="filled,rounded", fontsize=11, margin="0.15,0.08"];
   edge [fontname="Helvetica", fontsize=9, color="#777777", arrowsize=0.7];
 
-  // -- shared root tasks (feed most of the columns below) --
-  FiducialCorrelationWarp [label="FiducialCorrelationWarp\n(warp)", fillcolor="#aec6e8", group="root"];
-  SimpleGlobalAlignment   [label="SimpleGlobalAlignment\n(globalalign)", fillcolor="#aec6e8", group="root2"];
-  {rank=same; FiducialCorrelationWarp; SimpleGlobalAlignment;}
+  // -- column 1 (leftmost): mosaic assembly + fixed-threshold barcode filtering --
+  CreateFfc [label="CreateFfc\n(createffc)", fillcolor="#e0c9a6", group="left_col"];
+  GenerateMosaicTile [label="GenerateMosaicTile\n(generatemosaic)", fillcolor="#e0c9a6", group="left_col"];
+  CombineMosaicTiles [label="CombineMosaicTiles\n(generatemosaic)", fillcolor="#e0c9a6", group="left_col"];
+  FilterBarcodes [label="FilterBarcodes\n(filterbarcodes)", fillcolor="#f0cf8e", group="left_col"];
+  ExportBarcodes [label="ExportBarcodes\n(exportbarcodes)", fillcolor="#c9c9c9", group="left_col"];
 
-  // -- decoding column --
+  // -- column 2: decoding (main column 1) --
   DeconvolutionPreprocess [label="DeconvolutionPreprocess\n(preprocess)", fillcolor="#a9d8a9", group="decode"];
-  Optimize1 [label="OptimizeIteration\n(Optimize1)", fillcolor="#a9d8a9", group="decode"];
-  Optimize2 [label="OptimizeIteration\n(Optimize2)", fillcolor="#a9d8a9", group="decode"];
+  OptimizeIteration [label="OptimizeIteration\n(optimize)", fillcolor="#a9d8a9", group="decode"];
   Decode [label="Decode\n(decode)", fillcolor="#a9d8a9", group="decode"];
+  GenerateAdaptiveThreshold [label="GenerateAdaptiveThreshold\n(filterbarcodes)", fillcolor="#f0cf8e", group="decode"];
+  AdaptiveFilterBarcodes [label="AdaptiveFilterBarcodes\n(filterbarcodes)", fillcolor="#f0cf8e", group="decode"];
+  PartitionBarcodes [label="PartitionBarcodes\n(partition)", fillcolor="#8fc2c9", group="decode"];
+  ExportPartitionedBarcodes [label="ExportPartitionedBarcodes\n(partition)", fillcolor="#8fc2c9", group="decode"];
 
-  // -- barcode filtering (two alternative strategies, hang off Decode) --
-  FilterBarcodes [label="FilterBarcodes\n(filterbarcodes)", fillcolor="#f0cf8e", group="filter_fixed"];
-  ExportBarcodes [label="ExportBarcodes\n(exportbarcodes)", fillcolor="#c9c9c9", group="filter_fixed"];
-  GenerateAdaptiveThreshold [label="GenerateAdaptiveThreshold\n(filterbarcodes)", fillcolor="#f0cf8e", group="filter_adaptive"];
-  AdaptiveFilterBarcodes [label="AdaptiveFilterBarcodes\n(filterbarcodes)", fillcolor="#f0cf8e", group="filter_adaptive"];
-
-  // -- segmentation column --
-  WatershedSegment [label="WatershedSegment\n(segment)", fillcolor="#d3a3ca", group="segment"];
+  // -- column 3: segmentation (main column 2), FiducialCorrelationWarp sits at its top --
+  FiducialCorrelationWarp [label="FiducialCorrelationWarp\n(warp)", fillcolor="#aec6e8", group="segment"];
+  CellPoseSegmentSAM [label="CellPoseSegmentSAM\n(segment)", fillcolor="#d3a3ca", group="segment"];
   CleanCellBoundaries [label="CleanCellBoundaries\n(segment)", fillcolor="#d3a3ca", group="segment"];
   CombineCleanedBoundaries [label="CombineCleanedBoundaries\n(segment)", fillcolor="#d3a3ca", group="segment"];
   RefineCellDatabases [label="RefineCellDatabases\n(segment)", fillcolor="#d3a3ca", group="segment"];
-  ExportCellMetadata [label="ExportCellMetadata\n(segment)", fillcolor="#d3a3ca", group="segment_export"];
+  ExportCellMetadata [label="ExportCellMetadata\n(segment)", fillcolor="#c9c9c9", group="segment"];
 
-  // -- partitioning (converges filtering + segmentation) --
-  PartitionBarcodes [label="PartitionBarcodes\n(partition)", fillcolor="#8fc2c9", group="partition"];
-  ExportPartitionedBarcodes [label="ExportPartitionedBarcodes\n(partition)", fillcolor="#8fc2c9", group="partition"];
+  // -- column 4 (rightmost): SimpleGlobalAlignment + sequential signal --
+  SimpleGlobalAlignment [label="SimpleGlobalAlignment\n(globalalign)", fillcolor="#aec6e8", group="right_col"];
+  SumSignal [label="SumSignal\n(sequential)", fillcolor="#d69a9a", group="right_col"];
+  ExportSumSignals [label="ExportSumSignals\n(sequential)", fillcolor="#d69a9a", group="right_col"];
 
-  // -- sequential signal (off segmentation) --
-  SumSignal [label="SumSignal\n(sequential)", fillcolor="#d69a9a", group="sequential"];
-  ExportSumSignals [label="ExportSumSignals\n(sequential)", fillcolor="#d69a9a", group="sequential"];
+  // -- row alignment, left to right: column1 | column2 | column3 | column4 --
+  {rank=same; CreateFfc; DeconvolutionPreprocess; FiducialCorrelationWarp;}
+  {rank=same; CellPoseSegmentSAM; SimpleGlobalAlignment;}
+  {rank=same; PartitionBarcodes; RefineCellDatabases;}
 
-  // -- mosaic (independent side column) --
-  CreateFfc [label="CreateFfc\n(createffc)", fillcolor="#e0c9a6", group="mosaic"];
-  GenerateMosaicTile [label="GenerateMosaicTile\n(generatemosaic)", fillcolor="#e0c9a6", group="mosaic"];
-  CombineMosaicTiles [label="CombineMosaicTiles\n(generatemosaic)", fillcolor="#e0c9a6", group="mosaic"];
-
-  // -- column order, left to right: mosaic | decoding | filtering | segmentation | partition | sequential --
-  FiducialCorrelationWarp -> CreateFfc [style=invis];
+  // -- invisible ordering edges reinforcing left-to-right column order --
   CreateFfc -> DeconvolutionPreprocess [style=invis];
-  DeconvolutionPreprocess -> FilterBarcodes [style=invis];
-  FilterBarcodes -> GenerateAdaptiveThreshold [style=invis];
-  GenerateAdaptiveThreshold -> WatershedSegment [style=invis];
-  WatershedSegment -> PartitionBarcodes [style=invis];
-  PartitionBarcodes -> SumSignal [style=invis];
+  DeconvolutionPreprocess -> FiducialCorrelationWarp [style=invis];
+  CellPoseSegmentSAM -> SimpleGlobalAlignment [style=invis];
+  PartitionBarcodes -> RefineCellDatabases [style=invis];
+  // anchor column 4's x-position off FiducialCorrelationWarp (rock-solid in
+  // column 3) so SimpleGlobalAlignment settles just to CellPoseSegmentSAM's
+  // right instead of drifting toward SumSignal below it
+  FiducialCorrelationWarp -> SimpleGlobalAlignment [style=invis, weight=100];
+  SimpleGlobalAlignment -> SumSignal [style=invis, weight=10];
 
-  // -- alignment / decode --
+  // -- main column 1: decoding, one incoming edge per node (own previous task) --
   FiducialCorrelationWarp -> DeconvolutionPreprocess;
-  FiducialCorrelationWarp -> Optimize1;
-  DeconvolutionPreprocess -> Optimize1;
-  FiducialCorrelationWarp -> Optimize2;
-  DeconvolutionPreprocess -> Optimize2;
-  Optimize1 -> Optimize2 [label="previous_iteration"];
-  DeconvolutionPreprocess -> Decode;
-  Optimize2 -> Decode [label="optimize_task"];
-  SimpleGlobalAlignment -> Decode;
-
-  // -- filtering --
-  Decode -> FilterBarcodes;
+  DeconvolutionPreprocess -> OptimizeIteration;
+  OptimizeIteration -> OptimizeIteration [label="previous_iteration"];
+  OptimizeIteration -> Decode [label="optimize_task"];
   Decode -> GenerateAdaptiveThreshold [label="run_after_task"];
-  Decode -> AdaptiveFilterBarcodes;
   GenerateAdaptiveThreshold -> AdaptiveFilterBarcodes [label="adaptive_task"];
-  FilterBarcodes -> ExportBarcodes;
-
-  // -- segmentation --
-  FiducialCorrelationWarp -> WatershedSegment;
-  SimpleGlobalAlignment -> WatershedSegment;
-  WatershedSegment -> CleanCellBoundaries;
-  SimpleGlobalAlignment -> CleanCellBoundaries;
-  CleanCellBoundaries -> CombineCleanedBoundaries;
-  WatershedSegment -> RefineCellDatabases;
-  CombineCleanedBoundaries -> RefineCellDatabases [label="combine_cleaning_task"];
-  RefineCellDatabases -> ExportCellMetadata;
-
-  // -- partitioning --
   AdaptiveFilterBarcodes -> PartitionBarcodes [label="filter_task"];
-  RefineCellDatabases -> PartitionBarcodes [label="assignment_task"];
-  SimpleGlobalAlignment -> PartitionBarcodes;
   PartitionBarcodes -> ExportPartitionedBarcodes;
 
-  // -- sequential signal --
-  FiducialCorrelationWarp -> SumSignal;
-  SimpleGlobalAlignment -> SumSignal;
+  // -- main column 2: segmentation, one incoming edge per node (own previous task) --
+  FiducialCorrelationWarp -> CellPoseSegmentSAM [label="warp_task"];
+  SimpleGlobalAlignment -> CellPoseSegmentSAM [label="global_align_task"];
+  CellPoseSegmentSAM -> CleanCellBoundaries [label="segment_task"];
+  CleanCellBoundaries -> CombineCleanedBoundaries [label="cleaning_task"];
+  CombineCleanedBoundaries -> RefineCellDatabases [label="combine_cleaning_task"];
+
+  // -- convergence of the two main columns --
+  RefineCellDatabases -> PartitionBarcodes [label="assignment_task"];
+
+  // -- side branch: fixed-threshold barcode filtering, off Decode --
+  Decode -> FilterBarcodes;
+  FilterBarcodes -> ExportBarcodes;
+
+  // -- side branch: cell metadata export, off RefineCellDatabases --
+  RefineCellDatabases -> ExportCellMetadata;
+
+  // -- side branch: sequential signal, off RefineCellDatabases --
   RefineCellDatabases -> SumSignal [label="segment_task"];
   SumSignal -> ExportSumSignals;
 
-  // -- mosaic --
-  SimpleGlobalAlignment -> GenerateMosaicTile;
-  FiducialCorrelationWarp -> GenerateMosaicTile;
+  // -- side branch: mosaic, off DeconvolutionPreprocess + CreateFfc --
   DeconvolutionPreprocess -> GenerateMosaicTile;
   CreateFfc -> GenerateMosaicTile [label="ffc_task"];
   GenerateMosaicTile -> CombineMosaicTiles [label="tile_task"];
@@ -109,14 +97,14 @@ digraph merlin_pipeline_flow {
     <TABLE BORDER="1" COLOR="#dddddd" CELLBORDER="0" CELLSPACING="3" CELLPADDING="2">
       <TR><TD COLSPAN="2"><B>Legend</B></TD></TR>
       <TR><TD BGCOLOR="#aec6e8" WIDTH="18"></TD><TD ALIGN="LEFT">alignment</TD></TR>
-      <TR><TD BGCOLOR="#a9d8a9"></TD><TD ALIGN="LEFT">preprocessing / decoding</TD></TR>
+      <TR><TD BGCOLOR="#a9d8a9"></TD><TD ALIGN="LEFT">preprocessing / decoding (main column 1)</TD></TR>
+      <TR><TD BGCOLOR="#d3a3ca"></TD><TD ALIGN="LEFT">cell segmentation (main column 2)</TD></TR>
+      <TR><TD BGCOLOR="#8fc2c9"></TD><TD ALIGN="LEFT">cell x barcode partitioning</TD></TR>
       <TR><TD BGCOLOR="#e0c9a6"></TD><TD ALIGN="LEFT">mosaic (FFC + tiling)</TD></TR>
       <TR><TD BGCOLOR="#f0cf8e"></TD><TD ALIGN="LEFT">barcode filtering</TD></TR>
-      <TR><TD BGCOLOR="#d3a3ca"></TD><TD ALIGN="LEFT">cell segmentation</TD></TR>
-      <TR><TD BGCOLOR="#8fc2c9"></TD><TD ALIGN="LEFT">cell x barcode partitioning</TD></TR>
       <TR><TD BGCOLOR="#d69a9a"></TD><TD ALIGN="LEFT">sequential signal</TD></TR>
       <TR><TD BGCOLOR="#c9c9c9"></TD><TD ALIGN="LEFT">export</TD></TR>
-      <TR><TD COLSPAN="2" ALIGN="LEFT"><FONT POINT-SIZE="8">solid arrow = snakemake task dependency (get_dependencies())</FONT></TD></TR>
+      <TR><TD COLSPAN="2" ALIGN="LEFT"><FONT POINT-SIZE="8">solid arrow = a task's own single previous/producing task,<BR ALIGN="LEFT"/>not the full get_dependencies() set</FONT></TD></TR>
     </TABLE>
   >];
 }

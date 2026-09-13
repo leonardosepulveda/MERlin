@@ -5,31 +5,37 @@ Each analysis task in an analysis-parameters file (see :doc:`usage`) names the o
 tasks it needs through its own parameters (for example ``preprocess_task`` or
 ``segment_task``); a task's ``get_dependencies()`` method turns those parameter values
 into the task names :class:`~merlin.util.snakewriter.SnakefileGenerator` needs to build
-the Snakemake workflow. The diagram below renders that dependency graph for
-``test/auxiliary_files/test_analysis_parameters.json`` -- the analysis-parameters file
-the test suite itself runs the full pipeline against (see ``test/conftest.py`` and
-``test/test_merfish.py``) -- as a default, always-up-to-date reference for how
-MERlin's tasks fit together. Every edge below is read directly from the corresponding
-task class's own ``get_dependencies()`` in ``merlin/analysis/*.py``, not just inferred
-from parameter names. A real experiment's own analysis-parameters file will typically
-use only part of this graph (e.g. one of the two barcode-filtering strategies shown,
-or ``CellPoseSegmentSAM``/``CellPoseSegment3D`` in place of ``WatershedSegment`` -- see
-:doc:`tasks` for every task's own parameters and alternatives).
+the Snakemake workflow. The diagram below groups the pipeline into two main columns --
+decoding and segmentation -- with every node in each main column pointing back to only
+its own single, immediate previous/producing task, not the full ``get_dependencies()``
+set a task class actually declares (e.g. ``Decode`` also needs ``DeconvolutionPreprocess``
+and ``SimpleGlobalAlignment`` directly, which are omitted from the main chain here). The
+side branches around the two main columns (mosaic assembly, fixed-threshold barcode
+filtering, cell-metadata export, sequential signal) still show each task's genuine
+dependencies. ``CellPoseSegmentSAM`` is shown as the segmentation entry point rather
+than ``WatershedSegment`` or ``CellPoseSegment3D`` -- see :doc:`tasks` for every
+segmentation task's own parameters and alternatives.
 
 .. image:: _static/merlin_pipeline_flow.svg
    :width: 100%
-   :alt: Flow diagram of the MERlin default analysis pipeline's task dependency graph
+   :alt: Flow diagram of the MERlin analysis pipeline's two main columns (decoding and
+         segmentation), each node linked only to its own previous task
 
-Two branches worth noting explicitly:
+A few things worth noting explicitly:
 
-* ``FilterBarcodes`` and ``GenerateAdaptiveThreshold``/``AdaptiveFilterBarcodes`` are
-  two independent, alternative barcode-filtering strategies (fixed-threshold vs.
-  adaptive-threshold) -- both depend only on ``Decode``, not on each other. The test
-  fixture runs both to exercise each in CI; a real pipeline normally picks one.
-* ``GenerateMosaicTile``/``CombineMosaicTiles`` (mosaic assembly) and the
-  segmentation/partitioning/sequential-signal branches all depend only on
-  ``FiducialCorrelationWarp`` and ``SimpleGlobalAlignment`` -- they run independently
-  of the decoding branch and of each other.
+* The repeated ``OptimizeIteration`` rounds a real analysis-parameters file chains via
+  ``previous_iteration`` (``Optimize1`` -> ``Optimize2`` -> ...) collapse into a single
+  ``OptimizeIteration`` node with a self-loop, rather than one node per round.
+* ``RefineCellDatabases`` (end of the segmentation column) feeds into
+  ``PartitionBarcodes`` (``assignment_task``) alongside ``AdaptiveFilterBarcodes``
+  (``filter_task``) from the decoding column -- this is where the two main columns
+  converge.
+* ``FilterBarcodes``/``ExportBarcodes`` (the alternative, fixed-threshold
+  barcode-filtering strategy) and ``ExportCellMetadata``/``SumSignal``/
+  ``ExportSumSignals`` branch off ``Decode`` and ``RefineCellDatabases`` respectively,
+  and ``GenerateMosaicTile``/``CombineMosaicTiles`` (mosaic assembly) branch off
+  ``DeconvolutionPreprocess`` and ``CreateFfc`` -- all side branches, not part of
+  either main column.
 
 The diagram's source (``merlin_pipeline_flow.dot``, next to the rendered SVG in
 ``docs/_static/``) can be regenerated with Graphviz after edits:

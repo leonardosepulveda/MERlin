@@ -179,3 +179,15 @@ status: completed | in-progress | abandoned
 
 Format rationale: Markdown + YAML frontmatter is Claude-native, human-readable,
 and lets all entries be scanned/grepped by metadata without reading every body.
+
+## Version control
+
+Commit and push as you go — do not leave finished work uncommitted.
+
+- Follow this user's global git-workflow rule (applies across all their
+  projects): branch off `master` before the first commit of a new
+  feature/fix, push the branch immediately, one focused commit per logical
+  change, push every commit immediately, merge to `master` only on the
+  user's explicit go-ahead.
+- Standing authorization to branch, commit, and push without asking each
+  time — merging to `master` still needs the user's go-ahead.

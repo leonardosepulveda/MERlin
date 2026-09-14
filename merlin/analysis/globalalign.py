@@ -1,4 +1,5 @@
 from abc import abstractmethod
+import math
 import numpy as np
 import pandas as pd
 from typing import Tuple
@@ -349,22 +350,42 @@ class RegisterFovNeighbors(analysistask.ParallelAnalysisTask):
     providesTimeEstimate = True
 
     def get_estimated_memory(self):
-        # Uncalibrated -- no real job measured yet. Reuses
-        # FiducialCorrelationWarp's own calibrated kTask (warp.py; same
-        # skimage.registration.phase_cross_correlation algorithm family)
-        # as a conservative proxy against 2 full frames (anchor +
-        # neighbour) -- this task's crops are smaller than a full frame
-        # (just the overlap band), so real usage should be lower.
-        return resourceestimate.estimate_stack_memory_mb(
+        # kTask itself is still an uncalibrated proxy -- reused from
+        # FiducialCorrelationWarp (warp.py; same skimage.registration.
+        # phase_cross_correlation algorithm family) against 2 full frames
+        # (anchor + neighbour). This task's own real jobs (BC555_sample_05
+        # /disk, sacct MaxRSS) landed well under the resulting estimate,
+        # consistent with kTask=59 being conservative here (this task
+        # correlates only a cropped overlap band, not a full frame), but
+        # the cluster's 30s accounting-sample interval is too coarse to
+        # trust for these ~13-190s jobs, so kTask isn't re-tuned from that
+        # data. Rounded up to the next whole GB so the request is a clean
+        # number.
+        rawMb = resourceestimate.estimate_stack_memory_mb(
             self.dataSet, frameCount=2, kTask=59, baselineMb=230)
+        return math.ceil(rawMb / 1000) * 1000
 
     def get_estimated_time(self):
-        # Uncalibrated -- no real job measured yet. Up to 4 neighbour
-        # registrations per fov (one per direction), each assumed to cost
-        # about as much as one FiducialCorrelationWarp channel registration
-        # (same secondsPerFrame guess, warp.py).
-        return resourceestimate.estimate_stack_time_minutes(
-            frameCount=4, secondsPerFrame=3, baselineMinutes=2)
+        # Calibrated against BC555_sample_05/disk (2304x2304 16-bit
+        # frames): sacct over 312 real completed jobs gave a 13-17s floor
+        # regardless of neighbour count (fixed overhead: imports +
+        # MERFISHDataSet construction) and a median of 28s -- neighbour
+        # count itself had no measurable effect (r^2=0.001 against it),
+        # so the per-frame term below is a physically-reasoned fit (~4
+        # MB/s effective per-frame open+read cost on shared storage for
+        # up to 5 frames: anchor + 4 neighbours), not an independently
+        # measured slope. Floored at 1 minute raw, since that observed
+        # 13-17s floor makes a sub-minute raw estimate too fragile to
+        # trust on its own; one real fov did time out under the previous
+        # (higher, but uncalibrated) 3-minute cluster-config request,
+        # from a transient node-level I/O contention spike rather than
+        # its own compute cost.
+        width, height = self.dataSet.get_image_dimensions()
+        frameBytes = width * height * resourceestimate.BYTES_PER_PIXEL
+        rawMinutes = resourceestimate.estimate_stack_time_minutes(
+            frameCount=5, secondsPerFrame=frameBytes / 4_000_000,
+            baselineMinutes=0.25)
+        return max(rawMinutes, 1.0)
 
     def get_dependencies(self):
         return []

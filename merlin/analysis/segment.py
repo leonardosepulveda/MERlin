@@ -1,3 +1,4 @@
+import math
 import os
 import time
 import warnings
@@ -514,12 +515,16 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
         # shrinks the x/y footprint (not z, per this task's own parameter
         # docstring) before cellpose ever sees the volume. Not
         # cross-checked against a channel_2_name-set (2-channel) run.
+        # Rounded up to the next whole GB (same rationale as
+        # RegisterFovNeighbors' own get_estimated_memory(), globalalign.py)
+        # so the request is a clean number.
         channelCount = 2 if self.parameters['channel_2_name'] else 1
         zCount = len(self.dataSet.get_z_positions())
         downsampleFactor = self.parameters['downsample_factor'] or 1
-        return resourceestimate.estimate_stack_memory_mb(
+        rawMb = resourceestimate.estimate_stack_memory_mb(
             self.dataSet, frameCount=channelCount * zCount,
             downsampleFactor=downsampleFactor, kTask=114, baselineMb=2190)
+        return math.ceil(rawMb / 1000) * 1000
 
     def get_estimated_time(self):
         # TODO - refine estimate. Not geometry-driven (see

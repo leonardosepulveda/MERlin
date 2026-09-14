@@ -23,6 +23,8 @@ raggedMerfishDataDirectory = os.sep.join(
     [merlin.DATA_HOME, 'ragged_merfish_test'])
 corruptMerfishDataDirectory = os.sep.join(
     [merlin.DATA_HOME, 'corrupt_merfish_test'])
+corruptRaggedMerfishDataDirectory = os.sep.join(
+    [merlin.DATA_HOME, 'corrupt_ragged_merfish_test'])
 
 
 @pytest.fixture(scope='session')
@@ -211,6 +213,31 @@ def ragged_merfish_files(base_files):
     yield
 
     shutil.rmtree(raggedMerfishDataDirectory)
+
+
+@pytest.fixture(scope='session')
+def corrupt_ragged_merfish_files(base_files):
+    # a copy of ragged_merfish_files' raw data, but with fov1/round1's raw
+    # file (ragged_1_1.tif, shared by bit3 and bit4) replaced by garbage
+    # bytes -- simulates that specific (fov, round) still being written by
+    # the acquisition software while every other round/fov, including the
+    # segmentation (DAPI/polyT) round, is already complete. See
+    # corrupt_merfish_files for the equivalent non-ragged fixture.
+    os.mkdir(corruptRaggedMerfishDataDirectory)
+
+    for imageFile in glob.iglob(
+            os.sep.join([root, 'auxiliary_files', 'ragged_tifs', '*.tif'])):
+        if os.path.isfile(imageFile):
+            shutil.copy(imageFile, corruptRaggedMerfishDataDirectory)
+
+    with open(os.sep.join(
+            [corruptRaggedMerfishDataDirectory, 'ragged_1_1.tif']),
+            'wb') as f:
+        f.write(b'not a real tiff file')
+
+    yield
+
+    shutil.rmtree(corruptRaggedMerfishDataDirectory)
 
 
 @pytest.fixture(scope='session')

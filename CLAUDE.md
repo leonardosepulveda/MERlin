@@ -28,6 +28,23 @@ Install (editable, so code edits take effect immediately):
 pip install -e .
 ```
 
+**Conda environment: libstdc++ preload.** In a conda env where the
+scientific packages come from pip, `import pandas` before `import sqlite3`
+fails with `CXXABI_1.3.15 not found`.
+- Cause: pip's pyarrow (imported by pandas) loads the OS's older
+  libstdc++. A process can hold only one copy, and the env's conda icu
+  (used by sqlite3) needs the env's newer one.
+- The fix lives in the env, not the repo: a one-line `.pth` file that
+  loads the env's copy at every interpreter start. It covers batch jobs,
+  snakemake workers and notebook kernels, activated or not.
+- Recreate it after rebuilding the env (run with the env active):
+  ```
+  echo "import ctypes, os, sys; ctypes.CDLL(os.path.join(sys.prefix, 'lib', 'libstdc++.so.6'))" \
+      > "$(python -c 'import site; print(site.getsitepackages()[0])')/merlin_libstdcxx.pth"
+  ```
+- The `import sqlite3` at the top of `merlin/__init__.py` is a fallback
+  that only helps when merlin is imported before pandas.
+
 Run the full pipeline against an experiment (reads `PARAMETERS_HOME/analysis/<name>.json`,
 generates a Snakefile, executes it):
 ```

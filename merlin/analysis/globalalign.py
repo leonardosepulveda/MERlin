@@ -575,7 +575,7 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
             # those are meaningful to score against the FINAL positions;
             # rejected ones get no correlation (NaN).
             correlations = globalpositions.compute_overlap_correlations(
-                kept, correctedPositions, nominalPositions, load_frame,
+                kept, correctedPositions, load_frame,
                 pixel_size_um=micronsPerPixel, overlap_fraction=overlapFraction)
             self.dataSet.save_dataframe_to_csv(
                 pd.DataFrame([

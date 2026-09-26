@@ -57,12 +57,12 @@ def test_register_neighbor_pair_sign_convention(dx, dy):
     """
     rng = np.random.default_rng(0)
     pixelSizeUm = 0.1
-    stepUm = 60.0
     frameWidth = 60
     overlapFraction = 0.5
     trueShiftPx = 3
     nOverlap = int(round(frameWidth * overlapFraction))
     nominalStartCol = frameWidth - nOverlap
+    stepUm = nominalStartCol * pixelSizeUm
     neighborStartCol = nominalStartCol + trueShiftPx
 
     if dx != 0:
@@ -75,10 +75,9 @@ def test_register_neighbor_pair_sign_convention(dx, dy):
         neighborImg = world[neighborStartCol:neighborStartCol + frameWidth, :]
 
     anchorXY = (0.0, 0.0)
-    neighborXYNominal = (stepUm * dx, stepUm * dy)
 
     measuredXY, error = globalpositions.register_neighbor_pair(
-        anchorImg, neighborImg, anchorXY, neighborXYNominal,
+        anchorImg, neighborImg, anchorXY,
         dx=dx, dy=dy, overlap_fraction=overlapFraction, pixel_size_um=pixelSizeUm,
         upsample_factor=20)
 
@@ -88,6 +87,43 @@ def test_register_neighbor_pair_sign_convention(dx, dy):
     )
     assert measuredXY[0] == pytest.approx(expected[0], abs=0.02)
     assert measuredXY[1] == pytest.approx(expected[1], abs=0.02)
+
+
+def _bead_world(shape, count, seed):
+    from scipy.ndimage import gaussian_filter
+    rng = np.random.default_rng(seed)
+    world = np.zeros(shape)
+    world[rng.integers(0, shape[0], count), rng.integers(0, shape[1], count)] = 1000
+    return gaussian_filter(world, 1.5) + rng.normal(100, 2, shape)
+
+
+@pytest.mark.parametrize('trueOffset', [
+    (360, 0),    # regular grid
+    (360, 3),    # small stage error across the axis
+    (364, 0),    # small stage error along the axis
+    (360, 30),   # offset scan band (non-rectangular grid)
+    (350, 0),    # locally shorter step
+])
+def test_register_neighbor_pair_recovers_true_offset(trueOffset):
+    """The measured position must equal the true one whatever the pair's
+    nominal spacing. Adding the shift to the nominal offset instead of the
+    offset the crops assume counted any difference between the two twice
+    (e.g. a 30 um band offset measured as 60 um)."""
+    world = _bead_world((1200, 1600), 4000, 0)
+    frameSize, overlapFraction = 400, 0.1
+    anchorXY = (100, 300)
+    neighborXY = (anchorXY[0] + trueOffset[0], anchorXY[1] + trueOffset[1])
+
+    def frame(xy):
+        return world[xy[1]:xy[1] + frameSize, xy[0]:xy[0] + frameSize]
+
+    measuredXY, _ = globalpositions.register_neighbor_pair(
+        frame(anchorXY), frame(neighborXY), anchorXY, dx=1.0, dy=0.0,
+        overlap_fraction=overlapFraction, pixel_size_um=1.0,
+        upsample_factor=10)
+
+    assert measuredXY[0] == pytest.approx(neighborXY[0], abs=0.3)
+    assert measuredXY[1] == pytest.approx(neighborXY[1], abs=0.3)
 
 
 def test_filter_correspondence_outliers():
@@ -160,11 +196,11 @@ def test_compute_overlap_correlations_matches_at_correct_shift():
     """
     rng = np.random.default_rng(1)
     pixelSizeUm = 0.1
-    stepUm = 6.0
     frameWidth = 60
     overlapFraction = 0.5
     trueShiftPx = 3
     nOverlap = int(round(frameWidth * overlapFraction))
+    stepUm = (frameWidth - nOverlap) * pixelSizeUm
     neighborStartCol = frameWidth - nOverlap + trueShiftPx
 
     world = rng.random((frameWidth, frameWidth + frameWidth))
@@ -178,10 +214,10 @@ def test_compute_overlap_correlations_matches_at_correct_shift():
         0, 1, '+x', nominal[1], (nominal[1][0] + trueShiftUm, 0.0), 0.01)
 
     correctCorrelations = globalpositions.compute_overlap_correlations(
-        [correspondence], correctPositions, nominal, frames.__getitem__,
+        [correspondence], correctPositions, frames.__getitem__,
         pixel_size_um=pixelSizeUm, overlap_fraction=overlapFraction)
     wrongCorrelations = globalpositions.compute_overlap_correlations(
-        [correspondence], nominal, nominal, frames.__getitem__,
+        [correspondence], nominal, frames.__getitem__,
         pixel_size_um=pixelSizeUm, overlap_fraction=overlapFraction)
 
     # Not exactly 1.0 even at the correct shift: the shift-compensated crop's
@@ -201,7 +237,7 @@ def test_compute_overlap_correlations_degenerate_crop_returns_zero_not_nan():
         0, 1, '+x', nominal[1], nominal[1], 0.0)
 
     correlations = globalpositions.compute_overlap_correlations(
-        [correspondence], nominal, nominal, frames.__getitem__,
+        [correspondence], nominal, frames.__getitem__,
         pixel_size_um=1.0, overlap_fraction=0.5)
 
     assert correlations[(0, 1, '+x')] == 0.0
@@ -220,3 +256,15 @@ def test_fit_global_positions_disconnected_components_solved_independently():
     assert correction.positions[10] == pytest.approx(nominal[10], abs=1e-3)
     assert correction.positions[1][0] == pytest.approx(102.0, abs=1e-3)
     assert correction.positions[11][0] == pytest.approx(599.0, abs=1e-3)
+
+
+def test_register_fov_against_neighbors_skips_non_overlapping_neighbor():
+    # Two 100 um frames 500 um apart: the neighbour is found on the grid but
+    # the frames share no content, so no registration should be reported.
+    frames = {0: np.random.default_rng(2).random((100, 100)),
+              1: np.random.default_rng(3).random((100, 100))}
+    positions = {0: (0.0, 0.0), 1: (500.0, 0.0)}
+    correspondences = globalpositions.register_fov_against_neighbors(
+        0, positions, frames.__getitem__, pixel_size_um=1.0,
+        overlap_fraction=0.1)
+    assert correspondences == []

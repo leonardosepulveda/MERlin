@@ -135,3 +135,19 @@ def test_fov_placement_isolated_fov_has_no_true_neighbor():
     x0, y0, top, bottom, left, right = generatemosaic._fov_placement(
         alignTask, 0, origins, identity, tileShape, 0.25)
     assert (top, bottom, left, right) == (0, 100, 0, 100)
+
+
+def test_build_channel_mosaic_clips_instead_of_wrapping():
+    # Flat-field-corrected tiles can exceed the uint16 range; an unclipped
+    # cast wrapped 83333 around to 17797, turning bright pixels dark.
+    class _FakeTileTask:
+        def get_cached_tile(self, fov, dataChannel, downsample):
+            return np.array([[83333.3, 50000.0], [-5.0, 12.0]],
+                            dtype=np.float32)
+
+    mosaic = generatemosaic.CombineMosaicTiles._build_channel_mosaic(
+        None, _FakeTileTask(), {0: (0, 0, 0, 2, 0, 2)}, (2, 2),
+        dataChannel=0, downsample=1)
+
+    assert mosaic.dtype == np.uint16
+    assert mosaic.tolist() == [[65535, 50000], [0, 12]]

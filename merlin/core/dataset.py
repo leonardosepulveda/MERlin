@@ -1261,6 +1261,11 @@ class MERFISHDataSet(ImageDataSet):
         super().__init__(dataDirectoryName, dataHome, analysisHome,
                          microscopeParametersName, figuresPath, analysisName)
 
+        # kept so snakewriter can pass them on to each snakemake job, which
+        # rebuilds this dataset from the command line
+        self.allowRaggedZStacks = allowRaggedZStacks
+        self.allowMissingChannels = allowMissingChannels
+
         self.dataOrganization = dataorganization.DataOrganization(
                 self, dataOrganizationName,
                 allowRaggedZStacks=allowRaggedZStacks,

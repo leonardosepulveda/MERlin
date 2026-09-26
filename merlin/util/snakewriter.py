@@ -207,6 +207,15 @@ class SnakemakeRule(object):
              ' -f \"',
              self._clean_string(self._analysisTask.dataSet.figuresPath),
              '\"'])
+        # Each job rebuilds the dataset from this command line, so the
+        # dataset's tolerance flags must be passed on or the job runs
+        # without them. --recalculate-filemap is deliberately not passed:
+        # the driver already rebuilt the file map, and every job rebuilding
+        # it again at once would race on the same cached file.
+        if getattr(self._analysisTask.dataSet, 'allowRaggedZStacks', False):
+            shellString += ' --allow-ragged-z-stacks'
+        if getattr(self._analysisTask.dataSet, 'allowMissingChannels', False):
+            shellString += ' --allow-missing-channels'
         return shellString
 
     def _generate_shell(self) -> str:

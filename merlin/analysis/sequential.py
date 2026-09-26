@@ -18,6 +18,26 @@ import bigfish.multistack
 from shapely.geometry import Point
 from shapely.ops import unary_union
 
+
+# Columns whose pandas dtype would otherwise depend on the values in one z
+# plane (e.g. integer thresholds vs an automatic float threshold, or an
+# int -1 placeholder vs float distances). They are always written as float,
+# since ParquetChunkWriter requires every z plane to match the first one's
+# column types.
+_FLOAT_SPOT_COLUMNS = ('threshold', 'intensity_threshold',
+                       'distance_threshold', 'anti_colocalization_distance')
+
+
+def _prepare_spot_chunk(df: pandas.DataFrame) -> pandas.DataFrame:
+    """Format one z plane's detected spots for ParquetChunkWriter."""
+    df = df.drop(columns=['geometry'])
+    # seems like parquet has some issues saving index as int
+    df['index_right'] = df['index_right'].astype(str)
+    for column in _FLOAT_SPOT_COLUMNS:
+        if column in df.columns:
+            df[column] = df[column].astype(float)
+    return df
+
 class SumSignal(analysistask.ParallelAnalysisTask):
 
     """
@@ -530,10 +550,7 @@ class SmfishSignal(analysistask.ParallelAnalysisTask):
                     continue
 
                 dfZ = pandas.concat(resultsZ, axis = 0, ignore_index = True)
-                dfZ.drop(columns = ['geometry'], inplace = True)
-                # seems like parquet has some issues saving index as int
-                dfZ['index_right'] = dfZ['index_right'].astype(str)
-                writer.write(dfZ)
+                writer.write(_prepare_spot_chunk(dfZ))
 
         if not writer.wrote_any:
             raise ValueError(
@@ -780,10 +797,7 @@ class SmfishColocalizationSignal(SmfishSignal):
 
             # write this z plane's results to disk now instead of holding
             # every z plane's results in memory until the fov is done
-            results_z.drop(columns = ['geometry'], inplace = True)
-            # seems like parquet has some issues saving index as int
-            results_z['index_right'] = results_z['index_right'].astype(str)
-            writer.write(results_z)
+            writer.write(_prepare_spot_chunk(results_z))
 
 class ExportSumSignals(analysistask.AnalysisTask):
     def __init__(self, dataSet, parameters=None, analysisName=None):

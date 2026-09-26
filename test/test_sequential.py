@@ -59,3 +59,35 @@ def test_sumsignal_channel_names_invalid_entry_raises(
         _make_sum_signal(
             simple_merfish_data, sum_signal_global_align_task,
             channel_names=['not_a_real_channel'])
+
+
+def test_prepare_spot_chunk_keeps_parquet_schema_stable(tmp_path):
+    # One z plane has only integer thresholds and no anti-colocalization
+    # hits (int -1 placeholder); the next has an automatic float threshold
+    # and a real distance. Unfixed, the second write raised
+    # "Table schema does not match schema used to create file".
+    import pandas
+    from merlin.core.dataset import ParquetChunkWriter
+
+    def chunk(thresholds, antiDistance):
+        return pandas.DataFrame({
+            'geometry': [None] * len(thresholds),
+            'x': [1] * len(thresholds),
+            'threshold': thresholds,
+            'intensity_threshold': thresholds,
+            'distance_threshold': [2] * len(thresholds),
+            'anti_colocalization_distance': antiDistance,
+            'index_right': [-1] * len(thresholds)})
+
+    savePath = str(tmp_path / 'spots.parquet')
+    with ParquetChunkWriter(savePath) as writer:
+        writer.write(sequential._prepare_spot_chunk(chunk([100, 100], -1)))
+        writer.write(sequential._prepare_spot_chunk(
+            chunk([100, 4.5], [-1, 3.25])))
+
+    result = pandas.read_parquet(savePath)
+    assert len(result) == 4
+    assert 'geometry' not in result.columns
+    assert list(result['threshold']) == [100.0, 100.0, 100.0, 4.5]
+    assert list(result['anti_colocalization_distance']) == [-1, -1, -1, 3.25]
+    assert list(result['index_right']) == ['-1'] * 4

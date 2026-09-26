@@ -410,7 +410,9 @@ class CombineMosaicTiles(analysistask.AnalysisTask):
             mosaic[yStart:yEnd, xStart:xEnd] = tile[
                 tileRowStart:tileRowStart + (yEnd - yStart),
                 tileColStart:tileColStart + (xEnd - xStart)]
-        return mosaic.astype(np.uint16)
+        # flat-field correction can push bright pixels past the uint16
+        # range, and an unclipped cast would wrap them around to dark values
+        return np.clip(mosaic, 0, np.iinfo(np.uint16).max).astype(np.uint16)
 
     def _write_imagej_mosaics(self, tileTask, fovPlacements, mosaicShape,
                               dataOrganization, dataChannels, downsample):

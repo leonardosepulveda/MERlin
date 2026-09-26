@@ -174,22 +174,78 @@ def crop_overlap(
     """
     h, w = anchor_img.shape
     if dx != 0:
-        n = max(1, int(round(w * overlap_fraction)))
+        n = _overlap_px(w, overlap_fraction)
         if dx > 0:
             return anchor_img[:, w - n:], neighbor_img[:, :n]
         return anchor_img[:, :n], neighbor_img[:, w - n:]
     else:
-        n = max(1, int(round(h * overlap_fraction)))
+        n = _overlap_px(h, overlap_fraction)
         if dy > 0:
             return anchor_img[h - n:, :], neighbor_img[:n, :]
         return anchor_img[:n, :], neighbor_img[h - n:, :]
+
+
+def _overlap_px(length: int, overlap_fraction: float) -> int:
+    return max(1, int(round(length * overlap_fraction)))
+
+
+def crop_offset_um(
+    frame_shape:      Tuple[int, int],
+    dx:               float,
+    dy:               float,
+    overlap_fraction: float,
+    pixel_size_um:    float,
+) -> Tuple[float, float]:
+    """
+    The anchor -> neighbour offset (microns) at which the two strips from
+    `crop_overlap` show the same area: one frame minus the overlap strip
+    along the *(dx, dy)* axis, and zero across it.
+
+    A registration shift measured on those strips is relative to this
+    offset, not to the pair's nominal offset. The two differ whenever a
+    pair's nominal spacing is not exactly the assumed step (e.g. a
+    non-rectangular grid with offset scan bands).
+    """
+    h, w = frame_shape
+    if dx != 0:
+        return (float(np.sign(dx)) * (w - _overlap_px(w, overlap_fraction))
+                * pixel_size_um, 0.0)
+    return (0.0, float(np.sign(dy)) * (h - _overlap_px(h, overlap_fraction))
+            * pixel_size_um)
+
+
+def _within_registration_range(
+    frame_shape:      Tuple[int, int],
+    anchor_xy:        Tuple[float, float],
+    neighbor_xy:      Tuple[float, float],
+    dx:               float,
+    dy:               float,
+    overlap_fraction: float,
+    pixel_size_um:    float,
+) -> bool:
+    """
+    Whether the pair's nominal offset is close enough to the offset the
+    crops assume (see `crop_offset_um`) for phase correlation to measure
+    the difference: it can only report shifts up to half the crop size on
+    each axis, so a pair further off than that (e.g. two fovs that do not
+    overlap at all) would give a meaningless registration.
+    """
+    h, w = frame_shape
+    if dx != 0:
+        cropRows, cropCols = h, _overlap_px(w, overlap_fraction)
+    else:
+        cropRows, cropCols = _overlap_px(h, overlap_fraction), w
+    cropDx, cropDy = crop_offset_um(
+        frame_shape, dx, dy, overlap_fraction, pixel_size_um)
+    diffXPx = abs(neighbor_xy[0] - anchor_xy[0] - cropDx) / pixel_size_um
+    diffYPx = abs(neighbor_xy[1] - anchor_xy[1] - cropDy) / pixel_size_um
+    return diffXPx < cropCols / 2 and diffYPx < cropRows / 2
 
 
 def register_neighbor_pair(
     anchor_img:       np.ndarray,
     neighbor_img:     np.ndarray,
     anchor_xy:        Tuple[float, float],
-    neighbor_xy:      Tuple[float, float],
     dx:               float,
     dy:               float,
     overlap_fraction: float,
@@ -210,10 +266,12 @@ def register_neighbor_pair(
         a_crop, n_crop, upsample_factor=upsample_factor)
     dy_px, dx_px = float(shift[0]), float(shift[1])
 
-    nomDx = neighbor_xy[0] - anchor_xy[0]
-    nomDy = neighbor_xy[1] - anchor_xy[1]
-    measDx = nomDx + dx_px * pixel_size_um
-    measDy = nomDy + dy_px * pixel_size_um
+    # The shift is relative to the offset the crops assume (see
+    # crop_offset_um), not to the pair's nominal offset.
+    cropDx, cropDy = crop_offset_um(
+        anchor_img.shape, dx, dy, overlap_fraction, pixel_size_um)
+    measDx = cropDx + dx_px * pixel_size_um
+    measDy = cropDy + dy_px * pixel_size_um
     return (anchor_xy[0] + measDx, anchor_xy[1] + measDy), float(error)
 
 
@@ -296,9 +354,13 @@ def register_fov_against_neighbors(
             anchor_fov, positions, dx, dy, tolerance_fraction)
         if neighborFov is None:
             continue
+        if not _within_registration_range(
+                anchorImg.shape, positions[anchor_fov], positions[neighborFov],
+                dx, dy, overlap_fraction, pixel_size_um):
+            continue
         neighborImg = load_frame(neighborFov)
         measuredXY, error = register_neighbor_pair(
-            anchorImg, neighborImg, positions[anchor_fov], positions[neighborFov],
+            anchorImg, neighborImg, positions[anchor_fov],
             dx, dy, overlap_fraction, pixel_size_um, upsample_factor)
         correspondences.append(NeighborCorrespondence(
             anchor_fov=anchor_fov, neighbor_fov=neighborFov, direction=direction,
@@ -595,7 +657,6 @@ def fit_global_positions(
 def compute_overlap_correlations(
     correspondences:   List[NeighborCorrespondence],
     positions:         Dict[int, Tuple[float, float]],
-    nominal_positions: Dict[int, Tuple[float, float]],
     load_frame:        Callable[[int], np.ndarray],
     pixel_size_um:     float,
     overlap_fraction:  float,
@@ -628,20 +689,21 @@ def compute_overlap_correlations(
     correlations: Dict[Tuple[int, int, str], float] = {}
     for c in correspondences:
         dx, dy = directionToDxDy[c.direction]
+        anchorFrame = cache.get(c.anchor_fov)
         anchorCrop, neighborCrop = crop_overlap(
-            cache.get(c.anchor_fov), cache.get(c.neighbor_fov), dx, dy, overlap_fraction)
+            anchorFrame, cache.get(c.neighbor_fov), dx, dy, overlap_fraction)
         anchorCrop = anchorCrop.astype(np.float64)
         neighborCrop = neighborCrop.astype(np.float64)
 
-        # The extra shift implied by *positions* beyond the nominal-grid
-        # alignment `crop_overlap` already assumes -- same convention
+        # The extra shift implied by *positions* beyond the offset
+        # `crop_overlap` already assumes -- same convention
         # `register_neighbor_pair` uses to turn a measured pixel shift into
         # a position, just inverted here to turn a position back into a
         # shift to apply to the crop before correlating.
-        nominalOffset = np.subtract(
-            nominal_positions[c.neighbor_fov], nominal_positions[c.anchor_fov])
+        cropOffset = np.array(crop_offset_um(
+            anchorFrame.shape, dx, dy, overlap_fraction, pixel_size_um))
         finalOffset = np.subtract(positions[c.neighbor_fov], positions[c.anchor_fov])
-        extraShiftUm = finalOffset - nominalOffset
+        extraShiftUm = finalOffset - cropOffset
         if extraShiftUm[0] != 0.0 or extraShiftUm[1] != 0.0:
             neighborCrop = ndi_shift(
                 neighborCrop,

@@ -229,3 +229,23 @@ def test_snakemake_generator_embeds_cluster_resources(simple_merfish_data):
     assert outputTask.is_complete()
 
     shutil.rmtree('.snakemake')
+
+
+def test_snakemake_rule_shell_passes_dataset_flags(simple_merfish_task,
+                                                  monkeypatch):
+    # Each snakemake job rebuilds the dataset from its command line, so the
+    # dataset's tolerance flags must appear there or the job runs without
+    # them (e.g. get_z_positions(fov) raising IndexError on a channel that
+    # has no raw file yet).
+    dataSet = simple_merfish_task.dataSet
+    shell = snakewriter.SnakemakeRule(simple_merfish_task)._generate_shell()
+    assert '--allow-missing-channels' not in shell
+    assert '--allow-ragged-z-stacks' not in shell
+
+    monkeypatch.setattr(dataSet, 'allowMissingChannels', True, raising=False)
+    monkeypatch.setattr(dataSet, 'allowRaggedZStacks', True, raising=False)
+    rule = snakewriter.SnakemakeRule(simple_merfish_task)
+    for shell in (rule._generate_shell(), rule._generate_done_shell()):
+        assert '--allow-missing-channels' in shell
+        assert '--allow-ragged-z-stacks' in shell
+        assert '--recalculate-filemap' not in shell

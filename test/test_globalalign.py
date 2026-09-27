@@ -116,3 +116,20 @@ def test_least_squares_global_alignment_generates_verification_figures(
             [figuresDir,
              '.'.join(['merlin', task.analysisName, figureName]) + '.png'])
         assert os.path.exists(figurePath), figurePath
+
+
+def test_registration_image_max_projection_by_channel_name(simple_merfish_data):
+    # The fixture's channels have one z plane each, so the max projection
+    # is that plane; the channel is given by name.
+    parameters = {'max_projection_data_channel': 'bit2',
+                  'fiducial_data_channel': 0, 'remove_hot_pixels': False}
+    image = globalalign._load_registration_image(
+        simple_merfish_data, parameters, 0)
+    expected = simple_merfish_data.get_raw_image(1, 0, 0)
+    np.testing.assert_array_equal(image, expected)
+
+    parameters['max_projection_data_channel'] = None
+    image = globalalign._load_registration_image(
+        simple_merfish_data, parameters, 0)
+    np.testing.assert_array_equal(
+        image, simple_merfish_data.get_fiducial_image(0, 0))

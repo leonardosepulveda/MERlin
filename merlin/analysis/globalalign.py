@@ -34,6 +34,34 @@ def _nominal_positions_and_overlap(dataSet, overlapFractionParam):
     return fovs, nominalPositions, micronsPerPixel, stepSizeUm, overlapFraction
 
 
+def _load_registration_image(dataSet, registrationParameters, fov):
+    """The image `RegisterFovNeighbors` registers one fov on, per its
+    *registrationParameters*: the fiducial frame, or the max projection of
+    one data channel's z stack (e.g. DAPI, or an antibody/readout channel),
+    with hot pixels removed unless disabled. Shared with
+    `LeastSquaresGlobalAlignment`, so its overlap QC scores the same image.
+    """
+    channel = registrationParameters['max_projection_data_channel']
+    if channel is None:
+        image = dataSet.get_fiducial_image(
+            registrationParameters['fiducial_data_channel'], fov)
+    else:
+        dataOrganization = dataSet.get_data_organization()
+        if isinstance(channel, str):
+            channel = dataOrganization.get_data_channel_index(channel)
+        zPositions = np.atleast_1d(dataOrganization.data.loc[channel, 'zPos'])
+        if len(zPositions) > 1:
+            # this fov's own z range (see allowRaggedZStacks)
+            zPositions = dataOrganization._get_available_z_positions([channel], fov)
+        image = None
+        for zPosition in zPositions:
+            plane = dataSet.get_raw_image(channel, fov, zPosition)
+            image = plane if image is None else np.maximum(image, plane)
+    if registrationParameters['remove_hot_pixels']:
+        image = globalpositions.remove_hot_pixels(image)
+    return image
+
+
 class GlobalAlignment(analysistask.AnalysisTask):
 
     """
@@ -323,6 +351,15 @@ class RegisterFovNeighbors(analysistask.ParallelAnalysisTask):
     (empty, header-only, if the fov has no surviving neighbour -- e.g. an
     isolated fov); `return_exported_data` reads it back as a list of
     `NeighborCorrespondence`.
+
+    Registration image (see `_load_registration_image`): the
+    `fiducial_data_channel` fiducial frame by default, or, with
+    `max_projection_data_channel` set (a data channel index or name), the
+    max projection of that channel's z stack. On LT074's test samples a
+    DAPI or readout max projection registered where weak beads failed
+    (held-out edge error 0.02-0.06 um vs 0.9-6.4 um). Do not sum
+    cross-power over z planes instead: on spinning-disk data 16% of edges
+    came out ~3 um off.
     """
 
     def __init__(self, dataSet, parameters=None, analysisName=None):
@@ -330,6 +367,12 @@ class RegisterFovNeighbors(analysistask.ParallelAnalysisTask):
 
         if 'fiducial_data_channel' not in self.parameters:
             self.parameters['fiducial_data_channel'] = 0
+        if 'max_projection_data_channel' not in self.parameters:
+            self.parameters['max_projection_data_channel'] = None
+        if 'remove_hot_pixels' not in self.parameters:
+            self.parameters['remove_hot_pixels'] = True
+        if 'hann_window' not in self.parameters:
+            self.parameters['hann_window'] = False
         if 'overlap_fraction' not in self.parameters:
             # None -> inferred in _run_analysis (see
             # _nominal_positions_and_overlap).
@@ -361,8 +404,10 @@ class RegisterFovNeighbors(analysistask.ParallelAnalysisTask):
         # trust for these ~13-190s jobs, so kTask isn't re-tuned from that
         # data. Rounded up to the next whole GB so the request is a clean
         # number.
+        # A max projection also holds the plane being read (3 frames).
+        frameCount = 2 if self.parameters['max_projection_data_channel'] is None else 3
         rawMb = resourceestimate.estimate_stack_memory_mb(
-            self.dataSet, frameCount=2, kTask=59, baselineMb=230)
+            self.dataSet, frameCount=frameCount, kTask=59, baselineMb=230)
         return math.ceil(rawMb / 1000) * 1000
 
     def get_estimated_time(self):
@@ -380,12 +425,23 @@ class RegisterFovNeighbors(analysistask.ParallelAnalysisTask):
         # (higher, but uncalibrated) 3-minute cluster-config request,
         # from a transient node-level I/O contention spike rather than
         # its own compute cost.
+        # A max projection reads every z plane of each of the 5 fovs
+        # (uncalibrated: same per-frame cost assumed).
         width, height = self.dataSet.get_image_dimensions()
         frameBytes = width * height * resourceestimate.BYTES_PER_PIXEL
         rawMinutes = resourceestimate.estimate_stack_time_minutes(
-            frameCount=5, secondsPerFrame=frameBytes / 4_000_000,
-            baselineMinutes=0.25)
+            frameCount=5 * self._planes_per_image(),
+            secondsPerFrame=frameBytes / 4_000_000, baselineMinutes=0.25)
         return max(rawMinutes, 1.0)
+
+    def _planes_per_image(self) -> int:
+        channel = self.parameters['max_projection_data_channel']
+        if channel is None:
+            return 1
+        dataOrganization = self.dataSet.get_data_organization()
+        if isinstance(channel, str):
+            channel = dataOrganization.get_data_channel_index(channel)
+        return len(np.atleast_1d(dataOrganization.data.loc[channel, 'zPos']))
 
     def get_dependencies(self):
         return []
@@ -411,16 +467,15 @@ class RegisterFovNeighbors(analysistask.ParallelAnalysisTask):
             _nominal_positions_and_overlap(
                 self.dataSet, self.parameters['overlap_fraction'])
 
-        fiducialChannel = self.parameters['fiducial_data_channel']
-
         def load_frame(fov):
-            return self.dataSet.get_fiducial_image(fiducialChannel, fov)
+            return _load_registration_image(self.dataSet, self.parameters, fov)
 
         correspondences = globalpositions.register_fov_against_neighbors(
             fragmentIndex, nominalPositions, load_frame,
             pixel_size_um=micronsPerPixel, overlap_fraction=overlapFraction,
             tolerance_fraction=self.parameters['tolerance_fraction'],
-            upsample_factor=self.parameters['upsample_factor'])
+            upsample_factor=self.parameters['upsample_factor'],
+            hann_window=self.parameters['hann_window'])
 
         self.dataSet.save_dataframe_to_csv(
             pd.DataFrame([
@@ -438,18 +493,22 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
 
     """
     A global alignment that corrects each fov's nominal (stage-reported)
-    position by jointly solving a sparse least-squares system built from
-    real pairwise image-registration measurements between every 4-connected
-    neighbouring fov -- the "global_lsq" method identified, on real
-    several-hundred-fov data, as the most accurate of several candidate
-    correction strategies compared in the sibling MERci project
-    (`251225_LT027_saving_time/MERci/notebooks/tests/
-    compare_stitching_correction_methods.ipynb`; algorithm ported in
-    `merlin.util.globalpositions`). See that module's docstring for why a
-    single global affine transform (this task's `CorrelationGlobalAlignment`
-    sibling was originally sketched as, per its own TODO comment) cannot
-    correct this class of error at all, and why a joint per-fov solve is
-    needed instead.
+    position from real pairwise image-registration measurements between
+    every 4-connected neighbouring fov: per-direction outlier rejection,
+    one displacement affine (camera-vs-stage rotation and scale), then a
+    per-fov least-squares solve with a weak prior toward that affine. See
+    `merlin.util.globalpositions`' module docstring for the method.
+
+    `correction_summary` holds two QC values besides the in-sample
+    `residual_rms_um`:
+
+    - `affine_rotation_deg`/`affine_singular_values`. Expected: ST2
+      -0.27 to -0.30 deg, 0.9839/0.9814; MF3 -0.95 deg, ~1.0145; MFX +0.01
+      deg. A rotation far from its microscope's value means the
+      registrations failed.
+    - `heldout_edge_error_um`: 5-fold held-out edge error (median, p90) for
+      the final, affine-only and nominal positions. Expected final
+      0.04-0.13 um; nominal ~3.3 um.
 
     Reuses every coordinate-transform method from `SimpleGlobalAlignment`
     unchanged (`fov_coordinates_to_global`, `fov_to_global_transform`,
@@ -475,8 +534,6 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
         self.registrationTask = self.dataSet.load_analysis_task(
             self.parameters['neighbor_registration_task'])
 
-        if 'fiducial_data_channel' not in self.parameters:
-            self.parameters['fiducial_data_channel'] = 0
         if 'overlap_fraction' not in self.parameters:
             # None -> inferred in _run_analysis from the measured grid step
             # size vs. the fov's own width, same convention the real-data
@@ -484,10 +541,8 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
             self.parameters['overlap_fraction'] = None
         if 'mad_threshold' not in self.parameters:
             self.parameters['mad_threshold'] = 5.0
-        if 'lsqr_atol' not in self.parameters:
-            self.parameters['lsqr_atol'] = 1e-12
-        if 'lsqr_btol' not in self.parameters:
-            self.parameters['lsqr_btol'] = 1e-12
+        if 'affine_prior_weight' not in self.parameters:
+            self.parameters['affine_prior_weight'] = 1e-3
 
     #: No frame is ever held beyond the bounded `_BoundedFrameCache` used
     #: by this task's own final `compute_overlap_correlations` QC pass
@@ -502,7 +557,7 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
         # Uncalibrated -- no real job measured yet. `_BoundedFrameCache`'s
         # default maxsize (8) full frames, plus a higher baseline than
         # FiducialCorrelationWarp's measured 230 MB to cover pandas/scipy
-        # (the sparse lsqr solve, correspondence dataframes) -- kTask=2
+        # (the sparse solves, correspondence dataframes) -- kTask=2
         # rather than 1 since compute_overlap_correlations promotes crops
         # to float64.
         return resourceestimate.estimate_stack_memory_mb(
@@ -540,10 +595,11 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
             _nominal_positions_and_overlap(
                 self.dataSet, self.parameters['overlap_fraction'])
 
-        fiducialChannel = self.parameters['fiducial_data_channel']
+        registrationParameters = self.registrationTask.parameters
 
         def load_frame(fov):
-            return self.dataSet.get_fiducial_image(fiducialChannel, fov)
+            return _load_registration_image(
+                self.dataSet, registrationParameters, fov)
 
         correspondences = []
         for fov in fovs:
@@ -552,15 +608,12 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
         kept, rejected = globalpositions.filter_correspondence_outliers(
             correspondences, mad_threshold=self.parameters['mad_threshold'])
 
+        priorWeight = self.parameters['affine_prior_weight']
+        toleranceFraction = registrationParameters['tolerance_fraction']
         correction = globalpositions.fit_global_positions(
-            kept, nominalPositions,
-            lsqr_atol=self.parameters['lsqr_atol'],
-            lsqr_btol=self.parameters['lsqr_btol'])
-
-        # Merge over the full nominal grid as a fallback for any fov outside
-        # the solved component(s) -- e.g. an isolated fov with no surviving
-        # neighbour correspondence.
-        correctedPositions = {**nominalPositions, **correction.positions}
+            kept, nominalPositions, prior_weight=priorWeight,
+            tolerance_fraction=toleranceFraction)
+        correctedPositions = correction.positions
 
         self.dataSet.save_dataframe_to_csv(
             pd.DataFrame([
@@ -591,10 +644,23 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
                 ]),
                 'neighbor_correspondences', self)
 
+        rotationDeg, singularValues = globalpositions.rotation_and_scale(
+            correction.affine)
+        heldOutErrors = globalpositions.cross_validate_positions(
+            kept, nominalPositions, prior_weight=priorWeight,
+            tolerance_fraction=toleranceFraction)
         self.dataSet.save_json_analysis_result(
             {'n_correspondences': len(correspondences), 'n_kept': len(kept),
              'n_rejected': len(rejected), 'n_components': correction.n_components,
              'residual_rms_um': correction.residual_rms_um,
+             'heldout_edge_error_um': {
+                 name: ({'median': float(np.median(errors)),
+                         'p90': float(np.percentile(errors, 90))}
+                        if len(errors) else None)
+                 for name, errors in heldOutErrors.items()},
+             'affine': correction.affine.tolist(),
+             'affine_rotation_deg': rotationDeg,
+             'affine_singular_values': singularValues.tolist(),
              'step_size_um': stepSizeUm, 'overlap_fraction': overlapFraction},
             'correction_summary', self.analysisName)
 

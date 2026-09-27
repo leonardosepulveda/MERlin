@@ -2,29 +2,36 @@
 Camera/stage global-position correction for a MERFISH FOV grid.
 
 Ported from the sibling `MERci` project's `acquisition.camera_rotation`
-module (`251225_LT027_saving_time/MERci`), which found -- on a real,
-several-hundred-FOV whole-grid dataset -- that a neighbouring FOV's
-nominal (stage-reported) position disagrees with its true relative
-position by a small but real, highly direction-dependent amount (most
-plausibly stage backlash/hysteresis, not a fixed camera-vs-stage
-rotation angle: see :func:`fit_global_positions`'s own docstring for why
-a single global affine transform cannot correct this class of error at
-all, no matter how it's fit).
+module (`251225_LT027_saving_time/MERci`), then redesigned in the
+`260926_LT074_stitching_test` investigation. A neighbouring FOV's nominal
+(stage-reported) position disagrees with its true relative position by a
+few microns, from two sources:
 
-Comparing three correction strategies on that real dataset via mean
-pixel-intensity correlation between every real 4-connected neighbour
-pair's own overlapping border region, a joint least-squares solve of
-every FOV's position at once ("global_lsq") was the clear winner: 0.79
-mean overlap correlation on held-out edges, vs. 0.60 for a greedy
-per-FOV walk and 0.09 for both the uncorrected nominal grid and a single
-global affine fit. This module ports only that winning method (plus the
-neighbour-pair registration and outlier filtering it needs) into MERlin,
-as the basis for `merlin.analysis.globalalign.CorrelationGlobalAlignment`.
-Deliberately NOT ported: the single-affine and greedy-walk methods
-(both lost the real-data comparison), and the orientation-detection
-helpers (MERlin already applies `transpose`/`flip_horizontal`/
-`flip_vertical` at image-load time via `ImageDataSet.load_image`, so raw
-images handed to this module are already correctly oriented).
+- one linear map shared by the whole grid (camera-vs-stage rotation,
+  image-vs-stage scale), and
+- a direction-dependent offset per step (stage backlash: e.g. y differs
+  by 0.72 um between the two scan directions).
+
+The method, in four parts:
+
+1. register every 4-connected neighbour pair on its overlap band
+   (:func:`register_neighbor_pair`);
+2. reject outliers per direction, on the residual measured - nominal
+   (:func:`filter_correspondence_outliers`);
+3. fit one 2x2 affine ``A`` on the edge DISPLACEMENTS, ``m = A d``
+   (:func:`fit_displacement_affine`). Fitting an affine on absolute
+   (nominal, measured) positions instead returns about the identity;
+4. solve every FOV's position by least squares on all kept edges, with a
+   weak ``A d`` prior on every grid edge (:func:`fit_global_positions`).
+
+On real data this leaves held-out edges 0.02-0.13 um off (nominal: ~3.3
+um). Global coordinates stay in the camera frame with translation-only
+per-FOV offsets; the stage grid appears rotated and scaled in that frame.
+
+Not ported: MERci's orientation-detection helpers (MERlin already applies
+`transpose`/`flip_horizontal`/`flip_vertical` at image-load time via
+`ImageDataSet.load_image`, so raw images handed to this module are
+already correctly oriented).
 """
 from __future__ import annotations
 
@@ -32,10 +39,13 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
+import cv2
 import numpy as np
+from scipy import sparse
+from scipy.ndimage import median_filter
 from scipy.ndimage import shift as ndi_shift
-from scipy.sparse import lil_matrix
-from scipy.sparse.linalg import lsqr
+from scipy.sparse.csgraph import connected_components
+from scipy.sparse.linalg import spsolve
 from scipy.spatial import KDTree
 from skimage import registration
 
@@ -242,6 +252,61 @@ def _within_registration_range(
     return diffXPx < cropCols / 2 and diffYPx < cropRows / 2
 
 
+def remove_hot_pixels(
+    img:         np.ndarray,
+    size:        int   = 3,
+    ratio:       float = 5.0,
+    sigma_floor: float = 5.0,
+) -> np.ndarray:
+    """
+    Replace isolated hot/dead camera pixels with their local median before
+    registration. Ported from MERci's `acquisition.alignment.remove_hot_pixels`.
+
+    Hot pixels sit at a fixed detector position in every frame, so they
+    dominate phase correlation and pin the shift to zero when the real
+    signal (e.g. dim beads) is weak. A hot pixel is a single-pixel spike
+    far above its local median; a bead spans several pixels (the PSF), so
+    it stays close to its local median.
+
+    Parameters
+    ----------
+    img         : 2-D registration image
+    size        : local-median window (pixels); 3 isolates single-pixel spikes
+    ratio       : flag pixels above ``ratio`` x local median (hot pixels
+                  were observed at ~10-600x, bead cores at ~1-2x)
+    sigma_floor : also require the excess over the local median to exceed
+                  this many background-noise sigmas, so noise on near-zero
+                  background is not flagged
+
+    Returns
+    -------
+    Copy of *img* with hot pixels replaced by their local median (*img*
+    itself, uncopied, if none are flagged).
+    """
+    if size in (3, 5) and img.dtype in (np.uint8, np.uint16, np.float32):
+        # Same result as median_filter(mode='nearest'), ~50x faster (0.02 vs
+        # 1.1 s on a 2048x2048 frame).
+        localMedian = cv2.medianBlur(img, size).astype(np.float64)
+    else:
+        localMedian = median_filter(img, size=size, mode='nearest').astype(np.float64)
+    excess = img.astype(np.float64) - localMedian
+    # 1.4826 converts a median absolute deviation to a Gaussian sigma.
+    noiseSigma = 1.4826 * float(np.median(np.abs(excess - np.median(excess))))
+    hot = (img > ratio * np.maximum(localMedian, 1.0)) & (excess > sigma_floor * noiseSigma)
+    if hot.any():
+        img = img.copy()
+        img[hot] = localMedian[hot].astype(img.dtype)
+    return img
+
+
+def _hann_windowed(crop: np.ndarray) -> np.ndarray:
+    """Mean-subtracted *crop* times a 2-D Hann window. Without it, the
+    band's non-periodic edges add a zero-shift peak to the phase
+    correlation, which wins when the shared structure is weak."""
+    crop = crop.astype(np.float64) - crop.mean()
+    return crop * np.outer(np.hanning(crop.shape[0]), np.hanning(crop.shape[1]))
+
+
 def register_neighbor_pair(
     anchor_img:       np.ndarray,
     neighbor_img:     np.ndarray,
@@ -251,10 +316,14 @@ def register_neighbor_pair(
     overlap_fraction: float,
     pixel_size_um:    float,
     upsample_factor:  int = 100,
+    hann_window:      bool = False,
 ) -> Tuple[Tuple[float, float], float]:
     """
     Measure the neighbour's TRUE position relative to the anchor, from the
     real pixel shift needed to align their overlapping border crop.
+
+    *hann_window* multiplies each crop by a 2-D Hann window before
+    correlating (see `_hann_windowed`).
 
     Returns
     -------
@@ -262,6 +331,8 @@ def register_neighbor_pair(
     position (microns), and the registration's error metric.
     """
     a_crop, n_crop = crop_overlap(anchor_img, neighbor_img, dx, dy, overlap_fraction)
+    if hann_window:
+        a_crop, n_crop = _hann_windowed(a_crop), _hann_windowed(n_crop)
     shift, error, _ = registration.phase_cross_correlation(
         a_crop, n_crop, upsample_factor=upsample_factor)
     dy_px, dx_px = float(shift[0]), float(shift[1])
@@ -321,6 +392,7 @@ def register_fov_against_neighbors(
     overlap_fraction:   float,
     tolerance_fraction: float = 0.25,
     upsample_factor:    int = 100,
+    hann_window:        bool = False,
 ) -> List[NeighborCorrespondence]:
     """
     Register *anchor_fov* against each of its present 4-connected
@@ -361,7 +433,7 @@ def register_fov_against_neighbors(
         neighborImg = load_frame(neighborFov)
         measuredXY, error = register_neighbor_pair(
             anchorImg, neighborImg, positions[anchor_fov],
-            dx, dy, overlap_fraction, pixel_size_um, upsample_factor)
+            dx, dy, overlap_fraction, pixel_size_um, upsample_factor, hann_window)
         correspondences.append(NeighborCorrespondence(
             anchor_fov=anchor_fov, neighbor_fov=neighborFov, direction=direction,
             nominal_xy=positions[neighborFov], measured_xy=measuredXY, error=error))
@@ -376,6 +448,7 @@ def sample_neighbor_correspondences(
     overlap_fraction:   float,
     tolerance_fraction: float = 0.25,
     upsample_factor:    int = 100,
+    hann_window:        bool = False,
 ) -> List[NeighborCorrespondence]:
     """
     Register every fov in *fov_ids* against each of its present 4-connected
@@ -412,7 +485,7 @@ def sample_neighbor_correspondences(
     for anchorFov in fov_ids:
         correspondences.extend(register_fov_against_neighbors(
             anchorFov, positions, cache.get, pixel_size_um, overlap_fraction,
-            tolerance_fraction, upsample_factor))
+            tolerance_fraction, upsample_factor, hann_window))
     return correspondences
 
 
@@ -421,58 +494,161 @@ def filter_correspondence_outliers(
     mad_threshold:   float = 5.0,
 ) -> Tuple[List[NeighborCorrespondence], List[NeighborCorrespondence]]:
     """
-    Split correspondences into (kept, rejected) by a robust outlier test on
-    each one's ``|measured - nominal|`` shift magnitude: reject a
-    correspondence if its shift exceeds ``median + mad_threshold *
-    robust_sigma``, where ``robust_sigma = 1.4826 * median_absolute_deviation``
-    (1.4826 = 1/norm.ppf(0.75), the standard MAD-to-Gaussian-sigma
-    conversion). A handful of individual registrations can fail outright
-    (weak fiducial signal, a bad phase-correlation peak) even with correct
-    geometry -- this catches those without needing manual review.
+    Split correspondences into (kept, rejected), separately per direction.
+
+    Each correspondence's residual is ``r = measured_xy - nominal_xy`` (the
+    measured minus the nominal displacement). The residual differs by
+    direction (stage backlash), so pooling every direction would reject
+    good edges of one direction and keep bad ones of another. Within one
+    direction, a correspondence is rejected when its 2-D distance from
+    that direction's median residual exceeds ``median + mad_threshold *
+    1.4826 * MAD`` of those distances (1.4826 converts a median absolute
+    deviation to a Gaussian sigma). This catches individual registrations
+    that failed outright (weak fiducial signal, a bad phase-correlation
+    peak).
+
+    The direction is taken from the lower to the higher fov id (a
+    measurement made from the higher id is flipped): with fovs numbered in
+    acquisition order, that is the stage's move direction, which is what
+    the backlash depends on. Both measurements of one edge therefore get
+    the same decision.
+
+    Limitation: if backlash splits one direction's residuals into two
+    clusters (e.g. alternate scan columns) and the registration noise is
+    far below the gap between them, a cluster holding under half of that
+    direction's edges is rejected too.
     """
-    if len(correspondences) < 3:
-        return list(correspondences), []
+    flip = np.array([c.anchor_fov > c.neighbor_fov for c in correspondences], dtype=bool)
+    residuals = np.array(
+        [(c.measured_xy[0] - c.nominal_xy[0], c.measured_xy[1] - c.nominal_xy[1])
+         for c in correspondences], dtype=float).reshape(-1, 2)
+    residuals[flip] *= -1
+    opposite = {'+x': '-x', '-x': '+x', '+y': '-y', '-y': '+y'}
+    directions = np.array([opposite[c.direction] if f else c.direction
+                           for c, f in zip(correspondences, flip)])
 
-    shiftsUm = np.array([
-        np.hypot(c.measured_xy[0] - c.nominal_xy[0], c.measured_xy[1] - c.nominal_xy[1])
-        for c in correspondences
-    ])
-    median = float(np.median(shiftsUm))
-    mad = float(np.median(np.abs(shiftsUm - median)))
-    robustSigma = 1.4826 * mad
-    threshold = median + mad_threshold * robustSigma if robustSigma > 0 else median
+    keep = np.ones(len(correspondences), dtype=bool)
+    for direction in np.unique(directions):
+        idx = np.where(directions == direction)[0]
+        deviation = np.hypot(*(residuals[idx] - np.median(residuals[idx], axis=0)).T)
+        median = np.median(deviation)
+        threshold = median + mad_threshold * 1.4826 * np.median(np.abs(deviation - median))
+        keep[idx[deviation > threshold]] = False
 
-    kept = [c for c, s in zip(correspondences, shiftsUm) if s <= threshold]
-    rejected = [c for c, s in zip(correspondences, shiftsUm) if s > threshold]
+    kept = [c for c, k in zip(correspondences, keep) if k]
+    rejected = [c for c, k in zip(correspondences, keep) if not k]
     return kept, rejected
+
+
+def _displacements_um(
+    correspondences:   List[NeighborCorrespondence],
+    nominal_positions: Dict[int, Tuple[float, float]],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """``(d, m)``, each ``(n, 2)`` microns: every correspondence's nominal
+    displacement ``nominal[neighbor] - nominal[anchor]`` and measured
+    displacement ``measured_xy - nominal[anchor]``."""
+    anchorXY = np.array([nominal_positions[c.anchor_fov] for c in correspondences],
+                        dtype=float).reshape(-1, 2)
+    d = np.array([nominal_positions[c.neighbor_fov] for c in correspondences],
+                 dtype=float).reshape(-1, 2) - anchorXY
+    m = np.array([c.measured_xy for c in correspondences],
+                 dtype=float).reshape(-1, 2) - anchorXY
+    return d, m
+
+
+def fit_displacement_affine(
+    correspondences:   List[NeighborCorrespondence],
+    nominal_positions: Dict[int, Tuple[float, float]],
+) -> np.ndarray:
+    """
+    Least-squares 2x2 ``A`` with ``m = A d`` over *correspondences* (see
+    `_displacements_um`); no translation term, since a displacement has
+    none. ``A`` captures the camera-vs-stage rotation and the
+    image-vs-stage scale (see `rotation_and_scale`).
+
+    Fitting on absolute positions (``measured = M nominal + t``) instead
+    would return about the identity: every measured position is the
+    anchor's own nominal position plus a few microns.
+
+    A direction no correspondence spans (e.g. a single-row grid, or no
+    correspondences at all) falls back to the identity, via a ridge term
+    far too small to affect a direction that is measured.
+    """
+    d, m = _displacements_um(correspondences, nominal_positions)
+    ridge = 1e-6 * np.eye(2)
+    return np.linalg.solve(d.T @ d + ridge, d.T @ m + ridge).T
+
+
+def rotation_and_scale(affine: np.ndarray) -> Tuple[float, np.ndarray]:
+    """Polar split ``A = R S``: the rotation angle of ``R`` (degrees) and the
+    singular values of ``A``."""
+    u, singularValues, vt = np.linalg.svd(affine)
+    rotation = u @ vt
+    return float(np.degrees(np.arctan2(rotation[1, 0], rotation[0, 0]))), singularValues
+
+
+def apply_affine(
+    affine:            np.ndarray,
+    nominal_positions: Dict[int, Tuple[float, float]],
+    origin_fov:        int,
+) -> Dict[int, Tuple[float, float]]:
+    """Positions from *affine* alone, fixed at *origin_fov*:
+    ``p0 + A (nominal - p0)``, with ``p0`` = *origin_fov*'s nominal position."""
+    p0 = np.array(nominal_positions[origin_fov], dtype=float)
+    return {f: tuple(float(v) for v in p0 + affine @ (np.array(xy, dtype=float) - p0))
+            for f, xy in nominal_positions.items()}
+
+
+def grid_neighbor_pairs(
+    nominal_positions:  Dict[int, Tuple[float, float]],
+    tolerance_fraction: float = 0.25,
+) -> List[Tuple[int, int]]:
+    """Every 4-connected grid edge ``(a, b)``, ``a < b``, found with the
+    same `find_grid_neighbor` lookup the registration uses."""
+    pairs = set()
+    for fov in nominal_positions:
+        for _, dx, dy in _DIRECTIONS:
+            neighbor = find_grid_neighbor(
+                fov, nominal_positions, dx, dy, tolerance_fraction)
+            if neighbor is not None:
+                pairs.add((min(fov, neighbor), max(fov, neighbor)))
+    return sorted(pairs)
+
+
+def edge_errors(
+    correspondences:   List[NeighborCorrespondence],
+    positions:         Dict[int, Tuple[float, float]],
+    nominal_positions: Dict[int, Tuple[float, float]],
+) -> np.ndarray:
+    """``|P[neighbor] - P[anchor] - m|`` (microns) per correspondence: how
+    far *positions* leave each measured overlap from lining up."""
+    _, m = _displacements_um(correspondences, nominal_positions)
+    solved = np.array(
+        [np.subtract(positions[c.neighbor_fov], positions[c.anchor_fov])
+         for c in correspondences], dtype=float).reshape(-1, 2)
+    return np.hypot(*(solved - m).T)
 
 
 @dataclass
 class GlobalPositionCorrection:
     """
-    Per-fov positions from jointly solving every measured fov's own position
-    against all its pairwise neighbour constraints at once (see
-    :func:`fit_global_positions`).
+    Per-fov positions from :func:`fit_global_positions`.
 
     Attributes
     ----------
-    positions         : ``{fov_id: (x, y)}`` (microns) -- only fovs that
-                        appeared in at least one kept correspondence; merge
-                        over the full nominal positions dict as a fallback
-                        for every other fov.
-    anchor_fovs       : ``{component_id: fov_id}`` -- the one fov in each
-                        connected correspondence-graph component held fixed
-                        at its own nominal position, removing that
-                        component's translational null space.
+    positions         : ``{fov_id: (x, y)}`` (microns) for every fov in the
+                        nominal positions passed in
+    anchor_fovs       : ``{component_id: fov_id}`` -- the one fov per
+                        connected component pinned at its affine position
     n_fovs_solved     : ``len(positions)``
     n_correspondences : how many correspondences fed the solve
-    n_components      : how many disconnected correspondence-graph
-                        components were solved independently
-    residual_rms_um   : RMS of ``(p[B] - p[A]) - measured_relative_offset``
-                        across every correspondence, evaluated at the
-                        solved positions -- near 0.0 when every redundant
-                        measurement agrees; only meaningful once some fov
-                        is constrained by more than one correspondence.
+    n_components      : connected components of the graph of kept
+                        correspondences plus prior grid edges
+    residual_rms_um   : RMS of `edge_errors` over the correspondences that
+                        fed the solve. In-sample, so it cannot flag
+                        overfitting; see :func:`cross_validate_positions`.
+    affine            : the 2x2 displacement affine
+                        (:func:`fit_displacement_affine`)
     """
     positions:         Dict[int, Tuple[float, float]]
     anchor_fovs:       Dict[int, int]
@@ -480,178 +656,160 @@ class GlobalPositionCorrection:
     n_correspondences: int
     n_components:      int
     residual_rms_um:   float
-
-
-def _connected_components(correspondences: List[NeighborCorrespondence]) -> List[List[int]]:
-    """Plain BFS connected components of the anchor<->neighbour graph --
-    these graphs are typically at most a few thousand nodes, no graph
-    library needed."""
-    adjacency: Dict[int, set] = {}
-    for c in correspondences:
-        adjacency.setdefault(c.anchor_fov, set()).add(c.neighbor_fov)
-        adjacency.setdefault(c.neighbor_fov, set()).add(c.anchor_fov)
-
-    visited: set = set()
-    components = []
-    for start in sorted(adjacency):
-        if start in visited:
-            continue
-        stack, component = [start], []
-        visited.add(start)
-        while stack:
-            fov = stack.pop()
-            component.append(fov)
-            for neighbor in adjacency[fov]:
-                if neighbor not in visited:
-                    visited.add(neighbor)
-                    stack.append(neighbor)
-        components.append(sorted(component))
-    return components
+    affine:            np.ndarray
 
 
 def fit_global_positions(
-    correspondences:   List[NeighborCorrespondence],
-    nominal_positions: Dict[int, Tuple[float, float]],
-    lsqr_atol:         float = 1.0e-12,
-    lsqr_btol:         float = 1.0e-12,
+    correspondences:    List[NeighborCorrespondence],
+    nominal_positions:  Dict[int, Tuple[float, float]],
+    prior_weight:       float = 1e-3,
+    grid_pairs:         Optional[List[Tuple[int, int]]] = None,
+    tolerance_fraction: float = 0.25,
 ) -> GlobalPositionCorrection:
     """
-    Jointly solve for every measured fov's own real position from all kept
-    pairwise neighbour correspondences, instead of fitting one global affine
-    transform applied uniformly to the whole nominal grid.
+    Solve every fov's position from the kept correspondences, with a weak
+    affine prior on every grid edge.
 
-    Why a single affine transform can't fix this: the real-data comparison
-    this module is ported from found a per-STEP, direction-symmetric bias
-    (e.g. "+y" edges deviate by `(+3.35, +1.14)` um on average while "-y"
-    edges deviate by almost the exact mirror `(-3.35, -1.14)` um --
-    consistent with stage backlash/hysteresis, not a fixed rotation angle).
-    Since every physical edge is measured from both endpoints, the "+y" and
-    "-y" populations are numerically forced to be near-perfect mirrors of
-    each other, so pooling every direction together (what a single-affine
-    fit does, from bare nominal/measured point pairs with no direction
-    label attached) cancels the bias out almost exactly and the best-fit
-    transform comes out near-identity -- confirmed directly on real data:
-    the affine method isn't failing to detect a real rotation, there simply
-    isn't a coherent one to detect this way. A per-fov solve that uses each
-    correspondence's own direction explicitly is the only way to recover
-    it. See the sibling MERci project's `acquisition/camera_rotation.py`
-    module docstring and its `notebooks/tests/
-    compare_stitching_correction_methods.ipynb` for the full real-data
-    comparison this design choice is based on.
+    With ``A`` from :func:`fit_displacement_affine`, ``m_e`` a
+    correspondence's measured displacement and ``d_ab`` a grid edge's
+    nominal displacement (see `_displacements_um`), minimise over every
+    fov's position ``P``::
 
-    Method
-    ------
-    For each kept correspondence (anchor A, neighbour B), the measured
-    relative offset ``r_AB = measured_xy(B) - nominal_positions[A]`` is a
-    direct, independent estimate of B's true position relative to A's own
-    nominal position. Solving::
+        sum_{kept e}      |P_b - P_a - m_e|^2
+      + prior_weight sum_{grid edges ab} |P_b - P_a - A d_ab|^2
 
-        minimize over every fov's unknown position p[F]:
-            sum_AB || (p[B] - p[A]) - r_AB ||^2
+    with one fov per connected component pinned at its affine position
+    ``apply_affine(A, nominal, origin)`` (origin = the largest component's
+    pin; each component pins the fov that anchors the most
+    correspondences). The prior makes fovs and edges with no kept
+    measurement follow the affine rather than raw nominal positions (which
+    are ~3 um off), and keeps the grid one component.
 
-    is a sparse linear least-squares problem that separates cleanly into
-    two independent solves (x and y), via ``scipy.sparse.linalg.lsqr``.
-
-    The correspondence graph may not be one connected mesh (e.g. a fov
-    excluded everywhere by outlier filtering). Each connected component has
-    its own 1-D-per-axis translational null space (uniformly shifting every
-    position in it satisfies every constraint in that component equally),
-    removed by pinning ONE fov per component -- whichever appears as an
-    ``anchor_fov`` in the most correspondences -- to its own nominal
-    position.
-
-    ``lsqr``'s own default convergence tolerances are too loose for a
-    dense, exhaustively-measured grid: confirmed directly on real data
-    (476 fovs, 1662 kept correspondences, one connected component) --
-    calling ``lsqr`` with scipy's own default tolerances declared
-    convergence with ``residual_rms_um`` = 81.6, roughly 3300x the value
-    (0.025 um) that ``atol=btol=1e-12`` converges to on the exact same
-    input (confirmed via ``istop`` 1/2, genuine convergence, not 7 --
-    iteration limit -- or 3/4 -- ill-conditioned). Do not loosen these
-    below their own defaults without re-confirming convergence the same
-    way.
+    Solved directly (sparse LU), per axis, for the offset from the affine
+    positions: the normal matrix is a weighted graph Laplacian, so there is
+    no iterative-solver tolerance to tune.
 
     Parameters
     ----------
-    correspondences   : from :func:`sample_neighbor_correspondences`,
-                        already passed through
+    correspondences   : already passed through
                         :func:`filter_correspondence_outliers`
-    nominal_positions : ``{fov_id: (x, y)}`` -- the full experiment's
-                        nominal grid positions
-    lsqr_atol, lsqr_btol : passed straight through to
-                        ``scipy.sparse.linalg.lsqr`` for both the x and y
-                        solves -- see the convergence note above before
-                        loosening these.
-
-    Returns
-    -------
-    GlobalPositionCorrection -- merge ``.positions`` over the full nominal
-    positions dict as a fallback for every fov not directly measured.
+    nominal_positions : ``{fov_id: (x, y)}`` -- every fov to solve for
+    prior_weight      : weight of each grid edge's ``A d`` prior relative
+                        to a measured edge; 0 disables the prior
+    grid_pairs        : the grid edges for the prior (default: computed
+                        by :func:`grid_neighbor_pairs`; pass them in to
+                        reuse across several solves)
     """
-    if not correspondences:
-        return GlobalPositionCorrection(
-            positions={}, anchor_fovs={}, n_fovs_solved=0,
-            n_correspondences=0, n_components=0, residual_rms_um=0.0,
-        )
+    fovs = sorted(nominal_positions)
+    index = {f: i for i, f in enumerate(fovs)}
+    nFovs = len(fovs)
+    nominal = np.array([nominal_positions[f] for f in fovs], dtype=float)
 
-    components = _connected_components(correspondences)
-    allFovs = sorted({fov for comp in components for fov in comp})
-    fovToIdx = {fov: i for i, fov in enumerate(allFovs)}
-    n = len(allFovs)
+    affine = fit_displacement_affine(correspondences, nominal_positions)
+    d, m = _displacements_um(correspondences, nominal_positions)
+    i = [index[c.anchor_fov] for c in correspondences]
+    j = [index[c.neighbor_fov] for c in correspondences]
+    # Offsets from the affine positions: measured edges ask for m - A d,
+    # prior edges for 0.
+    target = [m - d @ affine.T]
+    weight = [np.ones(len(correspondences))]
+    if prior_weight > 0:
+        if grid_pairs is None:
+            grid_pairs = grid_neighbor_pairs(nominal_positions, tolerance_fraction)
+        i += [index[a] for a, _ in grid_pairs]
+        j += [index[b] for _, b in grid_pairs]
+        target.append(np.zeros((len(grid_pairs), 2)))
+        weight.append(np.full(len(grid_pairs), prior_weight))
+    target, weight = np.vstack(target), np.concatenate(weight)
+    nEdges = len(i)
 
-    # Pin each component's most-sampled real anchor to its own nominal position.
-    anchorCounts: Dict[int, int] = {}
-    for c in correspondences:
-        anchorCounts[c.anchor_fov] = anchorCounts.get(c.anchor_fov, 0) + 1
-    anchorFovs = {
-        compId: max(comp, key=lambda fov: anchorCounts.get(fov, 0))
-        for compId, comp in enumerate(components)
-    }
+    incidence = sparse.csr_matrix(
+        (np.r_[-np.ones(nEdges), np.ones(nEdges)],
+         (np.r_[np.arange(nEdges), np.arange(nEdges)], np.r_[i, j])),
+        shape=(nEdges, nFovs))
+    nComponents, labels = connected_components(
+        sparse.csr_matrix((np.ones(nEdges), (i, j)), shape=(nFovs, nFovs)),
+        directed=False)
 
-    nCorr = len(correspondences)
-    nPins = len(anchorFovs)
-    # Heavily weighted relative to unit-weighted correspondence rows -- pins
-    # the component's reference fov to within numerical noise of its own
-    # nominal position without needing a true equality-constrained solver.
-    PIN_WEIGHT = 1.0e4
+    anchorCounts = np.bincount(
+        [index[c.anchor_fov] for c in correspondences], minlength=nFovs)
+    pins = []
+    for component in range(nComponents):
+        members = np.where(labels == component)[0]
+        pins.append(int(members[np.argmax(anchorCounts[members])]))
+    originFov = fovs[pins[int(np.argmax(np.bincount(labels)))]]
+    affinePositions = apply_affine(affine, nominal_positions, originFov)
 
-    def _solve_axis(axis: int) -> np.ndarray:
-        A = lil_matrix((nCorr + nPins, n), dtype=float)
-        b = np.zeros(nCorr + nPins, dtype=float)
+    # Heavily weighted relative to unit-weighted correspondence rows: pins
+    # each component's offset to within numerical noise of zero without
+    # needing an equality-constrained solver.
+    PIN_WEIGHT = 1.0e6
+    laplacian = (incidence.T @ sparse.diags(weight) @ incidence).tolil()
+    for p in pins:
+        laplacian[p, p] += PIN_WEIGHT
+    laplacian = laplacian.tocsc()
+    offsets = np.column_stack([
+        spsolve(laplacian, incidence.T @ (weight * target[:, axis]))
+        for axis in range(2)]).reshape(nFovs, 2)
 
-        for row, c in enumerate(correspondences):
-            iA, iB = fovToIdx[c.anchor_fov], fovToIdx[c.neighbor_fov]
-            A[row, iB] += 1.0
-            A[row, iA] += -1.0
-            b[row] = c.measured_xy[axis] - nominal_positions[c.anchor_fov][axis]
-
-        for offset, (compId, pinFov) in enumerate(anchorFovs.items()):
-            row = nCorr + offset
-            A[row, fovToIdx[pinFov]] = PIN_WEIGHT
-            b[row] = PIN_WEIGHT * nominal_positions[pinFov][axis]
-
-        return lsqr(A.tocsr(), b, atol=lsqr_atol, btol=lsqr_btol)[0]
-
-    xSolution = _solve_axis(0)
-    ySolution = _solve_axis(1)
     positions = {
-        fov: (float(xSolution[i]), float(ySolution[i])) for fov, i in fovToIdx.items()
-    }
-
-    residualsUm = []
-    for c in correspondences:
-        pA, pB = positions[c.anchor_fov], positions[c.neighbor_fov]
-        rAB = (
-            c.measured_xy[0] - nominal_positions[c.anchor_fov][0],
-            c.measured_xy[1] - nominal_positions[c.anchor_fov][1],
-        )
-        residualsUm.append(np.hypot(pB[0] - pA[0] - rAB[0], pB[1] - pA[1] - rAB[1]))
-    residualRmsUm = float(np.sqrt(np.mean(np.square(residualsUm)))) if residualsUm else 0.0
+        f: (affinePositions[f][0] + float(offsets[k, 0]),
+            affinePositions[f][1] + float(offsets[k, 1]))
+        for k, f in enumerate(fovs)}
+    errors = edge_errors(correspondences, positions, nominal_positions)
+    residualRmsUm = float(np.sqrt(np.mean(np.square(errors)))) if len(errors) else 0.0
 
     return GlobalPositionCorrection(
-        positions=positions, anchor_fovs=anchorFovs, n_fovs_solved=len(positions),
-        n_correspondences=nCorr, n_components=len(components), residual_rms_um=residualRmsUm,
-    )
+        positions=positions,
+        anchor_fovs={component: fovs[p] for component, p in enumerate(pins)},
+        n_fovs_solved=nFovs, n_correspondences=len(correspondences),
+        n_components=nComponents, residual_rms_um=residualRmsUm, affine=affine)
+
+
+def cross_validate_positions(
+    correspondences:    List[NeighborCorrespondence],
+    nominal_positions:  Dict[int, Tuple[float, float]],
+    n_folds:            int = 5,
+    seed:               int = 0,
+    prior_weight:       float = 1e-3,
+    tolerance_fraction: float = 0.25,
+) -> Dict[str, np.ndarray]:
+    """
+    Held-out edge error (microns): hide one fold of the correspondences,
+    solve from the rest, and measure `edge_errors` on the hidden fold.
+
+    Folds are drawn per PHYSICAL edge, so an edge measured from both ends
+    has both measurements in the same fold (the two are mirror images, so
+    one would otherwise predict the other perfectly).
+
+    Returns ``{'final', 'affine_only', 'nominal': errors}``, over every
+    held-out correspondence, for three position sets: the full solve,
+    ``A`` alone (:func:`apply_affine`), and the nominal positions.
+    """
+    gridPairs = grid_neighbor_pairs(nominal_positions, tolerance_fraction)
+    edgeKeys = [(min(c.anchor_fov, c.neighbor_fov), max(c.anchor_fov, c.neighbor_fov))
+                for c in correspondences]
+    uniqueKeys = sorted(set(edgeKeys))
+    foldOf = dict(zip(uniqueKeys, np.random.default_rng(seed).integers(
+        0, n_folds, len(uniqueKeys))))
+
+    errors: Dict[str, list] = {'final': [], 'affine_only': [], 'nominal': []}
+    for fold in range(n_folds):
+        train = [c for c, k in zip(correspondences, edgeKeys) if foldOf[k] != fold]
+        test = [c for c, k in zip(correspondences, edgeKeys) if foldOf[k] == fold]
+        if not test:
+            continue
+        correction = fit_global_positions(
+            train, nominal_positions, prior_weight, gridPairs)
+        affinePositions = apply_affine(
+            correction.affine, nominal_positions, min(nominal_positions))
+        errors['final'].append(
+            edge_errors(test, correction.positions, nominal_positions))
+        errors['affine_only'].append(
+            edge_errors(test, affinePositions, nominal_positions))
+        errors['nominal'].append(
+            edge_errors(test, nominal_positions, nominal_positions))
+    return {name: np.concatenate(v) if v else np.zeros(0) for name, v in errors.items()}
 
 
 def compute_overlap_correlations(

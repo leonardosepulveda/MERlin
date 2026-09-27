@@ -88,7 +88,7 @@ class Warp(analysistask.ParallelAnalysisTask):
                 images are arranged as [channel, zIndex, x, y]
         """
         dataChannels = self.dataSet.get_data_organization().get_data_channels()
-        zIndexes = range(len(self.dataSet.get_z_positions()))
+        zIndexes = range(len(self.dataSet.get_z_positions(fov)))
         return np.array([[self.get_aligned_image(fov, d, z, chromaticCorrector)
                           for z in zIndexes] for d in dataChannels])
 
@@ -101,7 +101,10 @@ class Warp(analysistask.ParallelAnalysisTask):
         Args:
             fov: index of the field of view
             dataChannel: index of the data channel
-            zIndex: index of the z position
+            zIndex: index into this fov's own z positions
+                (get_z_positions(fov)), as every per-fov loop counts them.
+                It differs from the dataset-wide index when the fov's raw
+                files are short and frames go in decreasing z order.
             chromaticCorrector: the ChromaticCorrector to use to chromatically
                 correct the images. If not supplied, no correction is
                 performed.
@@ -109,7 +112,7 @@ class Warp(analysistask.ParallelAnalysisTask):
             a 2-dimensional numpy array containing the specified image
         """
         inputImage = self.dataSet.get_raw_image(
-            dataChannel, fov, self.dataSet.z_index_to_position(zIndex))
+            dataChannel, fov, self.dataSet.z_index_to_position(zIndex, fov))
         transformation = self.get_transformation(fov, dataChannel)
 
         # apply the chromatic correction
@@ -164,7 +167,7 @@ class Warp(analysistask.ParallelAnalysisTask):
         dataChannels = self._channels_to_process()
 
         if self.parameters['write_aligned_images']:
-            zPositions = self.dataSet.get_z_positions()
+            zPositions = self.dataSet.get_z_positions(fov)
 
             imageDescription = self.dataSet.analysis_tiff_description(
                     len(zPositions), len(dataChannels))

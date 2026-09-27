@@ -252,13 +252,18 @@ class GenerateMosaicTile(analysistask.ParallelAnalysisTask):
         shape -- untrimmed, at this fov's own placement; the overlap crop
         is applied by the caller.
         """
-        zIndex = self.parameters['z_index']
-        if zIndex < len(self.dataSet.get_z_positions(fov)):
+        # z_index is dataset-wide, so every tile shows the same depth; the
+        # image getters take an index into this fov's own z positions.
+        zPosition = self.dataSet.z_index_to_position(self.parameters['z_index'])
+        fovZPositions = self.dataSet.get_z_positions(fov)
+        if zPosition in fovZPositions:
+            fovZIndex = fovZPositions.index(zPosition)
             if self.parameters['image_source'] == 'preprocessed':
                 rawImage = self.preprocessTask.get_processed_image(
-                    fov, dataChannel, zIndex)
+                    fov, dataChannel, fovZIndex)
             else:
-                rawImage = self.warpTask.get_aligned_image(fov, dataChannel, zIndex)
+                rawImage = self.warpTask.get_aligned_image(
+                    fov, dataChannel, fovZIndex)
         else:
             # this fov has no data at this depth (ragged z-stack) -- a blank
             # tile keeps the ffc/downsample/placement below unchanged, since

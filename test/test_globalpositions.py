@@ -397,3 +397,6 @@ def test_remove_hot_pixels_keeps_beads():
     changed = cleaned != hot
     assert changed.sum() == 1
     np.testing.assert_array_equal(globalpositions.remove_hot_pixels(img), img)
+    # the cv2 fast path (uint16) and the scipy fallback (float64) agree
+    np.testing.assert_array_equal(
+        globalpositions.remove_hot_pixels(hot.astype(np.float64)), cleaned)

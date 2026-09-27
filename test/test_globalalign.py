@@ -162,3 +162,15 @@ def test_registration_image_subtracts_fiducial_template(simple_merfish_data):
             simple_merfish_data,
             parameters={'fiducial_template_task': templateTask.analysisName,
                         'max_projection_data_channel': 'bit2'})
+
+
+def test_hann_window_defaults_on_for_max_projection_only(simple_merfish_data):
+    beads = globalalign.RegisterFovNeighbors(simple_merfish_data, {})
+    maxProjection = globalalign.RegisterFovNeighbors(
+        simple_merfish_data, {'max_projection_data_channel': 'bit2'})
+    explicit = globalalign.RegisterFovNeighbors(
+        simple_merfish_data,
+        {'max_projection_data_channel': 'bit2', 'hann_window': False})
+    assert beads.parameters['hann_window'] is False
+    assert maxProjection.parameters['hann_window'] is True
+    assert explicit.parameters['hann_window'] is False

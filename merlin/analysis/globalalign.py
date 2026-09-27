@@ -386,7 +386,12 @@ class RegisterFovNeighbors(analysistask.ParallelAnalysisTask):
         if 'remove_hot_pixels' not in self.parameters:
             self.parameters['remove_hot_pixels'] = True
         if 'hann_window' not in self.parameters:
-            self.parameters['hann_window'] = False
+            # On for max projections: BC555_sample_05/epi DAPI max, held-out
+            # 0.258 -> 0.189 um, rejected 10.5% -> 3.6% of edges. Off for
+            # beads: on lt056's 32-56 px bands it made them worse (0.025 ->
+            # 0.047 um).
+            self.parameters['hann_window'] = \
+                self.parameters['max_projection_data_channel'] is not None
         if 'overlap_fraction' not in self.parameters:
             # None -> inferred in _run_analysis (see
             # _nominal_positions_and_overlap).

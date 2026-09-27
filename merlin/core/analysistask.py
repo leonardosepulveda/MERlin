@@ -499,8 +499,11 @@ class ParallelAnalysisTask(AnalysisTask):
                 if len(missingCount) > 0:
                     return False
                 else:
-                    self.dataSet.record_analysis_complete(self)
+                    # Figures before the done flag: if drawing them kills
+                    # the process (e.g. out of memory), the flag is not
+                    # written and the next check draws them again.
                     self._generate_figures_safely()
+                    self.dataSet.record_analysis_complete(self)
                     return True
         else:
             return self.dataSet.check_analysis_done(self, fragmentIndex)

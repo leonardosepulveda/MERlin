@@ -12,6 +12,8 @@ import cv2
 
 from merlin.core import analysistask
 from merlin.util import aberration
+from merlin.util import fixedpattern
+from merlin.util import globalpositions
 from merlin.util import resourceestimate
 
 
@@ -251,11 +253,97 @@ class Warp(analysistask.ParallelAnalysisTask):
             return transformationMatrices
 
 
+class FiducialTemplate(analysistask.ParallelAnalysisTask):
+
+    """
+    The camera fixed-pattern template of each distinct fiducial image
+    (imaging round), one fragment per round: the pixel-wise median of that
+    round's fiducial frame over `n_fovs` FOVs picked at random (`seed`),
+    oriented and with hot pixels removed (`remove_hot_pixels`) exactly as
+    the image it is subtracted from. See `merlin.util.fixedpattern`.
+
+    Read by `FiducialCorrelationWarp` and `RegisterFovNeighbors` through
+    their `fiducial_template_task` parameter. On dense bead fields the
+    median is a blur of beads, not a camera pattern: use it for weak beads.
+    """
+
+    def __init__(self, dataSet, parameters=None, analysisName=None):
+        super().__init__(dataSet, parameters, analysisName)
+
+        if 'n_fovs' not in self.parameters:
+            self.parameters['n_fovs'] = 15
+        if 'seed' not in self.parameters:
+            self.parameters['seed'] = 0
+        if 'remove_hot_pixels' not in self.parameters:
+            self.parameters['remove_hot_pixels'] = True
+
+    def _sources(self) -> List[fixedpattern.FiducialSource]:
+        return fixedpattern.fiducial_sources(
+            self.dataSet.get_data_organization())
+
+    def fragment_count(self):
+        return len(self._sources())
+
+    def get_estimated_memory(self):
+        # n_fovs float32 frames held for the median.
+        return resourceestimate.estimate_stack_memory_mb(
+            self.dataSet, frameCount=self.parameters['n_fovs'], kTask=3,
+            baselineMb=230)
+
+    def get_estimated_time(self):
+        # Uncalibrated: one frame read per FOV.
+        return resourceestimate.estimate_stack_time_minutes(
+            frameCount=self.parameters['n_fovs'], secondsPerFrame=5,
+            baselineMinutes=1)
+
+    def get_dependencies(self):
+        return []
+
+    def check_matches(self, removeHotPixels: bool) -> None:
+        """Raise unless the consumer prepares its image as this template
+        was built (a hot-pixel mismatch would subtract, or leave, the hot
+        pixels)."""
+        if bool(removeHotPixels) != bool(self.parameters['remove_hot_pixels']):
+            raise ValueError(
+                '%s was built with remove_hot_pixels=%s; the registration '
+                'task using it must set the same value'
+                % (self.analysisName, self.parameters['remove_hot_pixels']))
+
+    def get_template(self, dataChannel: int) -> np.ndarray:
+        source = fixedpattern.fiducial_source(
+            self.dataSet.get_data_organization(), dataChannel)
+        return self.dataSet.load_numpy_analysis_result(
+            'template', self, resultIndex=self._sources().index(source))
+
+    def _run_analysis(self, fragmentIndex):
+        dataOrganization = self.dataSet.get_data_organization()
+        source = self._sources()[fragmentIndex]
+        dataChannel = next(c for c in dataOrganization.get_data_channels()
+                           if fixedpattern.fiducial_source(
+                               dataOrganization, c) == source)
+        fovs = fixedpattern.choose_template_fovs(
+            self.dataSet.get_fovs(), self.parameters['n_fovs'],
+            self.parameters['seed'])
+        template = fixedpattern.median_template([
+            fixedpattern.load_fiducial_frame(
+                self.dataSet, dataChannel, int(f),
+                removeHotPixels=self.parameters['remove_hot_pixels'])
+            for f in fovs])
+        self.dataSet.save_numpy_analysis_result(
+            template, 'template', self, resultIndex=fragmentIndex)
+
+
 class FiducialCorrelationWarp(Warp):
 
     """
     An analysis task that warps a set of images taken in different imaging
     rounds based on the crosscorrelation between fiducial images.
+
+    Optional (off by default): `remove_hot_pixels`, and
+    `fiducial_template_task` (a `FiducialTemplate`), whose round template is
+    subtracted before filtering. Needed when weak beads let the camera
+    pattern lock the shift at zero (BC555_sample_05/disk: 0.002 um raw,
+    0.22 um with the template); harmless on strong beads (0.001-0.002 um).
     """
 
     def __init__(self, dataSet, parameters=None, analysisName=None):
@@ -272,6 +360,17 @@ class FiducialCorrelationWarp(Warp):
             self.parameters['percentile_pixel_to_keep'] = 100 # 100 should keep all the pixels
         if 'edge_width_to_remove' not in self.parameters: # What is the point here, to remove aberrated areas?
             self.parameters['edge_width_to_remove'] = 200
+
+        # Outlier replacement of isolated hot pixels (see
+        # globalpositions.remove_hot_pixels), unlike median_filter's
+        # whole-image 3x3 median: hot pixels pin weak shifts to zero.
+        if 'remove_hot_pixels' not in self.parameters:
+            self.parameters['remove_hot_pixels'] = False
+        # Name of a FiducialTemplate task: its round's camera template is
+        # subtracted from each fiducial image before _filter.
+        if 'fiducial_template_task' not in self.parameters:
+            self.parameters['fiducial_template_task'] = None
+        self._templateTask = None
 
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
@@ -309,7 +408,24 @@ class FiducialCorrelationWarp(Warp):
             frameCount=channelCount, secondsPerFrame=3, baselineMinutes=2)
 
     def get_dependencies(self):
-        return []
+        if self.parameters['fiducial_template_task'] is None:
+            return []
+        return [self.parameters['fiducial_template_task']]
+
+    def _registration_image(self, dataChannel: int, fov: int) -> np.ndarray:
+        """The fiducial image of *dataChannel* before `_filter`: hot
+        pixels removed and the round's template subtracted, if enabled."""
+        image = self.dataSet.get_fiducial_image(dataChannel, fov)
+        if self.parameters['remove_hot_pixels']:
+            image = globalpositions.remove_hot_pixels(image)
+        templateName = self.parameters['fiducial_template_task']
+        if templateName is not None:
+            if self._templateTask is None:
+                self._templateTask = self.dataSet.load_analysis_task(templateName)
+                self._templateTask.check_matches(self.parameters['remove_hot_pixels'])
+            image = image.astype(np.float32) - \
+                self._templateTask.get_template(dataChannel)
+        return image
 
     def _filter(self, inputImage: np.ndarray) -> np.ndarray:
         highPassSigma = self.parameters['highpass_sigma']
@@ -350,10 +466,10 @@ class FiducialCorrelationWarp(Warp):
         # still resolves to every channel starting at 0).
         channels = self._channels_to_process()
         fixedImage = self._filter(
-            self.dataSet.get_fiducial_image(channels[0], fragmentIndex))
+            self._registration_image(channels[0], fragmentIndex))
         offsets = [registration.phase_cross_correlation(
             fixedImage,
-            self._filter(self.dataSet.get_fiducial_image(x, fragmentIndex)),
+            self._filter(self._registration_image(x, fragmentIndex)),
             upsample_factor = 100)[0] for x in channels]
         computedTransformations = [transform.SimilarityTransform(
             translation=[-x[1], -x[0]]) for x in offsets]
@@ -509,12 +625,12 @@ class FiducialCorrelationWarp3D(FiducialCorrelationWarp):
     def _find_2D_offsets(self, fragmentIndex: int):
         
         fixedImage = self._filter(
-                self.dataSet.get_fiducial_image(0, fragmentIndex))
+                self._registration_image(0, fragmentIndex))
         
         # phase cross cor returns Y X shifts
         offsets = [registration.phase_cross_correlation(
             fixedImage,
-            self._filter(self.dataSet.get_fiducial_image(x, fragmentIndex)),
+            self._filter(self._registration_image(x, fragmentIndex)),
             upsample_factor = 100)[0] for x in
                    self.dataSet.get_data_organization().get_data_channels()]
         

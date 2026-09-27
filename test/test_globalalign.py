@@ -133,3 +133,32 @@ def test_registration_image_max_projection_by_channel_name(simple_merfish_data):
         simple_merfish_data, parameters, 0)
     np.testing.assert_array_equal(
         image, simple_merfish_data.get_fiducial_image(0, 0))
+
+
+def test_registration_image_subtracts_fiducial_template(simple_merfish_data):
+    from merlin.analysis import warp
+    templateTask = warp.FiducialTemplate(
+        simple_merfish_data, parameters={'n_fovs': 2},
+        analysisName='fiducialTemplateForNeighbors')
+    templateTask.save()
+    for fragment in range(templateTask.fragment_count()):
+        templateTask._run_analysis(fragment)
+
+    task = globalalign.RegisterFovNeighbors(
+        simple_merfish_data,
+        parameters={'fiducial_template_task': templateTask.analysisName},
+        analysisName='registerFovNeighbors_template')
+    assert task.get_dependencies() == [templateTask.analysisName]
+    template = task._fiducial_template()
+    image = globalalign._load_registration_image(
+        simple_merfish_data, task.parameters, 0, template)
+    np.testing.assert_allclose(
+        image, globalalign._load_registration_image(
+            simple_merfish_data, task.parameters, 0).astype(np.float32)
+        - templateTask.get_template(0))
+
+    with pytest.raises(ValueError):
+        globalalign.RegisterFovNeighbors(
+            simple_merfish_data,
+            parameters={'fiducial_template_task': templateTask.analysisName,
+                        'max_projection_data_channel': 'bit2'})

@@ -34,12 +34,15 @@ def _nominal_positions_and_overlap(dataSet, overlapFractionParam):
     return fovs, nominalPositions, micronsPerPixel, stepSizeUm, overlapFraction
 
 
-def _load_registration_image(dataSet, registrationParameters, fov):
+def _load_registration_image(dataSet, registrationParameters, fov,
+                              template=None):
     """The image `RegisterFovNeighbors` registers one fov on, per its
     *registrationParameters*: the fiducial frame, or the max projection of
     one data channel's z stack (e.g. DAPI, or an antibody/readout channel),
-    with hot pixels removed unless disabled. Shared with
-    `LeastSquaresGlobalAlignment`, so its overlap QC scores the same image.
+    with hot pixels removed unless disabled, then *template* (the fiducial
+    frame's camera template, see `RegisterFovNeighbors._fiducial_template`)
+    subtracted if given. Shared with `LeastSquaresGlobalAlignment`, so its
+    overlap QC scores the same image.
     """
     channel = registrationParameters['max_projection_data_channel']
     if channel is None:
@@ -59,6 +62,8 @@ def _load_registration_image(dataSet, registrationParameters, fov):
             image = plane if image is None else np.maximum(image, plane)
     if registrationParameters['remove_hot_pixels']:
         image = globalpositions.remove_hot_pixels(image)
+    if template is not None:
+        image = image.astype(np.float32) - template
     return image
 
 
@@ -360,11 +365,20 @@ class RegisterFovNeighbors(analysistask.ParallelAnalysisTask):
     (held-out edge error 0.02-0.06 um vs 0.9-6.4 um). Do not sum
     cross-power over z planes instead: on spinning-disk data 16% of edges
     came out ~3 um off.
+
+    `fiducial_template_task` (a `warp.FiducialTemplate`, default None)
+    subtracts the fiducial frame's camera template: the camera's row
+    pattern locks facing bands at a zero perpendicular shift on weak beads.
+    Fiducial path only. On LT074's samples it fixed one row-locked BC553
+    disk edge (11.2 -> 0.76 um) but did not rescue BC555 disk (use a max
+    projection there), and changed strong-bead edges by <= 0.009 um.
     """
 
     def __init__(self, dataSet, parameters=None, analysisName=None):
         super().__init__(dataSet, parameters, analysisName)
 
+        if 'fiducial_template_task' not in self.parameters:
+            self.parameters['fiducial_template_task'] = None
         if 'fiducial_data_channel' not in self.parameters:
             self.parameters['fiducial_data_channel'] = 0
         if 'max_projection_data_channel' not in self.parameters:
@@ -381,6 +395,10 @@ class RegisterFovNeighbors(analysistask.ParallelAnalysisTask):
             self.parameters['tolerance_fraction'] = 0.25
         if 'upsample_factor' not in self.parameters:
             self.parameters['upsample_factor'] = 100
+        if self.parameters['fiducial_template_task'] is not None and \
+                self.parameters['max_projection_data_channel'] is not None:
+            raise ValueError('fiducial_template_task applies to the fiducial '
+                             'frame, not to max_projection_data_channel')
 
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
@@ -444,7 +462,19 @@ class RegisterFovNeighbors(analysistask.ParallelAnalysisTask):
         return len(np.atleast_1d(dataOrganization.data.loc[channel, 'zPos']))
 
     def get_dependencies(self):
-        return []
+        if self.parameters['fiducial_template_task'] is None:
+            return []
+        return [self.parameters['fiducial_template_task']]
+
+    def _fiducial_template(self):
+        """The camera template to subtract from each registration image,
+        or None."""
+        templateName = self.parameters['fiducial_template_task']
+        if templateName is None:
+            return None
+        templateTask = self.dataSet.load_analysis_task(templateName)
+        templateTask.check_matches(self.parameters['remove_hot_pixels'])
+        return templateTask.get_template(self.parameters['fiducial_data_channel'])
 
     _CORRESPONDENCE_COLUMNS = [
         'anchor_fov', 'neighbor_fov', 'direction',
@@ -467,8 +497,11 @@ class RegisterFovNeighbors(analysistask.ParallelAnalysisTask):
             _nominal_positions_and_overlap(
                 self.dataSet, self.parameters['overlap_fraction'])
 
+        template = self._fiducial_template()
+
         def load_frame(fov):
-            return _load_registration_image(self.dataSet, self.parameters, fov)
+            return _load_registration_image(
+                self.dataSet, self.parameters, fov, template)
 
         correspondences = globalpositions.register_fov_against_neighbors(
             fragmentIndex, nominalPositions, load_frame,
@@ -596,10 +629,11 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
                 self.dataSet, self.parameters['overlap_fraction'])
 
         registrationParameters = self.registrationTask.parameters
+        template = self.registrationTask._fiducial_template()
 
         def load_frame(fov):
             return _load_registration_image(
-                self.dataSet, registrationParameters, fov)
+                self.dataSet, registrationParameters, fov, template)
 
         correspondences = []
         for fov in fovs:

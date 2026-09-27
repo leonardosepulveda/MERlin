@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
+from scipy.ndimage import median_filter
 from scipy.ndimage import shift as ndi_shift
 from scipy.sparse import lil_matrix
 from scipy.sparse.linalg import lsqr
@@ -242,6 +243,56 @@ def _within_registration_range(
     return diffXPx < cropCols / 2 and diffYPx < cropRows / 2
 
 
+def remove_hot_pixels(
+    img:         np.ndarray,
+    size:        int   = 3,
+    ratio:       float = 5.0,
+    sigma_floor: float = 5.0,
+) -> np.ndarray:
+    """
+    Replace isolated hot/dead camera pixels with their local median before
+    registration. Ported from MERci's `acquisition.alignment.remove_hot_pixels`.
+
+    Hot pixels sit at a fixed detector position in every frame, so they
+    dominate phase correlation and pin the shift to zero when the real
+    signal (e.g. dim beads) is weak. A hot pixel is a single-pixel spike
+    far above its local median; a bead spans several pixels (the PSF), so
+    it stays close to its local median.
+
+    Parameters
+    ----------
+    img         : 2-D registration image
+    size        : local-median window (pixels); 3 isolates single-pixel spikes
+    ratio       : flag pixels above ``ratio`` x local median (hot pixels
+                  were observed at ~10-600x, bead cores at ~1-2x)
+    sigma_floor : also require the excess over the local median to exceed
+                  this many background-noise sigmas, so noise on near-zero
+                  background is not flagged
+
+    Returns
+    -------
+    Copy of *img* with hot pixels replaced by their local median (*img*
+    itself, uncopied, if none are flagged).
+    """
+    localMedian = median_filter(img, size=size, mode='nearest').astype(np.float64)
+    excess = img.astype(np.float64) - localMedian
+    # 1.4826 converts a median absolute deviation to a Gaussian sigma.
+    noiseSigma = 1.4826 * float(np.median(np.abs(excess - np.median(excess))))
+    hot = (img > ratio * np.maximum(localMedian, 1.0)) & (excess > sigma_floor * noiseSigma)
+    if hot.any():
+        img = img.copy()
+        img[hot] = localMedian[hot].astype(img.dtype)
+    return img
+
+
+def _hann_windowed(crop: np.ndarray) -> np.ndarray:
+    """Mean-subtracted *crop* times a 2-D Hann window. Without it, the
+    band's non-periodic edges add a zero-shift peak to the phase
+    correlation, which wins when the shared structure is weak."""
+    crop = crop.astype(np.float64) - crop.mean()
+    return crop * np.outer(np.hanning(crop.shape[0]), np.hanning(crop.shape[1]))
+
+
 def register_neighbor_pair(
     anchor_img:       np.ndarray,
     neighbor_img:     np.ndarray,
@@ -251,10 +302,14 @@ def register_neighbor_pair(
     overlap_fraction: float,
     pixel_size_um:    float,
     upsample_factor:  int = 100,
+    hann_window:      bool = False,
 ) -> Tuple[Tuple[float, float], float]:
     """
     Measure the neighbour's TRUE position relative to the anchor, from the
     real pixel shift needed to align their overlapping border crop.
+
+    *hann_window* multiplies each crop by a 2-D Hann window before
+    correlating (see `_hann_windowed`).
 
     Returns
     -------
@@ -262,6 +317,8 @@ def register_neighbor_pair(
     position (microns), and the registration's error metric.
     """
     a_crop, n_crop = crop_overlap(anchor_img, neighbor_img, dx, dy, overlap_fraction)
+    if hann_window:
+        a_crop, n_crop = _hann_windowed(a_crop), _hann_windowed(n_crop)
     shift, error, _ = registration.phase_cross_correlation(
         a_crop, n_crop, upsample_factor=upsample_factor)
     dy_px, dx_px = float(shift[0]), float(shift[1])
@@ -321,6 +378,7 @@ def register_fov_against_neighbors(
     overlap_fraction:   float,
     tolerance_fraction: float = 0.25,
     upsample_factor:    int = 100,
+    hann_window:        bool = False,
 ) -> List[NeighborCorrespondence]:
     """
     Register *anchor_fov* against each of its present 4-connected
@@ -361,7 +419,7 @@ def register_fov_against_neighbors(
         neighborImg = load_frame(neighborFov)
         measuredXY, error = register_neighbor_pair(
             anchorImg, neighborImg, positions[anchor_fov],
-            dx, dy, overlap_fraction, pixel_size_um, upsample_factor)
+            dx, dy, overlap_fraction, pixel_size_um, upsample_factor, hann_window)
         correspondences.append(NeighborCorrespondence(
             anchor_fov=anchor_fov, neighbor_fov=neighborFov, direction=direction,
             nominal_xy=positions[neighborFov], measured_xy=measuredXY, error=error))
@@ -376,6 +434,7 @@ def sample_neighbor_correspondences(
     overlap_fraction:   float,
     tolerance_fraction: float = 0.25,
     upsample_factor:    int = 100,
+    hann_window:        bool = False,
 ) -> List[NeighborCorrespondence]:
     """
     Register every fov in *fov_ids* against each of its present 4-connected
@@ -412,7 +471,7 @@ def sample_neighbor_correspondences(
     for anchorFov in fov_ids:
         correspondences.extend(register_fov_against_neighbors(
             anchorFov, positions, cache.get, pixel_size_um, overlap_fraction,
-            tolerance_fraction, upsample_factor))
+            tolerance_fraction, upsample_factor, hann_window))
     return correspondences
 
 

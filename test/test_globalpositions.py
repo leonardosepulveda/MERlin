@@ -268,3 +268,15 @@ def test_register_fov_against_neighbors_skips_non_overlapping_neighbor():
         0, positions, frames.__getitem__, pixel_size_um=1.0,
         overlap_fraction=0.1)
     assert correspondences == []
+
+
+def test_remove_hot_pixels_keeps_beads():
+    img = _bead_world((64, 64), 20, 3).astype(np.uint16)
+    hot = img.copy()
+    hot[10, 10] = 60000
+    cleaned = globalpositions.remove_hot_pixels(hot)
+    assert cleaned[10, 10] < 200
+    # only the spike changed: beads (several-pixel PSFs) are untouched
+    changed = cleaned != hot
+    assert changed.sum() == 1
+    np.testing.assert_array_equal(globalpositions.remove_hot_pixels(img), img)

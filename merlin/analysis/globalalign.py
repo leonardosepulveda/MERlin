@@ -34,6 +34,34 @@ def _nominal_positions_and_overlap(dataSet, overlapFractionParam):
     return fovs, nominalPositions, micronsPerPixel, stepSizeUm, overlapFraction
 
 
+def _load_registration_image(dataSet, registrationParameters, fov):
+    """The image `RegisterFovNeighbors` registers one fov on, per its
+    *registrationParameters*: the fiducial frame, or the max projection of
+    one data channel's z stack (e.g. DAPI, or an antibody/readout channel),
+    with hot pixels removed unless disabled. Shared with
+    `LeastSquaresGlobalAlignment`, so its overlap QC scores the same image.
+    """
+    channel = registrationParameters['max_projection_data_channel']
+    if channel is None:
+        image = dataSet.get_fiducial_image(
+            registrationParameters['fiducial_data_channel'], fov)
+    else:
+        dataOrganization = dataSet.get_data_organization()
+        if isinstance(channel, str):
+            channel = dataOrganization.get_data_channel_index(channel)
+        zPositions = np.atleast_1d(dataOrganization.data.loc[channel, 'zPos'])
+        if len(zPositions) > 1:
+            # this fov's own z range (see allowRaggedZStacks)
+            zPositions = dataOrganization._get_available_z_positions([channel], fov)
+        image = None
+        for zPosition in zPositions:
+            plane = dataSet.get_raw_image(channel, fov, zPosition)
+            image = plane if image is None else np.maximum(image, plane)
+    if registrationParameters['remove_hot_pixels']:
+        image = globalpositions.remove_hot_pixels(image)
+    return image
+
+
 class GlobalAlignment(analysistask.AnalysisTask):
 
     """
@@ -323,6 +351,15 @@ class RegisterFovNeighbors(analysistask.ParallelAnalysisTask):
     (empty, header-only, if the fov has no surviving neighbour -- e.g. an
     isolated fov); `return_exported_data` reads it back as a list of
     `NeighborCorrespondence`.
+
+    Registration image (see `_load_registration_image`): the
+    `fiducial_data_channel` fiducial frame by default, or, with
+    `max_projection_data_channel` set (a data channel index or name), the
+    max projection of that channel's z stack. On LT074's test samples a
+    DAPI or readout max projection registered where weak beads failed
+    (held-out edge error 0.02-0.06 um vs 0.9-6.4 um). Do not sum
+    cross-power over z planes instead: on spinning-disk data 16% of edges
+    came out ~3 um off.
     """
 
     def __init__(self, dataSet, parameters=None, analysisName=None):
@@ -330,6 +367,12 @@ class RegisterFovNeighbors(analysistask.ParallelAnalysisTask):
 
         if 'fiducial_data_channel' not in self.parameters:
             self.parameters['fiducial_data_channel'] = 0
+        if 'max_projection_data_channel' not in self.parameters:
+            self.parameters['max_projection_data_channel'] = None
+        if 'remove_hot_pixels' not in self.parameters:
+            self.parameters['remove_hot_pixels'] = True
+        if 'hann_window' not in self.parameters:
+            self.parameters['hann_window'] = False
         if 'overlap_fraction' not in self.parameters:
             # None -> inferred in _run_analysis (see
             # _nominal_positions_and_overlap).
@@ -361,8 +404,10 @@ class RegisterFovNeighbors(analysistask.ParallelAnalysisTask):
         # trust for these ~13-190s jobs, so kTask isn't re-tuned from that
         # data. Rounded up to the next whole GB so the request is a clean
         # number.
+        # A max projection also holds the plane being read (3 frames).
+        frameCount = 2 if self.parameters['max_projection_data_channel'] is None else 3
         rawMb = resourceestimate.estimate_stack_memory_mb(
-            self.dataSet, frameCount=2, kTask=59, baselineMb=230)
+            self.dataSet, frameCount=frameCount, kTask=59, baselineMb=230)
         return math.ceil(rawMb / 1000) * 1000
 
     def get_estimated_time(self):
@@ -380,12 +425,23 @@ class RegisterFovNeighbors(analysistask.ParallelAnalysisTask):
         # (higher, but uncalibrated) 3-minute cluster-config request,
         # from a transient node-level I/O contention spike rather than
         # its own compute cost.
+        # A max projection reads every z plane of each of the 5 fovs
+        # (uncalibrated: same per-frame cost assumed).
         width, height = self.dataSet.get_image_dimensions()
         frameBytes = width * height * resourceestimate.BYTES_PER_PIXEL
         rawMinutes = resourceestimate.estimate_stack_time_minutes(
-            frameCount=5, secondsPerFrame=frameBytes / 4_000_000,
-            baselineMinutes=0.25)
+            frameCount=5 * self._planes_per_image(),
+            secondsPerFrame=frameBytes / 4_000_000, baselineMinutes=0.25)
         return max(rawMinutes, 1.0)
+
+    def _planes_per_image(self) -> int:
+        channel = self.parameters['max_projection_data_channel']
+        if channel is None:
+            return 1
+        dataOrganization = self.dataSet.get_data_organization()
+        if isinstance(channel, str):
+            channel = dataOrganization.get_data_channel_index(channel)
+        return len(np.atleast_1d(dataOrganization.data.loc[channel, 'zPos']))
 
     def get_dependencies(self):
         return []
@@ -411,16 +467,15 @@ class RegisterFovNeighbors(analysistask.ParallelAnalysisTask):
             _nominal_positions_and_overlap(
                 self.dataSet, self.parameters['overlap_fraction'])
 
-        fiducialChannel = self.parameters['fiducial_data_channel']
-
         def load_frame(fov):
-            return self.dataSet.get_fiducial_image(fiducialChannel, fov)
+            return _load_registration_image(self.dataSet, self.parameters, fov)
 
         correspondences = globalpositions.register_fov_against_neighbors(
             fragmentIndex, nominalPositions, load_frame,
             pixel_size_um=micronsPerPixel, overlap_fraction=overlapFraction,
             tolerance_fraction=self.parameters['tolerance_fraction'],
-            upsample_factor=self.parameters['upsample_factor'])
+            upsample_factor=self.parameters['upsample_factor'],
+            hann_window=self.parameters['hann_window'])
 
         self.dataSet.save_dataframe_to_csv(
             pd.DataFrame([

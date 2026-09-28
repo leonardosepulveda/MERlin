@@ -350,7 +350,9 @@ class FiducialCorrelationWarp(Warp):
 
     Optional (off by default): `remove_hot_pixels`, and
     `fiducial_template_task` (a `FiducialTemplate`), whose round template is
-    subtracted before filtering. Needed when weak beads let the camera
+    subtracted before filtering. With a template, an unset
+    `remove_hot_pixels` takes the template task's value; an explicit
+    mismatch raises. Needed when weak beads let the camera
     pattern lock the shift at zero (BC555_sample_05/disk: 0.002 um raw,
     0.22 um with the template); harmless on strong beads (0.001-0.002 um).
     """
@@ -370,16 +372,18 @@ class FiducialCorrelationWarp(Warp):
         if 'edge_width_to_remove' not in self.parameters: # What is the point here, to remove aberrated areas?
             self.parameters['edge_width_to_remove'] = 200
 
-        # Outlier replacement of isolated hot pixels (see
-        # globalpositions.remove_hot_pixels), unlike median_filter's
-        # whole-image 3x3 median: hot pixels pin weak shifts to zero.
-        if 'remove_hot_pixels' not in self.parameters:
-            self.parameters['remove_hot_pixels'] = False
         # Name of a FiducialTemplate task: its round's camera template is
         # subtracted from each fiducial image before _filter.
         if 'fiducial_template_task' not in self.parameters:
             self.parameters['fiducial_template_task'] = None
         self._templateTask = None
+        # Outlier replacement of isolated hot pixels (see
+        # globalpositions.remove_hot_pixels), unlike median_filter's
+        # whole-image 3x3 median: hot pixels pin weak shifts to zero.
+        # Unset with a template, None: take the template task's value.
+        if 'remove_hot_pixels' not in self.parameters:
+            self.parameters['remove_hot_pixels'] = \
+                None if self.parameters['fiducial_template_task'] else False
 
         if 'reference_channel' not in self.parameters:
             self.parameters['reference_channel'] = None
@@ -428,13 +432,17 @@ class FiducialCorrelationWarp(Warp):
         """The fiducial image of *dataChannel* before `_filter`: hot
         pixels removed and the round's template subtracted, if enabled."""
         image = self.dataSet.get_fiducial_image(dataChannel, fov)
-        if self.parameters['remove_hot_pixels']:
-            image = globalpositions.remove_hot_pixels(image)
         templateName = self.parameters['fiducial_template_task']
+        removeHotPixels = self.parameters['remove_hot_pixels']
+        if templateName is not None and self._templateTask is None:
+            self._templateTask = self.dataSet.load_analysis_task(templateName)
+            if removeHotPixels is not None:
+                self._templateTask.check_matches(removeHotPixels)
+        if removeHotPixels is None and self._templateTask is not None:
+            removeHotPixels = self._templateTask.parameters['remove_hot_pixels']
+        if removeHotPixels:
+            image = globalpositions.remove_hot_pixels(image)
         if templateName is not None:
-            if self._templateTask is None:
-                self._templateTask = self.dataSet.load_analysis_task(templateName)
-                self._templateTask.check_matches(self.parameters['remove_hot_pixels'])
             image = image.astype(np.float32) - \
                 self._templateTask.get_template(dataChannel)
         return image

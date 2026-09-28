@@ -29,6 +29,7 @@ from merlin.core import analysistask
 from merlin.data import dataorganization
 from merlin.data import codebook
 from merlin.util import dataportal
+from merlin.util import parameterfiles
 
 
 TaskOrName = Union[analysistask.AnalysisTask, str]
@@ -1133,8 +1134,22 @@ class ImageDataSet(DataSet):
                 microscopeParametersName])
         destPath = os.sep.join(
                 [self.analysisPath, 'microscope_parameters.json'])
+        # A YAML source is converted to microscope_parameters.json, which
+        # every reader uses, and also kept verbatim for its comments (when
+        # the rotation and pixel size were measured).
+        yamlCopyPath = os.sep.join(
+                [self.analysisPath, 'microscope_parameters_source.yaml'])
 
-        shutil.copyfile(sourcePath, destPath)
+        if parameterfiles.is_yaml_path(sourcePath):
+            with open(sourcePath) as inputFile:
+                parameters = parameterfiles.load_json_or_yaml(inputFile)
+            with open(destPath, 'w') as outputFile:
+                json.dump(parameters, outputFile, indent=4)
+            shutil.copyfile(sourcePath, yamlCopyPath)
+        else:
+            shutil.copyfile(sourcePath, destPath)
+            if os.path.exists(yamlCopyPath):
+                os.remove(yamlCopyPath)
 
     def _load_microscope_parameters(self): 
         path = os.sep.join(

@@ -7,7 +7,6 @@ import re
 import sys
 import time
 from pathlib import Path
-import yaml
 from typing import TextIO
 from typing import Dict
 
@@ -22,6 +21,7 @@ import merlin as m
 from merlin.core import dataset
 from merlin.core import executor
 from merlin.util import snakewriter
+from merlin.util.parameterfiles import load_json_or_yaml as _load_json_or_yaml
 
 
 def build_parser():
@@ -45,7 +45,8 @@ def build_parser():
     parser.add_argument('-c', '--codebook', nargs='+',
                         help='name of the codebook to use')
     parser.add_argument('-m', '--microscope-parameters',
-                        help='name of the microscope parameters to use')                  
+                        help='name of the microscope parameters to use '
+                        '(.json or .yaml/.yml, detected by extension)')
     parser.add_argument('-p', '--positions',
                         help='name of the position file to use')
     parser.add_argument('-n', '--core-count', type=int,
@@ -222,25 +223,6 @@ def merlin():
         elif snakefilePath:
             run_with_snakemake(dataSet, snakefilePath, args.core_count,
                                snakemakeParameters, clusterConfig)
-
-
-def _load_json_or_yaml(fileObj: TextIO) -> Dict:
-    """Parse an open file handle as YAML or JSON depending on its own
-    extension (`.yaml`/`.yml` vs anything else, parsed as JSON as
-    before). Shared by analysis-parameter recipes and
-    cluster-resource-allocation configs -- both are plain JSON/YAML-
-    compatible mapping/sequence structures, so this is purely a choice
-    of parser, and dispatching on extension keeps every existing .json
-    file (and any caller that doesn't set an extension) working
-    unchanged. YAML's native `#` comments are the main reason to use it
-    for a cluster-resource-allocation file: a per-task calculated
-    mem/time value can be left as a commented-out reference line,
-    uncommented to override it.
-    """
-    _, extension = os.path.splitext(fileObj.name)
-    if extension.lower() in ('.yaml', '.yml'):
-        return yaml.safe_load(fileObj)
-    return json.load(fileObj)
 
 
 def _load_analysis_parameters(parametersFile: TextIO) -> Dict:

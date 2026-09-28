@@ -163,7 +163,7 @@ def test_fiducial_template_removes_camera_pattern_lock():
     np.testing.assert_allclose(templateShift, -trueShift, atol=0.1)
 
 
-def test_fiducial_template_task_feeds_warp(simple_merfish_data):
+def test_fiducial_template_task_feeds_warp(simple_merfish_data, monkeypatch):
     templateTask = warp.FiducialTemplate(
         simple_merfish_data, parameters={'n_fovs': 2},
         analysisName='fiducialTemplate')
@@ -188,11 +188,27 @@ def test_fiducial_template_task_feeds_warp(simple_merfish_data):
         image, fixedpattern.load_fiducial_frame(simple_merfish_data, 0, 0)
         - template)
 
-    # the template was built with hot pixels removed; a warp that keeps
-    # them would not match it
-    mismatched = warp.FiducialCorrelationWarp(
+    # unset, remove_hot_pixels follows the template (built with them
+    # removed); an explicit mismatch would subtract, or leave, hot pixels
+    inheriting = warp.FiducialCorrelationWarp(
         simple_merfish_data,
         parameters={'fiducial_template_task': 'fiducialTemplate'},
+        analysisName='inheritingTemplateWarp')
+    assert inheriting.parameters['remove_hot_pixels'] is None
+    hotPixelCalls = []
+    removeHotPixels = warp.globalpositions.remove_hot_pixels
+    monkeypatch.setattr(warp.globalpositions, 'remove_hot_pixels',
+                        lambda x: hotPixelCalls.append(1) or removeHotPixels(x))
+    np.testing.assert_array_equal(inheriting._registration_image(0, 0), image)
+    assert hotPixelCalls == [1]
+    monkeypatch.undo()
+    mismatched = warp.FiducialCorrelationWarp(
+        simple_merfish_data,
+        parameters={'fiducial_template_task': 'fiducialTemplate',
+                    'remove_hot_pixels': False},
         analysisName='mismatchedTemplateWarp')
     with pytest.raises(ValueError):
         mismatched._registration_image(0, 0)
+    # without a template the default is unchanged
+    assert warp.FiducialCorrelationWarp(
+        simple_merfish_data).parameters['remove_hot_pixels'] is False

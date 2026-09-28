@@ -1170,11 +1170,21 @@ class ImageDataSet(DataSet):
                 'microns_per_pixel', 0.108)
         self.imageDimensions = self.microscopeParameters.get(
                 'image_dimensions', [2048, 2048])
+        self.cameraRotationDeg = self.microscopeParameters.get(
+                'camera_rotation_deg', None)
 
     def get_microns_per_pixel(self):
         """Get the conversion factor to convert pixels to microns."""
 
         return self.micronsPerPixel
+
+    def get_camera_rotation_deg(self) -> Optional[float]:
+        """The camera's rotation relative to the stage, in degrees, from
+        the microscope parameters' optional `camera_rotation_deg` (None if
+        not given). Same sign convention as `LeastSquaresGlobalAlignment`'s
+        `affine_rotation_deg`, which measures it (e.g. MF3 -0.95)."""
+
+        return self.cameraRotationDeg
 
     def get_image_dimensions(self):
         """Get the dimensions of the images in this data set.

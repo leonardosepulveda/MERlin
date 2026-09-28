@@ -110,10 +110,13 @@ class RegistrationDiagnostics(analysistask.AnalysisTask):
        strong beads 0.5-0.9): below `MIN_BAND_PEARSON`, recommends
        stitching on `max_projection_data_channel`.
     4. If `global_alignment_task` has a `correction_summary`: warns if its
-       rotation is more than `rotation_tolerance_deg` from
-       `expected_rotation_deg` (ST2 -0.27 to -0.30, MF3 -0.94, MFX +0.01;
-       BC555 disk's failed beads gave -0.15), or if its held-out final
-       error is not below `HELDOUT_RATIO` x the affine-only error.
+       `affine_rotation_deg` is more than `rotation_tolerance_deg` from
+       the microscope parameters' `camera_rotation_deg` (see
+       `get_camera_rotation_deg`; same sign convention; MF3 -0.95, ST2
+       60x -0.285, MFX 60x +0.01; BC555 disk's failed beads gave -0.15),
+       or if its held-out final error is not below `HELDOUT_RATIO` x the
+       affine-only error. Without `camera_rotation_deg` the rotation test
+       is skipped, and the report says so.
     """
 
     def __init__(self, dataSet, parameters=None, analysisName=None):
@@ -130,7 +133,6 @@ class RegistrationDiagnostics(analysistask.AnalysisTask):
             'max_projection_data_channel': 'DAPI',
             'warp_task': 'FiducialCorrelationWarp',
             'global_alignment_task': 'LeastSquaresGlobalAlignment',
-            'expected_rotation_deg': None,
             'rotation_tolerance_deg': 0.05,
             'fail_on_warning': False,
         }
@@ -391,9 +393,13 @@ class RegistrationDiagnostics(analysistask.AnalysisTask):
                'affine_rotation_deg': summary.get('affine_rotation_deg'),
                'heldout_edge_error_um': summary.get('heldout_edge_error_um')}
         problems = []
-        expected = self.parameters['expected_rotation_deg']
+        expected = self.dataSet.get_camera_rotation_deg()
         rotation = out['affine_rotation_deg']
-        if expected is not None and rotation is not None and \
+        out['camera_rotation_deg'] = expected
+        if expected is None:
+            out['rotation_test'] = ('skipped: the microscope parameters have '
+                                    'no camera_rotation_deg')
+        elif rotation is not None and \
                 abs(rotation - expected) > self.parameters['rotation_tolerance_deg']:
             problems.append('rotation %.3f deg, expected %.3f' % (rotation, expected))
         heldOut = out['heldout_edge_error_um'] or {}

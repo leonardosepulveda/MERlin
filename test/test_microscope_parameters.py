@@ -37,6 +37,7 @@ def test_yaml_microscope_parameters_match_json_twin(tmp_path):
     fromYaml = _image_dataset(tmp_path, 'fromYaml', str(yamlPath))
 
     assert fromYaml.microscopeParameters == fromJson.microscopeParameters
+    assert fromYaml.get_camera_rotation_deg() == -0.95
     # readers of microscope_parameters.json see plain JSON; the source
     # keeps its comments next to it
     with open(os.path.join(fromYaml.analysisPath,
@@ -59,3 +60,4 @@ def test_json_microscope_parameters_copied_verbatim(tmp_path):
     assert open(os.path.join(imageData.analysisPath,
                              'microscope_parameters.json')).read() == jsonText
     assert imageData.get_microns_per_pixel() == 0.108
+    assert imageData.get_camera_rotation_deg() is None

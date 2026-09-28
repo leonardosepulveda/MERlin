@@ -54,6 +54,59 @@ def test_warp_channels_to_process_restricts_computation(ragged_merfish_data):
         task.get_aligned_image(0, otherChannel, 0)
 
 
+def _warp_with_round_shifts(ragged_merfish_data, analysisName, parameters):
+    """A FiducialCorrelationWarp whose fiducial images are one bead field
+    moved by a known amount per imaging round (the synthetic raw fiducials
+    have no shift between rounds)."""
+    dataOrg = ragged_merfish_data.get_data_organization()
+    rng = np.random.default_rng(0)
+    beads = np.zeros((128, 128))
+    for y, x in rng.integers(10, 118, (40, 2)):
+        beads[y - 1:y + 2, x - 1:x + 2] = 1000
+    roundShifts = {'bit1': (0, 0), 'bit2': (0, 0), 'bit3': (3, -2),
+                   'bit4': (3, -2), 'DAPI': (-4, 5), 'polyT': (-4, 5)}
+
+    task = warp.FiducialCorrelationWarp(
+        ragged_merfish_data,
+        parameters={'edge_width_to_remove': 0, 'percentile_pixel_to_keep': 100,
+                    **parameters},
+        analysisName=analysisName)
+    task._registration_image = lambda channel, fov: np.roll(
+        beads, roundShifts[dataOrg.get_data_channel_name(channel)],
+        axis=(0, 1)).astype(np.float32)
+    task.save()
+    task._run_analysis(0)
+    return task
+
+
+def test_warp_restricted_instance_shares_default_reference(ragged_merfish_data):
+    """Unset, the reference is the first data channel in every instance, so
+    a DAPI-only warp gives DAPI the same transform as the full warp does.
+    Using the first listed channel instead made it the identity."""
+    dataOrg = ragged_merfish_data.get_data_organization()
+    dapi = dataOrg.get_data_channel_index('DAPI')
+    full = _warp_with_round_shifts(ragged_merfish_data, 'shiftedFullWarp', {})
+    restricted = _warp_with_round_shifts(
+        ragged_merfish_data, 'shiftedDapiWarp', {'channels_to_process': ['DAPI']})
+
+    expected = full.get_transformation(0, dapi).params
+    assert not np.allclose(expected, np.eye(3))
+    np.testing.assert_allclose(
+        restricted.get_transformation(0, dapi).params, expected, atol=1e-6)
+
+
+def test_warp_reference_channel(ragged_merfish_data):
+    dataOrg = ragged_merfish_data.get_data_organization()
+    dapi = dataOrg.get_data_channel_index('DAPI')
+    bit1 = dataOrg.get_data_channel_index('bit1')
+    task = _warp_with_round_shifts(
+        ragged_merfish_data, 'dapiReferenceWarp', {'reference_channel': 'DAPI'})
+
+    np.testing.assert_allclose(
+        task.get_transformation(0, dapi).params, np.eye(3), atol=1e-6)
+    assert not np.allclose(task.get_transformation(0, bit1).params, np.eye(3))
+
+
 def _synthetic_fiducial_frames(shift, fovCount, seed=0, size=256):
     """Frames sharing one camera fixed pattern (row offsets + per-pixel
     offsets + a smooth illumination), each with its own sparse Gaussian

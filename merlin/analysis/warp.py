@@ -342,6 +342,12 @@ class FiducialCorrelationWarp(Warp):
     An analysis task that warps a set of images taken in different imaging
     rounds based on the crosscorrelation between fiducial images.
 
+    `reference_channel` (a data channel name) is the channel whose fiducial
+    image every other channel is registered to. Unset, it is the first data
+    channel, whatever `channels_to_process` lists, so a restricted warp and
+    a full one share one reference. Set it to the same channel in both when
+    that channel is imaged first (e.g. DAPI for an early segmentation run).
+
     Optional (off by default): `remove_hot_pixels`, and
     `fiducial_template_task` (a `FiducialTemplate`), whose round template is
     subtracted before filtering. Needed when weak beads let the camera
@@ -374,6 +380,9 @@ class FiducialCorrelationWarp(Warp):
         if 'fiducial_template_task' not in self.parameters:
             self.parameters['fiducial_template_task'] = None
         self._templateTask = None
+
+        if 'reference_channel' not in self.parameters:
+            self.parameters['reference_channel'] = None
 
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
@@ -462,14 +471,16 @@ class FiducialCorrelationWarp(Warp):
         # use the same alignment if they are from the same imaging round
 
         # restricted to channels_to_process when set, so this never touches
-        # a channel whose round hasn't been imaged yet -- the reference
-        # image is the first such channel rather than always absolute
-        # channel 0, since channel 0 may not be one of them (this is a
-        # no-op change when channels_to_process is unset, since that case
-        # still resolves to every channel starting at 0).
+        # a channel whose round hasn't been imaged yet, except the
+        # reference (see reference_channel in the class docstring).
         channels = self._channels_to_process()
+        dataOrganization = self.dataSet.get_data_organization()
+        referenceName = self.parameters['reference_channel']
+        referenceChannel = dataOrganization.get_data_channels()[0] \
+            if referenceName is None \
+            else dataOrganization.get_data_channel_index(referenceName)
         fixedImage = self._filter(
-            self._registration_image(channels[0], fragmentIndex))
+            self._registration_image(referenceChannel, fragmentIndex))
         offsets = [registration.phase_cross_correlation(
             fixedImage,
             self._filter(self._registration_image(x, fragmentIndex)),

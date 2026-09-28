@@ -150,6 +150,23 @@ def test_filter_correspondence_outliers_per_direction():
     assert len(kept) == len(goodX) + len(goodY)
 
 
+def test_filter_correspondence_outliers_zero_mad():
+    """When over half of a direction's residuals are identical, MAD is 0
+    and the MAD threshold equals the median deviation (0). The floor keeps
+    edges a fraction of a pixel off while still rejecting a failed one."""
+    def corr(residualX):
+        return globalpositions.NeighborCorrespondence(
+            0, 1, '+x', (200.0, 0.0), (200.0 + residualX, 0.0), 0.01)
+
+    same = [corr(0.0) for _ in range(12)]
+    slightlyOff = [corr(0.1), corr(-0.2), corr(0.15)]
+    bad = corr(8.0)
+    kept, rejected = globalpositions.filter_correspondence_outliers(
+        same + slightlyOff + [bad], mad_threshold=5.0, min_threshold_um=0.5)
+    assert rejected == [bad]
+    assert len(kept) == len(same) + len(slightlyOff)
+
+
 def test_filter_correspondence_outliers_too_few_to_filter():
     corr = [globalpositions.NeighborCorrespondence(0, 1, '+x', (0.0, 0.0), (5.0, 0.0), 0.1)]
     kept, rejected = globalpositions.filter_correspondence_outliers(corr)

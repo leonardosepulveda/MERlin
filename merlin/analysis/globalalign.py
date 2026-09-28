@@ -644,8 +644,11 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
         for fov in fovs:
             correspondences.extend(self.registrationTask.return_exported_data(fov))
 
+        # A residual within one pixel of its direction's median is below
+        # the registration's resolution, so never an outlier.
         kept, rejected = globalpositions.filter_correspondence_outliers(
-            correspondences, mad_threshold=self.parameters['mad_threshold'])
+            correspondences, mad_threshold=self.parameters['mad_threshold'],
+            min_threshold_um=micronsPerPixel)
 
         priorWeight = self.parameters['affine_prior_weight']
         toleranceFraction = registrationParameters['tolerance_fraction']

@@ -3,7 +3,7 @@
 MERFISHDataSet layer covered in test_dataorganization.py/test_dataset.py.
 
 These exercise the real fov-scoped z-position fixes made across warp.py
-(no change needed there -- verified directly), preprocess.py, optimize.py,
+(get_aligned_image indexes the fov's own z list), preprocess.py, optimize.py,
 decode.py, globalalign.py, and segment.py's WatershedSegment, by actually
 running each task's _run_analysis against the ragged_merfish_data fixture
 (4 fovs with varying per-round z-depth -- see conftest.py/
@@ -14,11 +14,17 @@ here; segment.py's zPos_segment[sel] correctness fix and sequential.py's
 _resolve_z_indexes/optimize.py's _resolve_z_index are tested directly instead
 since they don't depend on those heavier dependencies.
 """
+import os
+import shutil
 import numpy as np
 import pytest
 import zarr
+from skimage import transform
 
+import merlin
 from merlin.core import analysistask
+from merlin.core import dataset
+from merlin.analysis import warp
 from merlin.analysis import optimize
 from merlin.analysis import sequential
 from merlin.analysis import generatemosaic
@@ -235,3 +241,76 @@ def test_segment_zPos_segment_retained_values_matches_masks_shape():
     # using the unfiltered zPos here (the old code's behavior) would have
     # been silently wrong-length (4 vs 3) once the invariant breaks
     assert len(zPos) != len(zPosRetained)
+
+
+@pytest.fixture(scope='module')
+def descending_ragged_data(ragged_merfish_files):
+    """The ragged raw files read through a data organization whose frames go
+    in decreasing z order. A short raw file then keeps the deepest z
+    positions, not the first ones: fov 1's round-1 file (5 frames) holds
+    z=[2,3], so its own z index 0 is dataset-wide index 2."""
+    name = 'test_data_organization_ragged_descending.csv'
+    shutil.copyfile(
+        os.path.join(os.path.dirname(__file__), 'auxiliary_files', name),
+        os.path.join(merlin.DATA_ORGANIZATION_HOME, name))
+    testData = dataset.MERFISHDataSet(
+        'ragged_merfish_test',
+        dataOrganizationName=name,
+        codebookNames=['test_codebook_ragged.csv'],
+        positionFileName='test_positions_ragged.csv',
+        analysisHome=os.path.join(merlin.ANALYSIS_HOME, '..',
+                                  'test_analysis_ragged_descending'),
+        microscopeParametersName='test_microscope_parameters.json',
+        allowRaggedZStacks=True)
+    yield testData
+
+    shutil.rmtree('test_analysis_ragged_descending')
+
+
+def test_warp_descending_frames_reads_fov_own_z(descending_ragged_data):
+    # the dataset-wide mapping would read z=0 (frame 7, beyond the 5-frame
+    # file) instead of this fov's first available z=2
+    task = warp.FiducialCorrelationWarp(
+        descending_ragged_data,
+        parameters={'edge_width_to_remove': 0, 'percentile_pixel_to_keep': 100},
+        analysisName='raggedDescendingWarp')
+    task.save()
+    task._run_analysis(1)
+    assert descending_ragged_data.get_z_positions(1) == [2, 3]
+
+    bit3 = descending_ragged_data.get_data_organization()\
+        .get_data_channel_index('bit3')
+    rawImage = descending_ragged_data.get_raw_image(bit3, 1, 2)
+    expected = transform.warp(
+        rawImage, task.get_transformation(1, bit3),
+        preserve_range=True).astype(rawImage.dtype)
+    np.testing.assert_array_equal(task.get_aligned_image(1, bit3, 0), expected)
+
+
+def test_generatemosaictile_descending_frames_same_depth(descending_ragged_data):
+    # z_index is dataset-wide: z_index=2 must read fov 1's own index 0 (the
+    # same z=2 as every other tile), and z_index=0 is not imaged in fov 1
+    imageShape = descending_ragged_data.get_image_dimensions()
+    bit1 = descending_ragged_data.get_data_organization()\
+        .get_data_channel_index('bit1')
+
+    def tile_task(zIndex):
+        task = generatemosaic.GenerateMosaicTile(
+            descending_ragged_data,
+            parameters={'warp_task': 'raggedWarp',
+                        'global_align_task': 'raggedGlobalAlign',
+                        'preprocess_task': 'raggedPreprocess',
+                        'downsample': 2, 'z_index': zIndex,
+                        'data_channels': ['bit1']},
+            analysisName='raggedDescendingMosaicTile%d' % zIndex)
+        task.warpTask = _StubWarpTask(imageShape)
+        task.ffcTask = _StubFfcTask(imageShape)
+        return task
+
+    task = tile_task(2)
+    task._load_tile(1, bit1, 2)
+    assert task.warpTask.calls == [(1, bit1, 0)]
+
+    task = tile_task(0)
+    assert np.all(task._load_tile(1, bit1, 2) == 0)
+    assert task.warpTask.calls == []

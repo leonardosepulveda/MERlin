@@ -34,6 +34,20 @@ class FigureGeneratingParallelTask(testtask.SimpleParallelAnalysisTask):
         plt.close(fig)
 
 
+class KilledOnceFigureParallelTask(FigureGeneratingParallelTask):
+    """A parallel task whose first figure generation kills the process
+    (SystemExit, not caught like an Exception), as an out-of-memory kill
+    would."""
+
+    killed = False
+
+    def _generate_verification_figures(self):
+        if not KilledOnceFigureParallelTask.killed:
+            KilledOnceFigureParallelTask.killed = True
+            raise SystemExit('killed while drawing figures')
+        super()._generate_verification_figures()
+
+
 def _figure_path(dataSet, taskName, figureName):
     return os.sep.join([dataSet.figuresPath,
                         '.'.join(['merlin', taskName, figureName]) + '.png'])
@@ -104,5 +118,27 @@ def test_parallel_task_generates_figure_once_after_last_fragment(
             'figure must not appear before every fragment is complete'
 
     task.run(task.fragment_count() - 1)
+    assert task.is_complete()
+    assert os.path.exists(figurePath)
+
+
+def test_parallel_task_killed_during_figures_is_not_marked_done(
+        simple_merfish_data):
+    """The done flag is written only after the figures, so a check that dies
+    while drawing them leaves the task not done, and the next check draws
+    them again instead of skipping them for good."""
+    task = KilledOnceFigureParallelTask(
+        simple_merfish_data, parameters={}, analysisName='killedFigureParallelTask')
+    task.save()
+    figurePath = _figure_path(
+        simple_merfish_data, 'killedFigureParallelTask', 'a_parallel_figure')
+
+    with pytest.raises(SystemExit):
+        for i in range(task.fragment_count()):
+            task.run(i)
+        task.is_complete()
+    assert not simple_merfish_data.check_analysis_done(task)
+    assert not os.path.exists(figurePath)
+
     assert task.is_complete()
     assert os.path.exists(figurePath)

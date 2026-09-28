@@ -492,6 +492,7 @@ def sample_neighbor_correspondences(
 def filter_correspondence_outliers(
     correspondences: List[NeighborCorrespondence],
     mad_threshold:   float = 5.0,
+    min_threshold_um: float = 0.0,
 ) -> Tuple[List[NeighborCorrespondence], List[NeighborCorrespondence]]:
     """
     Split correspondences into (kept, rejected), separately per direction.
@@ -506,6 +507,11 @@ def filter_correspondence_outliers(
     deviation to a Gaussian sigma). This catches individual registrations
     that failed outright (weak fiducial signal, a bad phase-correlation
     peak).
+
+    The threshold is never below *min_threshold_um*. Without that floor, a
+    direction where over half the residuals are identical (MAD = 0, e.g.
+    shifts locked to whole pixels) would reject every edge above the
+    median, however small its deviation.
 
     The direction is taken from the lower to the higher fov id (a
     measurement made from the higher id is flipped): with fovs numbered in
@@ -532,7 +538,9 @@ def filter_correspondence_outliers(
         idx = np.where(directions == direction)[0]
         deviation = np.hypot(*(residuals[idx] - np.median(residuals[idx], axis=0)).T)
         median = np.median(deviation)
-        threshold = median + mad_threshold * 1.4826 * np.median(np.abs(deviation - median))
+        threshold = max(
+            median + mad_threshold * 1.4826 * np.median(np.abs(deviation - median)),
+            min_threshold_um)
         keep[idx[deviation > threshold]] = False
 
     kept = [c for c, k in zip(correspondences, keep) if k]

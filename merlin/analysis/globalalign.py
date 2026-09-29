@@ -442,20 +442,22 @@ class RegisterFovNeighbors(analysistask.ParallelAnalysisTask):
         # so the per-frame term below is a physically-reasoned fit (~4
         # MB/s effective per-frame open+read cost on shared storage for
         # up to 5 frames: anchor + 4 neighbours), not an independently
-        # measured slope. Floored at 1 minute raw, since that observed
-        # 13-17s floor makes a sub-minute raw estimate too fragile to
-        # trust on its own; one real fov did time out under the previous
-        # (higher, but uncalibrated) 3-minute cluster-config request,
-        # from a transient node-level I/O contention spike rather than
-        # its own compute cost.
-        # A max projection reads every z plane of each of the 5 fovs
-        # (uncalibrated: same per-frame cost assumed).
-        width, height = self.dataSet.get_image_dimensions()
-        frameBytes = width * height * resourceestimate.BYTES_PER_PIXEL
+        # measured slope. Floored at 4 minutes raw (5 requested): at a
+        # 1-minute request 89 of 384 BC555d fovs timed out (2026-09-14),
+        # while healthy nodes at 3 minutes finished every fov in <= 180 s;
+        # the 17 LT066m timeouts at 3 minutes were all on one node.
+        # A max projection reads every z plane of each of the 5 fovs:
+        # BC555 disk DAPI (100 planes) took 51-58 s per fov, ~0.07 s per
+        # plane after startup; 0.15 s per plane is used.
+        if self.parameters['max_projection_data_channel'] is None:
+            width, height = self.dataSet.get_image_dimensions()
+            secondsPerFrame = width * height * resourceestimate.BYTES_PER_PIXEL / 4_000_000
+        else:
+            secondsPerFrame = 0.15
         rawMinutes = resourceestimate.estimate_stack_time_minutes(
             frameCount=5 * self._planes_per_image(),
-            secondsPerFrame=frameBytes / 4_000_000, baselineMinutes=0.25)
-        return max(rawMinutes, 1.0)
+            secondsPerFrame=secondsPerFrame, baselineMinutes=0.25)
+        return max(rawMinutes, 4.0)
 
     def _planes_per_image(self) -> int:
         channel = self.parameters['max_projection_data_channel']

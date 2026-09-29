@@ -442,20 +442,22 @@ class RegisterFovNeighbors(analysistask.ParallelAnalysisTask):
         # so the per-frame term below is a physically-reasoned fit (~4
         # MB/s effective per-frame open+read cost on shared storage for
         # up to 5 frames: anchor + 4 neighbours), not an independently
-        # measured slope. Floored at 1 minute raw, since that observed
-        # 13-17s floor makes a sub-minute raw estimate too fragile to
-        # trust on its own; one real fov did time out under the previous
-        # (higher, but uncalibrated) 3-minute cluster-config request,
-        # from a transient node-level I/O contention spike rather than
-        # its own compute cost.
-        # A max projection reads every z plane of each of the 5 fovs
-        # (uncalibrated: same per-frame cost assumed).
-        width, height = self.dataSet.get_image_dimensions()
-        frameBytes = width * height * resourceestimate.BYTES_PER_PIXEL
+        # measured slope. Floored at 4 minutes raw (5 requested): at a
+        # 1-minute request 89 of 384 BC555d fovs timed out (2026-09-14),
+        # while healthy nodes at 3 minutes finished every fov in <= 180 s;
+        # the 17 LT066m timeouts at 3 minutes were all on one node.
+        # A max projection reads every z plane of each of the 5 fovs:
+        # BC555 disk DAPI (100 planes) took 51-58 s per fov, ~0.07 s per
+        # plane after startup; 0.15 s per plane is used.
+        if self.parameters['max_projection_data_channel'] is None:
+            width, height = self.dataSet.get_image_dimensions()
+            secondsPerFrame = width * height * resourceestimate.BYTES_PER_PIXEL / 4_000_000
+        else:
+            secondsPerFrame = 0.15
         rawMinutes = resourceestimate.estimate_stack_time_minutes(
             frameCount=5 * self._planes_per_image(),
-            secondsPerFrame=frameBytes / 4_000_000, baselineMinutes=0.25)
-        return max(rawMinutes, 1.0)
+            secondsPerFrame=secondsPerFrame, baselineMinutes=0.25)
+        return max(rawMinutes, 4.0)
 
     def _planes_per_image(self) -> int:
         channel = self.parameters['max_projection_data_channel']
@@ -592,25 +594,27 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
     providesTimeEstimate = True
 
     def get_estimated_memory(self):
-        # Uncalibrated -- no real job measured yet. `_BoundedFrameCache`'s
-        # default maxsize (8) full frames, plus a higher baseline than
-        # FiducialCorrelationWarp's measured 230 MB to cover pandas/scipy
-        # (the sparse solves, correspondence dataframes) -- kTask=2
-        # rather than 1 since compute_overlap_correlations promotes crops
-        # to float64.
+        # Measured (/usr/bin/time -v, 2304x2304 frames, after the 2026-09-26
+        # redesign): peak RSS 948 MB on LT066m (1138 fovs), 990 MB on
+        # BC555d disk (603 fovs), so flat in fov count. ~300 MB is imports
+        # plus the dataset; the rest is `_BoundedFrameCache`'s 8 frames,
+        # one frame's load transients (zarr read, remove_hot_pixels' float64
+        # copies: ~17 frames' worth) and the figures. kTask=9 fits the
+        # larger peak with ~8% to spare. Older sacct peaks of 6-8 GB
+        # (2026-08-29 to 2026-09-03) predate the RegisterFovNeighbors split.
         return resourceestimate.estimate_stack_memory_mb(
-            self.dataSet, frameCount=8, kTask=2, baselineMb=500)
+            self.dataSet, frameCount=8, kTask=9, baselineMb=300)
 
     def get_estimated_time(self):
-        # Uncalibrated -- no real job measured yet. Dominated by reading
-        # every fov's small RegisterFovNeighbors CSV plus the final
-        # compute_overlap_correlations QC pass over the kept
-        # correspondences -- both roughly linear in fov count, not frame-
-        # count, so this (ab)uses frameCount as a fov-count proxy rather
-        # than a real frame count.
+        # Measured on the same two runs: 25.5 min (LT066m) and 13.2 min
+        # (BC555d), ~1.3 s per fov. Nearly all of it is the final
+        # compute_overlap_correlations pass, which loads ~2.6 frames per
+        # fov (the 8-frame cache misses) at ~0.44 s each, mostly
+        # remove_hot_pixels' two full-frame medians. frameCount stands in
+        # for the fov count.
         return resourceestimate.estimate_stack_time_minutes(
-            frameCount=len(self.dataSet.get_fovs()), secondsPerFrame=0.2,
-            baselineMinutes=5)
+            frameCount=len(self.dataSet.get_fovs()), secondsPerFrame=1.5,
+            baselineMinutes=1)
 
     def get_dependencies(self):
         return [self.parameters['neighbor_registration_task']]

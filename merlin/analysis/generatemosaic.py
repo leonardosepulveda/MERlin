@@ -3,6 +3,7 @@ import skimage.transform
 from typing import Dict, List, Optional, Tuple
 
 from merlin.core import analysistask
+from merlin.analysis import globalalign
 from merlin.analysis.createffc import CreateFfc
 from merlin.util import globalpositions
 
@@ -359,8 +360,27 @@ class CombineMosaicTiles(analysistask.AnalysisTask):
                 and self.parameters['output_format'] != 'ome':
             raise ValueError("write_pyramidal_tiff requires output_format='ome'.")
 
+    #: Peak memory is one channel's canvas in _build_channel_mosaic, so it
+    #: scales with the mosaic's area.
+    providesMemoryEstimate = True
+
+    #: Bytes held per mosaic pixel while one channel is built: the float32
+    #: canvas, np.clip's float32 copy and the uint16 cast (10), plus the
+    #: previous channel's uint16 mosaic, still referenced by the caller (2).
+    _BYTES_PER_MOSAIC_PIXEL = 12
+
     def get_estimated_memory(self):
-        return 10000
+        # The global alignment has not run when the Snakefile is generated,
+        # so the canvas is sized from the nominal stage positions. The
+        # correction changes the extent by ~1-2% per side (its affine scale),
+        # which the snakewriter margin covers. The largest canvas is at the
+        # smallest downsample factor.
+        tileTask = self.dataSet.load_analysis_task(self.parameters['tile_task'])
+        nominalAlignment = globalalign.SimpleGlobalAlignment(self.dataSet)
+        _, (height, width) = _mosaic_geometry(
+            nominalAlignment, tileTask.get_mosaic_microns_per_pixel(
+                min(tileTask.parameters['downsample'])))
+        return 500 + height * width * self._BYTES_PER_MOSAIC_PIXEL / 1e6
 
     def get_estimated_time(self):
         return 30

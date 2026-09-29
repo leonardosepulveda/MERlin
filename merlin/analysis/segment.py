@@ -420,7 +420,10 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
     def __init__(self, dataSet, parameters=None, analysisName=None):
         super().__init__(dataSet, parameters, analysisName)
 
-        if 'diameter' not in self.parameters: # diameter is not important for cp4?
+        # expected cell diameter in full-resolution pixels (scaled by
+        # downsample_factor before it reaches cellpose). None lets
+        # cellpose-SAM segment at the image's own scale.
+        if 'diameter' not in self.parameters:
             self.parameters['diameter'] = None
         if 'channel_1_name' not in self.parameters:
             self.parameters['channel_1_name'] = 'DAPI' # maybe sharper to segment on
@@ -443,19 +446,21 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
             self.parameters['do_3D'] = True
 
         if 'anisotropy' not in self.parameters:
-            # not used for 2d-3d stitching
-            # ex. 2 if z is samples half as dense as XY
-            # so should be z step size / pixel size
-            self.parameters['anisotropy'] = 1
+            # only used with do_3D. z step / xy pixel size of the volume
+            # cellpose sees, ex. 2 if z is sampled half as dense as XY.
+            # None computes it per fov from the segmentation z positions,
+            # the microns per pixel and downsample_factor (see
+            # _get_anisotropy); a number overrides that.
+            self.parameters['anisotropy'] = None
 
         if 'stitch_threshold' not in self.parameters:
             self.parameters['stitch_threshold'] = 0.25 # only for 2d stitching
-            
+
         # downsample to save on memory for cellpose
         # this may be critical for CP4 where the network time is very slow
         # recommended to keep at least 4
-        # ex downsample_factor 4 will reduce the image size in half, but keep the same number of z planes
-        # make sure to consider the anisotropy
+        # ex downsample_factor 4 divides the rows and the columns by 4 each
+        # (1/16 of the pixels), but keeps the same number of z planes
         if 'downsample_factor' not in self.parameters:
             self.parameters['downsample_factor'] = 4
 
@@ -557,6 +562,28 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
             stack.append(warpedImage)
 
         return np.array(stack).astype(rawImage.dtype)
+
+    def _get_anisotropy(self, fov: int) -> float:
+        """The z step divided by the xy pixel size of the (downsampled)
+        volume cellpose sees for this fov, or the anisotropy parameter
+        when one is set.
+        """
+        if self.parameters['anisotropy'] is not None:
+            return float(self.parameters['anisotropy'])
+
+        zPositions = np.unique(self.dataSet.get_z_positions_segmentation(fov))
+        if len(zPositions) < 2:
+            return 1.0
+        zSteps = np.diff(zPositions)
+        zStep = float(np.median(zSteps))
+        if not np.allclose(zSteps, zStep):
+            warnings.warn(
+                'Segmentation z steps for fov {0} are not uniform ({1}); '
+                'using the median step {2} um for the anisotropy.'
+                .format(fov, zSteps, zStep))
+        pixelSize = self.dataSet.get_microns_per_pixel() \
+            * (self.parameters['downsample_factor'] or 1)
+        return zStep / pixelSize
 
     def _save_tiff_images(self, fov, filename_prefix, image_stack, use_skimage = False):
         '''Save a stack of images as a tiff file.'''
@@ -665,11 +692,19 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
             else:
                 model = cellpose.models.CellposeModel(gpu=self.parameters['use_gpu'])
 
+            diameter = self.parameters['diameter']
+            if diameter is not None and self.parameters['downsample_factor'] is not None:
+                diameter = diameter / self.parameters['downsample_factor']
+
             if self.parameters['do_3D']:
+                anisotropy = self._get_anisotropy(fragmentIndex)
+                print(f'cellpose do_3D with anisotropy {anisotropy:.3f}')
                 cellpose_output = model.eval(seg_images,
                                                 do_3D = True,
                                                 z_axis = 0,
                                                 channel_axis = channel_axis,
+                                                anisotropy = anisotropy,
+                                                diameter = diameter,
                                                 flow3D_smooth = self.parameters['flow3D_smooth'],
                                                 flow_threshold = self.parameters['flow_threshold'], 
                                                 cellprob_threshold = self.parameters['cellprob_threshold'],
@@ -686,8 +721,9 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
                 masks_raw = np.zeros(masks_shape, dtype = np.uint16)
                 # have to run this plane by plane
                 for i,im in enumerate(seg_images):
-                    cellpose_output = model.eval(im, 
+                    cellpose_output = model.eval(im,
                                                     do_3D = False,
+                                                    diameter = diameter,
                                                     flow_threshold = self.parameters['flow_threshold'], 
                                                     cellprob_threshold = self.parameters['cellprob_threshold'],
                                                     min_size = self.parameters['min_size'],

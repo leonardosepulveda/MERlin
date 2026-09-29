@@ -592,25 +592,27 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
     providesTimeEstimate = True
 
     def get_estimated_memory(self):
-        # Uncalibrated -- no real job measured yet. `_BoundedFrameCache`'s
-        # default maxsize (8) full frames, plus a higher baseline than
-        # FiducialCorrelationWarp's measured 230 MB to cover pandas/scipy
-        # (the sparse solves, correspondence dataframes) -- kTask=2
-        # rather than 1 since compute_overlap_correlations promotes crops
-        # to float64.
+        # Measured (/usr/bin/time -v, 2304x2304 frames, after the 2026-09-26
+        # redesign): peak RSS 948 MB on LT066m (1138 fovs), 990 MB on
+        # BC555d disk (603 fovs), so flat in fov count. ~300 MB is imports
+        # plus the dataset; the rest is `_BoundedFrameCache`'s 8 frames,
+        # one frame's load transients (zarr read, remove_hot_pixels' float64
+        # copies: ~17 frames' worth) and the figures. kTask=9 fits the
+        # larger peak with ~8% to spare. Older sacct peaks of 6-8 GB
+        # (2026-08-29 to 2026-09-03) predate the RegisterFovNeighbors split.
         return resourceestimate.estimate_stack_memory_mb(
-            self.dataSet, frameCount=8, kTask=2, baselineMb=500)
+            self.dataSet, frameCount=8, kTask=9, baselineMb=300)
 
     def get_estimated_time(self):
-        # Uncalibrated -- no real job measured yet. Dominated by reading
-        # every fov's small RegisterFovNeighbors CSV plus the final
-        # compute_overlap_correlations QC pass over the kept
-        # correspondences -- both roughly linear in fov count, not frame-
-        # count, so this (ab)uses frameCount as a fov-count proxy rather
-        # than a real frame count.
+        # Measured on the same two runs: 25.5 min (LT066m) and 13.2 min
+        # (BC555d), ~1.3 s per fov. Nearly all of it is the final
+        # compute_overlap_correlations pass, which loads ~2.6 frames per
+        # fov (the 8-frame cache misses) at ~0.44 s each, mostly
+        # remove_hot_pixels' two full-frame medians. frameCount stands in
+        # for the fov count.
         return resourceestimate.estimate_stack_time_minutes(
-            frameCount=len(self.dataSet.get_fovs()), secondsPerFrame=0.2,
-            baselineMinutes=5)
+            frameCount=len(self.dataSet.get_fovs()), secondsPerFrame=1.5,
+            baselineMinutes=1)
 
     def get_dependencies(self):
         return [self.parameters['neighbor_registration_task']]

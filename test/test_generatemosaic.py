@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from merlin.analysis import generatemosaic
+from merlin.analysis import globalalign
 
 
 def _mosaic_tile_parameters(**overrides):
@@ -50,6 +51,26 @@ def test_use_ffc_defaults_to_true(simple_merfish_data):
         simple_merfish_data, parameters=_mosaic_tile_parameters())
     assert task.parameters['use_ffc'] is True
     assert 'ffc' in task.get_dependencies()
+
+
+def test_combine_memory_estimate_scales_with_smallest_downsample_canvas(
+        simple_merfish_data):
+    tileTask = generatemosaic.GenerateMosaicTile(
+        simple_merfish_data, parameters=_mosaic_tile_parameters(downsample=[4, 2]),
+        analysisName='EstimateMosaicTile')
+    tileTask.save(overwrite=True)
+    combineTask = generatemosaic.CombineMosaicTiles(
+        simple_merfish_data, parameters={'tile_task': 'EstimateMosaicTile'})
+    assert combineTask.providesMemoryEstimate
+
+    # the canvas at downsample 2, from the nominal stage positions
+    extent = globalalign.SimpleGlobalAlignment(
+        simple_merfish_data).get_global_extent()
+    micronsPerPixel = simple_merfish_data.get_microns_per_pixel() * 2
+    pixels = (int((extent[2] - extent[0]) / micronsPerPixel)
+              * int((extent[3] - extent[1]) / micronsPerPixel))
+    canvasBytes = (combineTask.get_estimated_memory() - 500) * 1e6
+    assert canvasBytes / 12 == pytest.approx(pixels, rel=0.05)
 
 
 class _FakeAlignTask:

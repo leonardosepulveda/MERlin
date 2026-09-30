@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import scipy.ndimage
 
@@ -24,10 +26,14 @@ def _sam_task(dataSet, **parameters):
     # a single plane has no z spacing
     ([0.0], 0.1, 4, 1.0),
 ])
+@pytest.mark.parametrize('anisotropy', ['auto', 'AUTO', None])
 def test_cellpose_sam_anisotropy_computed(
         simple_merfish_data, monkeypatch, zPositions, micronsPerPixel,
-        downsample, expected):
-    task = _sam_task(simple_merfish_data, downsample_factor=downsample)
+        downsample, expected, anisotropy):
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        task = _sam_task(simple_merfish_data, downsample_factor=downsample,
+                         anisotropy=anisotropy)
     monkeypatch.setattr(simple_merfish_data, 'get_z_positions_segmentation',
                         lambda fov=None: zPositions)
     monkeypatch.setattr(simple_merfish_data, 'get_microns_per_pixel',
@@ -40,6 +46,20 @@ def test_cellpose_sam_anisotropy_override(simple_merfish_data, monkeypatch):
     monkeypatch.setattr(simple_merfish_data, 'get_z_positions_segmentation',
                         lambda fov=None: [0.0, 0.25, 0.5])
     assert task._get_anisotropy(0) == 1.5
+
+
+def test_cellpose_sam_anisotropy_default_is_auto(simple_merfish_data):
+    assert _sam_task(simple_merfish_data).parameters['anisotropy'] == 'auto'
+
+
+def test_cellpose_sam_anisotropy_null_warns(simple_merfish_data):
+    with pytest.warns(UserWarning, match='null is read as auto'):
+        _sam_task(simple_merfish_data, anisotropy=None)
+
+
+def test_cellpose_sam_anisotropy_bad_string_raises(simple_merfish_data):
+    with pytest.raises(ValueError, match='automatic'):
+        _sam_task(simple_merfish_data, anisotropy='automatic')
 
 
 def test_cellpose_sam_anisotropy_uneven_steps_warns(

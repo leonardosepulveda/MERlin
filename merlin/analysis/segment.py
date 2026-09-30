@@ -448,10 +448,17 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
         if 'anisotropy' not in self.parameters:
             # only used with do_3D. z step / xy pixel size of the volume
             # cellpose sees, ex. 2 if z is sampled half as dense as XY.
-            # None computes it per fov from the segmentation z positions,
+            # 'auto' computes it per fov from the segmentation z positions,
             # the microns per pixel and downsample_factor (see
-            # _get_anisotropy); a number overrides that.
-            self.parameters['anisotropy'] = None
+            # _get_anisotropy); a number overrides that. None is accepted
+            # as 'auto' for older configs but, unlike cellpose's own None,
+            # does not mean 1.
+            self.parameters['anisotropy'] = 'auto'
+        self._anisotropy_override()  # fail on a bad value when built
+        if self.parameters['anisotropy'] is None:
+            warnings.warn(
+                'CellPoseSegmentSAM anisotropy null is read as auto (computed '
+                'per fov); write auto or a number instead.')
 
         if 'stitch_threshold' not in self.parameters:
             self.parameters['stitch_threshold'] = 0.25 # only for 2d stitching
@@ -574,13 +581,28 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
 
         return np.array(stack).astype(rawImage.dtype)
 
+    def _anisotropy_override(self):
+        """The anisotropy parameter as a float, or None when it is 'auto'
+        (any case) or None and should be computed per fov.
+        """
+        anisotropy = self.parameters['anisotropy']
+        if anisotropy is None or (isinstance(anisotropy, str)
+                                  and anisotropy.lower() == 'auto'):
+            return None
+        if isinstance(anisotropy, str):
+            raise ValueError(
+                "CellPoseSegmentSAM anisotropy must be 'auto' or a number, "
+                "not {0!r}".format(anisotropy))
+        return float(anisotropy)
+
     def _get_anisotropy(self, fov: int) -> float:
         """The z step divided by the xy pixel size of the (downsampled)
         volume cellpose sees for this fov, or the anisotropy parameter
         when one is set.
         """
-        if self.parameters['anisotropy'] is not None:
-            return float(self.parameters['anisotropy'])
+        override = self._anisotropy_override()
+        if override is not None:
+            return override
 
         zPositions = np.unique(self.dataSet.get_z_positions_segmentation(fov))
         if len(zPositions) < 2:

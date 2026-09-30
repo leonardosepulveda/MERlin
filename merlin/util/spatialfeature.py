@@ -13,6 +13,7 @@ import merlin
 import pandas
 import networkx as nx
 import rtree
+from scipy import ndimage
 from scipy.spatial import cKDTree
 
 
@@ -29,21 +30,24 @@ _workerLabelMatrixStack = None
 _workerFov = None
 _workerTransformationMatrix = None
 _workerZCoordinates = None
+_workerObjectSlices = None
 
 
 def _init_feature_worker(labelMatrixStack, fov, transformationMatrix,
-                          zCoordinates):
+                          zCoordinates, objectSlices):
     global _workerLabelMatrixStack, _workerFov, \
-        _workerTransformationMatrix, _workerZCoordinates
+        _workerTransformationMatrix, _workerZCoordinates, \
+        _workerObjectSlices
     _workerLabelMatrixStack = labelMatrixStack
     _workerFov = fov
     _workerTransformationMatrix = transformationMatrix
     _workerZCoordinates = zCoordinates
+    _workerObjectSlices = objectSlices
 
 
 def _feature_for_mask_value(maskValue):
-    return SpatialFeature.feature_from_label_matrix(
-        _workerLabelMatrixStack == maskValue, _workerFov,
+    return SpatialFeature._feature_from_cropped_label(
+        _workerLabelMatrixStack, maskValue, _workerObjectSlices, _workerFov,
         _workerTransformationMatrix, _workerZCoordinates)
 
 
@@ -129,9 +133,11 @@ class SpatialFeature(object):
 
         Equivalent to calling
         feature_from_label_matrix(labelMatrixStack == value, ...) once per
-        entry in maskValues, but split across worker processes -- the
-        per-object contour extraction done inside feature_from_label_matrix
-        is the dominant cost for FOVs with many segmented objects, and each
+        entry in maskValues, up to floating-point rounding of the polygon
+        coordinates. Each object is contoured only inside its own bounding
+        box (padded by 1 px) rather than on every full frame, which is
+        what dominates the cost for large frames with many objects.
+        Objects can also be split across worker processes, since each
         object's feature is independent of the others.
 
         Args:
@@ -149,17 +155,54 @@ class SpatialFeature(object):
         Returns: the list of features, one per entry in maskValues, in the
             same order.
         """
-        if processes <= 1 or len(maskValues) == 0:
-            return [SpatialFeature.feature_from_label_matrix(
-                        labelMatrixStack == v, fov, transformationMatrix,
-                        zCoordinates)
+        if len(maskValues) == 0:
+            return []
+        objectSlices = ndimage.find_objects(labelMatrixStack)
+
+        if processes <= 1:
+            return [SpatialFeature._feature_from_cropped_label(
+                        labelMatrixStack, v, objectSlices, fov,
+                        transformationMatrix, zCoordinates)
                     for v in maskValues]
 
         with multiprocessing.Pool(
                 processes=processes, initializer=_init_feature_worker,
                 initargs=(labelMatrixStack, fov, transformationMatrix,
-                          zCoordinates)) as pool:
+                          zCoordinates, objectSlices)) as pool:
             return pool.map(_feature_for_mask_value, maskValues)
+
+    @staticmethod
+    def _feature_from_cropped_label(
+            labelMatrixStack: np.ndarray, maskValue: int, objectSlices,
+            fov: int, transformationMatrix: np.ndarray = None,
+            zCoordinates: np.ndarray = None) -> 'SpatialFeature':
+        """feature_from_label_matrix(labelMatrixStack == maskValue, ...),
+        contoured only inside the object's bounding box from objectSlices
+        (the output of ndimage.find_objects on labelMatrixStack), padded
+        by 1 px so the contour closes as it does on the full frame. All z
+        planes are kept so the boundary list still has one entry per
+        plane.
+        """
+        objectSlice = objectSlices[maskValue - 1] \
+            if 0 < maskValue <= len(objectSlices) else None
+        if objectSlice is None:
+            return SpatialFeature.feature_from_label_matrix(
+                labelMatrixStack == maskValue, fov, transformationMatrix,
+                zCoordinates)
+
+        _, rowSlice, colSlice = objectSlice
+        row0 = max(rowSlice.start - 1, 0)
+        col0 = max(colSlice.start - 1, 0)
+        cropped = labelMatrixStack[
+            :, row0:rowSlice.stop + 1, col0:colSlice.stop + 1] == maskValue
+        # contours come back as (col, row) because _extract_boundaries
+        # transposes each frame
+        cropOffset = np.array([[1, 0, col0], [0, 1, row0], [0, 0, 1]],
+                              dtype=float)
+        if transformationMatrix is not None:
+            cropOffset = transformationMatrix @ cropOffset
+        return SpatialFeature.feature_from_label_matrix(
+            cropped, fov, cropOffset, zCoordinates)
 
     @staticmethod
     def _extract_boundaries(labelMatrix: np.ndarray) -> List[np.ndarray]:

@@ -347,3 +347,45 @@ def test_remove_overlapping_cells():
     assert p5.get_feature_id() in keptCells
     assert p2.get_feature_id() not in keptCells
     assert p3.get_feature_id() not in keptCells
+
+
+def _synthetic_label_stack():
+    labels = np.zeros((4, 60, 70), dtype=np.uint16)
+    labels[0:3, 10:25, 12:30] = 1   # a box spanning three planes
+    labels[1, 15:20, 18:24] = 0     # with a hole in the middle plane
+    labels[1:4, 0:8, 40:52] = 2     # touching the top edge
+    labels[2, 50:60, 60:70] = 3     # touching the bottom-right corner
+    labels[3, 30:36, 5:11] = 4      # split into two pieces in one plane
+    labels[3, 30:36, 20:26] = 4
+    rr, cc = np.ogrid[:60, :70]
+    labels[0][(rr - 40) ** 2 + (cc - 50) ** 2 < 49] = 5   # a disk
+    return labels
+
+
+@pytest.mark.parametrize('processes', [1, 2])
+@pytest.mark.parametrize('transformationMatrix', [
+    None, np.array([[0.1, 0, 25.0], [0, 0.1, -3.0], [0, 0, 1]])])
+def test_features_from_label_matrix_stack_crop_matches_full_frame(
+        processes, transformationMatrix):
+    labels = _synthetic_label_stack()
+    zCoordinates = np.array([0, 1.5, 3, 4.5])
+    # 6 is absent from the stack, so it has no bounding box
+    maskValues = np.array([1, 2, 3, 4, 5, 6])
+
+    cropped = spatialfeature.SpatialFeature.features_from_label_matrix_stack(
+        labels, maskValues, 0, transformationMatrix, zCoordinates,
+        processes=processes)
+
+    for value, feature in zip(maskValues, cropped):
+        expected = spatialfeature.SpatialFeature.feature_from_label_matrix(
+            labels == value, 0, transformationMatrix, zCoordinates)
+        assert np.array_equal(feature.get_z_coordinates(),
+                              expected.get_z_coordinates())
+        for croppedPlane, expectedPlane in zip(
+                feature.get_boundaries(), expected.get_boundaries()):
+            assert len(croppedPlane) == len(expectedPlane)
+            for p, q in zip(croppedPlane, expectedPlane):
+                assert np.allclose(np.array(p.exterior.coords),
+                                   np.array(q.exterior.coords))
+                assert p.symmetric_difference(q).area < 1e-9
+    assert all(len(b) == 0 for b in cropped[-1].get_boundaries())

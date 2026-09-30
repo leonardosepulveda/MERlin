@@ -496,47 +496,58 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
 
-    #: _run_analysis builds one [z, x, y, c] array holding every
-    #: (downsampled) z plane for both segmentation channels at once
-    #: (cellpose needs the whole volume for 3D segmentation/stitching),
-    #: so memory genuinely scales with frame/z geometry. Wall-clock time
-    #: does not: per FINDINGS.md, GPU inference itself finishes in under a
-    #: second and the real bottleneck is the serial per-cell
-    #: post-processing loop afterward, so time is dominated by detected
-    #: cell count -- data-dependent, unknown ahead of a run -- not frame
-    #: geometry. Only memory gets a real estimate here.
+    #: Both estimates are calibrated against stage-by-stage benchmarks of
+    #: this task on BC553 disk FOVs (2304x2304 frames, downsample_factor
+    #: 4, 3-100 segmentation planes, 2D and 3D, A100 MIG 3g.20gb) plus
+    #: two completed BC555_sample_05 runs (epi: 25 planes of 2048x2048,
+    #: max 3679 MB; disk: 100 planes of 2304x2304, max 9741 MB). GPU
+    #: memory is flat (about 2.6 GB reserved) whatever the stack size,
+    #: since the cellpose tile batch sets it, so neither estimate covers
+    #: the GPU.
     providesMemoryEstimate = True
+    providesTimeEstimate = True
+
+    def _segmentation_frame_count(self):
+        channelCount = 2 if self.parameters['channel_2_name'] else 1
+        return channelCount * len(self.dataSet.get_z_positions_segmentation())
 
     def get_estimated_memory(self):
-        # Calibrated jointly against two real, completed BC555_sample_05
-        # runs (see FINDINGS.md): epi (25 z, 2048x2048, 476 fovs, real
-        # max 3679 MB) and disk (100 z, 2304x2304, do_3D, 71 fovs so far,
-        # real max 9741 MB). Two data points at different z-depths pin
-        # down both free parameters -- baselineMb=2190 (a loaded cellpose
-        # model's fixed GPU/CPU footprint) and kTask=114 (this task
-        # genuinely holds the whole [z, x, y, c] downsampled volume at
-        # once, so needs a much larger multiplier than a single-frame
-        # task) -- exactly reproducing both real maxes. downsample_factor
-        # shrinks the x/y footprint (not z, per this task's own parameter
-        # docstring) before cellpose ever sees the volume. Not
-        # cross-checked against a channel_2_name-set (2-channel) run.
-        # Rounded up to the next whole GB (same rationale as
-        # RegisterFovNeighbors' own get_estimated_memory(), globalalign.py)
-        # so the request is a clean number.
-        channelCount = 2 if self.parameters['channel_2_name'] else 1
-        zCount = len(self.dataSet.get_z_positions())
-        downsampleFactor = self.parameters['downsample_factor'] or 1
-        rawMb = resourceestimate.estimate_stack_memory_mb(
-            self.dataSet, frameCount=channelCount * zCount,
-            downsampleFactor=downsampleFactor, kTask=114, baselineMb=2190)
-        return math.ceil(rawMb / 1000) * 1000
+        # Peak host memory is the larger of two stages.
+        # - Loading: _read_image_stack keeps every warped frame as full
+        #   resolution float64 before the uint16 copy, measured as
+        #   590 MB + 16.8 bytes per full-resolution pixel per plane
+        #   (9.5 GB at 100 planes). downsample_factor does not reduce it.
+        # - Everything after (cellpose model, eval, upsampling, features):
+        #   measured flat at 2.4-3.7 GB for 3-20 planes, and 3.7 GB in the
+        #   25-plane epi run. From about 40 planes on, loading dominates.
+        # Rounded up to the next whole GB so the request is a clean
+        # number.
+        loadMb = resourceestimate.estimate_stack_memory_mb(
+            self.dataSet, frameCount=self._segmentation_frame_count(),
+            kTask=8.4, baselineMb=590)
+        return math.ceil(max(loadMb, 3700) / 1000) * 1000
 
     def get_estimated_time(self):
-        # TODO - refine estimate. Not geometry-driven (see
-        # providesMemoryEstimate's comment above) -- stays a flat,
-        # unused-by-anything placeholder like every other non-opted-in
-        # task until this is estimated from cell density instead.
-        return 5
+        # Seconds per stage, measured on the BC553 disk benchmark:
+        # - 45 s fixed: imports and model load (40 s on first use on a
+        #   node, 5 s after).
+        # - 0.4 s per plane: load and warp, downsample, stitch3D,
+        #   expand_labels, upsample.
+        # - eval: 1.5 + 0.34 s per plane in 2D, 103 + 0.35 s per plane in
+        #   3D (without anisotropy).
+        # - features: 0.025 s per plane for find_objects, plus 0.03 s per
+        #   cell. The cell count is not known ahead of the run; 2000
+        #   covers the 790-1718 cells seen per 206 um disk FOV.
+        # Doubled for the stages that were not benchmarked (writing the
+        # mask tiff and the feature database).
+        frameCount = self._segmentation_frame_count()
+        if self.parameters['do_3D']:
+            evalSeconds = 103 + 0.35 * frameCount
+        else:
+            evalSeconds = 1.5 + 0.34 * frameCount
+        seconds = 45 + 0.4 * frameCount + evalSeconds \
+            + 0.025 * frameCount + 0.03 * 2000
+        return 2 * seconds / 60
 
     def get_dependencies(self):
         return [self.parameters['warp_task'],

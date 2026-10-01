@@ -1,5 +1,4 @@
 from abc import abstractmethod
-import math
 import numpy as np
 import pandas as pd
 from typing import Tuple
@@ -425,13 +424,11 @@ class RegisterFovNeighbors(analysistask.ParallelAnalysisTask):
         # correlates only a cropped overlap band, not a full frame), but
         # the cluster's 30s accounting-sample interval is too coarse to
         # trust for these ~13-190s jobs, so kTask isn't re-tuned from that
-        # data. Rounded up to the next whole GB so the request is a clean
-        # number.
+        # data.
         # A max projection also holds the plane being read (3 frames).
         frameCount = 2 if self.parameters['max_projection_data_channel'] is None else 3
-        rawMb = resourceestimate.estimate_stack_memory_mb(
+        return resourceestimate.estimate_stack_memory_mb(
             self.dataSet, frameCount=frameCount, kTask=59, baselineMb=230)
-        return math.ceil(rawMb / 1000) * 1000
 
     def get_estimated_time(self):
         # Calibrated against BC555_sample_05/disk (2304x2304 16-bit

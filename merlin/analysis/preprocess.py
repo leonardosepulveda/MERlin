@@ -1,3 +1,4 @@
+import contextlib
 import os
 import subprocess
 import cv2
@@ -13,6 +14,19 @@ from merlin.data import codebook
 
 from skimage import transform
 from skimage import io
+
+
+def _uint16_histogram(image: np.ndarray, binCount: int) -> np.ndarray:
+    """np.histogram(image, bins=np.arange(binCount + 1)) for a uint16
+    image, via np.bincount (several times faster than np.histogram's
+    sorted-edges search). As in np.histogram, the last bin is closed, so
+    it also counts values equal to binCount, and larger values are
+    dropped."""
+    counts = np.bincount(image.ravel(), minlength=binCount + 1)
+    histogram = counts[:binCount].copy()
+    histogram[-1] += counts[binCount]
+    return histogram
+
 
 class Preprocess(analysistask.ParallelAnalysisTask):
 
@@ -242,23 +256,23 @@ class DeconvolutionPreprocess(Preprocess):
             self.dataSet, frameCount=1, kTask=56, baselineMb=230)
 
     def get_estimated_time(self):
-        # baselineMinutes=4 and the flat 0.094 sec/(bit,z)-frame term are
-        # calibrated against BC555_sample_05 epi/disk's real max time
-        # (see FINDINGS.md) -- both real runs use decon_iterations=0, so
-        # what's actually being measured there is everything BUT
-        # deconvolution itself (TIF write, highpass filter, pixel-
-        # histogram binning). The decon_iterations term is NOT
-        # calibrated -- no real data exists at decon_iterations > 0 --
-        # and stays an uncalibrated additive guess on top of the now-real
-        # base cost.
+        # Per-frame cost scales with frame pixels: one full LT066_sample_01
+        # fov (2626 frames of 2304x2304, decon_iterations=0, histogram on,
+        # no image writes) took 0.400 s/frame on a holy7c node, i.e.
+        # 0.075 s per megapixel; 0.08 is used. The old flat 0.094
+        # s/frame (BC555 fit) under-requested LT066 by ~4x. The
+        # decon_iterations term is NOT calibrated -- no real data exists
+        # at decon_iterations > 0 -- and stays an additive guess.
         bitCount = self.get_codebook().get_bit_count()
         zCount = len(self.dataSet.get_z_positions())
+        width, height = self.dataSet.get_image_dimensions()
+        megapixels = width * height / 1e6
         secondsPerIteration = 0.2  # uncalibrated guess
-        secondsPerFrame = 0.094 + (
+        secondsPerFrame = 0.08 * megapixels + (
             self.parameters['decon_iterations'] * secondsPerIteration)
         return resourceestimate.estimate_stack_time_minutes(
             frameCount=bitCount * zCount, secondsPerFrame=secondsPerFrame,
-            baselineMinutes=4)
+            baselineMinutes=1)
 
     def get_dependencies(self):
         return [self.parameters['warp_task']]
@@ -299,7 +313,9 @@ class DeconvolutionPreprocess(Preprocess):
 
     def _run_analysis(self, fragmentIndex):
 
-        if self.parameters['save_pixel_histogram'] or (fragmentIndex in self.parameters['write_preprocessed_FOV']):
+        writeImages = self.parameters['write_preprocessed_images'] and (
+            fragmentIndex in self.parameters['write_preprocessed_FOV'])
+        if self.parameters['save_pixel_histogram'] or writeImages:
 
             warpTask = self.dataSet.load_analysis_task(
                     self.parameters['warp_task'])
@@ -311,8 +327,9 @@ class DeconvolutionPreprocess(Preprocess):
                 # this currently only is to calculate the pixel histograms in order
                 # to estimate the initial scale factors. This is likely unnecessary?
 
-            with self.dataSet.writer_for_analysis_images(
-                     self.analysisName, 'preprocessed_images', fragmentIndex) as outputTif:
+            with (self.dataSet.writer_for_analysis_images(
+                     self.analysisName, 'preprocessed_images', fragmentIndex)
+                  if writeImages else contextlib.nullcontext()) as outputTif:
 
                 for bi, b in enumerate(self.get_codebook().get_bit_names()):
                     dataChannel = self.dataSet.get_data_organization()\
@@ -323,10 +340,10 @@ class DeconvolutionPreprocess(Preprocess):
                                 fragmentIndex, dataChannel, i)
                         deconvolvedImage = self._preprocess_image(inputImage)
 
-                        pixelHistogram[bi, :] += np.histogram(
-                                deconvolvedImage, bins=histogramBins)[0]
-                        
-                        if self.parameters['write_preprocessed_images']:
+                        pixelHistogram[bi, :] += _uint16_histogram(
+                                deconvolvedImage, len(histogramBins) - 1)
+
+                        if writeImages:
                             outputTif.write(deconvolvedImage, photometric='MINISBLACK')
 
             self._save_pixel_histogram(pixelHistogram, fragmentIndex)

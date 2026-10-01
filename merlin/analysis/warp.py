@@ -404,16 +404,19 @@ class FiducialCorrelationWarp(Warp):
     providesTimeEstimate = True
 
     def get_estimated_memory(self):
-        # kTask backed out from one real measurement (855 MB peak RSS for
-        # a real BC555_sample_05 disk fov, 2304x2304 frames, write_
-        # aligned_images: false, against a 227 MB "import merlin" alone
-        # baseline -- see FINDINGS.md) rather than derived theoretically.
-        # Not re-measured with write_aligned_images: true, but that
-        # branch also only ever holds one frame at a time (see the
+        # kTask backed out from measured peak RSS rather than derived
+        # theoretically: 855 MB for a BC555_sample_05 disk fov, and
+        # 873-904 MB for 4 LT066_sample_01 fovs (27 channels,
+        # write_fiducial_images: true), all 2304x2304 frames against a
+        # ~230 MB "import merlin" baseline. kTask=59 (fit to BC555 alone)
+        # under-requested LT066, whose jobs also carry a ~135 MB snakemake
+        # wrapper in the same cgroup, so nearly all of them OOMed at
+        # 1028 MB. Not re-measured with write_aligned_images: true, but
+        # that branch also only ever holds one frame at a time (see the
         # comment above this class's providesMemoryEstimate/
         # providesTimeEstimate), so the same estimate is used for both.
         return resourceestimate.estimate_stack_memory_mb(
-            self.dataSet, frameCount=1, kTask=59, baselineMb=230)
+            self.dataSet, frameCount=1, kTask=64, baselineMb=230)
 
     def get_estimated_time(self):
         # Uncalibrated -- no FiducialCorrelationWarp job's wall-clock time

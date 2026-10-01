@@ -1,3 +1,4 @@
+import contextlib
 import os
 import subprocess
 import cv2
@@ -13,6 +14,19 @@ from merlin.data import codebook
 
 from skimage import transform
 from skimage import io
+
+
+def _uint16_histogram(image: np.ndarray, binCount: int) -> np.ndarray:
+    """np.histogram(image, bins=np.arange(binCount + 1)) for a uint16
+    image, via np.bincount (several times faster than np.histogram's
+    sorted-edges search). As in np.histogram, the last bin is closed, so
+    it also counts values equal to binCount, and larger values are
+    dropped."""
+    counts = np.bincount(image.ravel(), minlength=binCount + 1)
+    histogram = counts[:binCount].copy()
+    histogram[-1] += counts[binCount]
+    return histogram
+
 
 class Preprocess(analysistask.ParallelAnalysisTask):
 
@@ -299,7 +313,9 @@ class DeconvolutionPreprocess(Preprocess):
 
     def _run_analysis(self, fragmentIndex):
 
-        if self.parameters['save_pixel_histogram'] or (fragmentIndex in self.parameters['write_preprocessed_FOV']):
+        writeImages = self.parameters['write_preprocessed_images'] and (
+            fragmentIndex in self.parameters['write_preprocessed_FOV'])
+        if self.parameters['save_pixel_histogram'] or writeImages:
 
             warpTask = self.dataSet.load_analysis_task(
                     self.parameters['warp_task'])
@@ -311,8 +327,9 @@ class DeconvolutionPreprocess(Preprocess):
                 # this currently only is to calculate the pixel histograms in order
                 # to estimate the initial scale factors. This is likely unnecessary?
 
-            with self.dataSet.writer_for_analysis_images(
-                     self.analysisName, 'preprocessed_images', fragmentIndex) as outputTif:
+            with (self.dataSet.writer_for_analysis_images(
+                     self.analysisName, 'preprocessed_images', fragmentIndex)
+                  if writeImages else contextlib.nullcontext()) as outputTif:
 
                 for bi, b in enumerate(self.get_codebook().get_bit_names()):
                     dataChannel = self.dataSet.get_data_organization()\
@@ -323,10 +340,10 @@ class DeconvolutionPreprocess(Preprocess):
                                 fragmentIndex, dataChannel, i)
                         deconvolvedImage = self._preprocess_image(inputImage)
 
-                        pixelHistogram[bi, :] += np.histogram(
-                                deconvolvedImage, bins=histogramBins)[0]
-                        
-                        if self.parameters['write_preprocessed_images']:
+                        pixelHistogram[bi, :] += _uint16_histogram(
+                                deconvolvedImage, len(histogramBins) - 1)
+
+                        if writeImages:
                             outputTif.write(deconvolvedImage, photometric='MINISBLACK')
 
             self._save_pixel_histogram(pixelHistogram, fragmentIndex)

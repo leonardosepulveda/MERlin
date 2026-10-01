@@ -154,8 +154,8 @@ def test_snakemake_rule_resources_uses_computed_estimate_with_margin(
         parameters={'estimated_memory': 1000, 'estimated_time': 10})
     snakeRule = snakewriter.SnakemakeRule(task)
     ruleString = snakeRule.as_string()
-    # 1000 * 1.2 = 1200 -> 2000 (whole GB), 10 * 1.2 = 12
-    # (RESOURCE_ESTIMATE_MARGIN)
+    # 1000 * 1.2 + 200 (SNAKEMAKE_WRAPPER_MB) = 1400 -> 2000 (whole GB),
+    # 10 * 1.2 = 12 (RESOURCE_ESTIMATE_MARGIN)
     assert 'resources: mem_mb=2000, runtime=12' in ruleString
     simple_merfish_data.delete_analysis(task)
 

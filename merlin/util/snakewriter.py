@@ -26,6 +26,14 @@ MEM_ROUNDING_MB = 1000
 #: this is added to every computed memory request.
 SNAKEMAKE_WRAPPER_MB = 200
 
+#: the same wrapper can take minutes to launch the merlin step: on
+#: LT066_sample_01, TIMEOUT logs showed 0.2-3.6 min median and up to
+#: 10.1 min between the job's start and the step's start (CellPoseSegmentSAM,
+#: DeconvolutionPreprocess, FiducialCorrelationWarp). Task estimates
+#: cover only the merlin step, so this is added to every computed time
+#: request.
+SNAKEMAKE_LAUNCH_MINUTES = 10
+
 
 def _parse_slurm_time_to_minutes(timeString: str) -> int:
     """Convert an sbatch-style time limit ('[D-]H(H):MM:SS') to the number
@@ -169,7 +177,8 @@ class SnakemakeRule(object):
                 runtime are instead taken from the task's own
                 get_estimated_memory()/get_estimated_time() (times
                 RESOURCE_ESTIMATE_MARGIN, plus SNAKEMAKE_WRAPPER_MB for
-                mem, rounded up to whole GB/minutes)
+                mem and SNAKEMAKE_LAUNCH_MINUTES for time, rounded up to
+                whole GB/minutes)
                 whenever it opts in via
                 providesMemoryEstimate/providesTimeEstimate, UNLESS
                 ruleName has its own explicit 'mem'/'time' entry in
@@ -192,7 +201,8 @@ class SnakemakeRule(object):
                      + SNAKEMAKE_WRAPPER_MB) / MEM_ROUNDING_MB)
             if task.providesTimeEstimate and 'time' not in override:
                 resources['runtime'] = math.ceil(
-                    task.get_estimated_time() * RESOURCE_ESTIMATE_MARGIN)
+                    task.get_estimated_time() * RESOURCE_ESTIMATE_MARGIN
+                    + SNAKEMAKE_LAUNCH_MINUTES)
 
         return resources
 

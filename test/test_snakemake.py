@@ -155,8 +155,8 @@ def test_snakemake_rule_resources_uses_computed_estimate_with_margin(
     snakeRule = snakewriter.SnakemakeRule(task)
     ruleString = snakeRule.as_string()
     # 1000 * 1.2 + 200 (SNAKEMAKE_WRAPPER_MB) = 1400 -> 2000 (whole GB),
-    # 10 * 1.2 = 12 (RESOURCE_ESTIMATE_MARGIN)
-    assert 'resources: mem_mb=2000, runtime=12' in ruleString
+    # 10 * 1.2 + 10 (SNAKEMAKE_LAUNCH_MINUTES) = 22
+    assert 'resources: mem_mb=2000, runtime=22' in ruleString
     simple_merfish_data.delete_analysis(task)
 
 
@@ -187,7 +187,7 @@ def test_snakemake_rule_resources_default_only_does_not_override_estimate(
     snakeRule = snakewriter.SnakemakeRule(task, clusterConfig=clusterConfig)
     ruleString = snakeRule.as_string()
     assert 'mem_mb=2000' in ruleString
-    assert 'runtime=12' in ruleString
+    assert 'runtime=22' in ruleString
     simple_merfish_data.delete_analysis(task)
 
 
@@ -202,7 +202,7 @@ def test_snakemake_rule_resources_done_rule_ignores_computed_estimate(
     ruleBlock, doneBlock = ruleString.split(
         'rule %sDone:' % task.get_analysis_name())
     # the task's own rule uses the computed estimate (margined)
-    assert 'mem_mb=2000, runtime=12' in ruleBlock
+    assert 'mem_mb=2000, runtime=22' in ruleBlock
     # the Done rule keeps the plain __default__-derived resources
     assert 'mem_mb=8000, runtime=180' in doneBlock
     simple_merfish_data.delete_analysis(task)

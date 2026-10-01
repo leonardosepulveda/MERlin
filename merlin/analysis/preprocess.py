@@ -256,23 +256,23 @@ class DeconvolutionPreprocess(Preprocess):
             self.dataSet, frameCount=1, kTask=56, baselineMb=230)
 
     def get_estimated_time(self):
-        # baselineMinutes=4 and the flat 0.094 sec/(bit,z)-frame term are
-        # calibrated against BC555_sample_05 epi/disk's real max time
-        # (see FINDINGS.md) -- both real runs use decon_iterations=0, so
-        # what's actually being measured there is everything BUT
-        # deconvolution itself (TIF write, highpass filter, pixel-
-        # histogram binning). The decon_iterations term is NOT
-        # calibrated -- no real data exists at decon_iterations > 0 --
-        # and stays an uncalibrated additive guess on top of the now-real
-        # base cost.
+        # Per-frame cost scales with frame pixels: one full LT066_sample_01
+        # fov (2626 frames of 2304x2304, decon_iterations=0, histogram on,
+        # no image writes) took 0.400 s/frame on a holy7c node, i.e.
+        # 0.075 s per megapixel; 0.08 is used. The old flat 0.094
+        # s/frame (BC555 fit) under-requested LT066 by ~4x. The
+        # decon_iterations term is NOT calibrated -- no real data exists
+        # at decon_iterations > 0 -- and stays an additive guess.
         bitCount = self.get_codebook().get_bit_count()
         zCount = len(self.dataSet.get_z_positions())
+        width, height = self.dataSet.get_image_dimensions()
+        megapixels = width * height / 1e6
         secondsPerIteration = 0.2  # uncalibrated guess
-        secondsPerFrame = 0.094 + (
+        secondsPerFrame = 0.08 * megapixels + (
             self.parameters['decon_iterations'] * secondsPerIteration)
         return resourceestimate.estimate_stack_time_minutes(
             frameCount=bitCount * zCount, secondsPerFrame=secondsPerFrame,
-            baselineMinutes=4)
+            baselineMinutes=1)
 
     def get_dependencies(self):
         return [self.parameters['warp_task']]

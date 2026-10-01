@@ -1,4 +1,3 @@
-import math
 import os
 import time
 import warnings
@@ -527,12 +526,10 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
         # - Everything after (cellpose model, eval, upsampling, features):
         #   measured flat at 2.4-3.7 GB for 3-20 planes, and 3.7 GB in the
         #   25-plane epi run. From about 40 planes on, loading dominates.
-        # Rounded up to the next whole GB so the request is a clean
-        # number.
         loadMb = resourceestimate.estimate_stack_memory_mb(
             self.dataSet, frameCount=self._segmentation_frame_count(),
             kTask=8.4, baselineMb=590)
-        return math.ceil(max(loadMb, 3700) / 1000) * 1000
+        return max(loadMb, 3700)
 
     def get_estimated_time(self):
         # Seconds per stage, measured on the BC553 disk benchmark:

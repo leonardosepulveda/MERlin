@@ -1,4 +1,5 @@
 import importlib
+import math
 from typing import Dict
 import networkx
 from merlin.core import analysistask
@@ -12,6 +13,18 @@ from merlin.core import dataset
 #: requesting so much that it costs the lab's cluster timeshare more than
 #: necessary (see FINDINGS.md).
 RESOURCE_ESTIMATE_MARGIN = 1.2
+
+#: the margined memory estimate is rounded up to a whole number of GB
+#: (mem_mb a multiple of this), and the margined time estimate up to a
+#: whole number of minutes, so every computed request is a clean number.
+MEM_ROUNDING_MB = 1000
+
+#: every cluster job runs a snakemake process (sbatch --wrap 'python -m
+#: snakemake --executor slurm-jobstep') that launches the merlin step and
+#: counts against the same job memory limit. Measured 129-159 MB batch-step
+#: MaxRSS across 5 rules; task estimates cover only the merlin step, so
+#: this is added to every computed memory request.
+SNAKEMAKE_WRAPPER_MB = 200
 
 
 def _parse_slurm_time_to_minutes(timeString: str) -> int:
@@ -155,7 +168,9 @@ class SnakemakeRule(object):
                 rule, never its 'Done' rule -- see as_string()), mem_mb/
                 runtime are instead taken from the task's own
                 get_estimated_memory()/get_estimated_time() (times
-                RESOURCE_ESTIMATE_MARGIN) whenever it opts in via
+                RESOURCE_ESTIMATE_MARGIN, plus SNAKEMAKE_WRAPPER_MB for
+                mem, rounded up to whole GB/minutes)
+                whenever it opts in via
                 providesMemoryEstimate/providesTimeEstimate, UNLESS
                 ruleName has its own explicit 'mem'/'time' entry in
                 clusterConfig (not just inherited from __default__) --
@@ -172,11 +187,12 @@ class SnakemakeRule(object):
         if useComputedEstimate:
             task = self._analysisTask
             if task.providesMemoryEstimate and 'mem' not in override:
-                resources['mem_mb'] = int(round(
-                    task.get_estimated_memory() * RESOURCE_ESTIMATE_MARGIN))
+                resources['mem_mb'] = MEM_ROUNDING_MB * math.ceil(
+                    (task.get_estimated_memory() * RESOURCE_ESTIMATE_MARGIN
+                     + SNAKEMAKE_WRAPPER_MB) / MEM_ROUNDING_MB)
             if task.providesTimeEstimate and 'time' not in override:
-                resources['runtime'] = int(round(
-                    task.get_estimated_time() * RESOURCE_ESTIMATE_MARGIN))
+                resources['runtime'] = math.ceil(
+                    task.get_estimated_time() * RESOURCE_ESTIMATE_MARGIN)
 
         return resources
 

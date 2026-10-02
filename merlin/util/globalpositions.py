@@ -199,6 +199,29 @@ def _overlap_px(length: int, overlap_fraction: float) -> int:
     return max(1, int(round(length * overlap_fraction)))
 
 
+#: the frame sides `overlap_edges` returns, named by the direction of the
+#: neighbour that touches that side (see `crop_overlap`)
+EDGE_SIDES = ('+x', '-x', '+y', '-y')
+
+
+def _edge_side(dx: float, dy: float) -> str:
+    if dx != 0:
+        return '+x' if dx > 0 else '-x'
+    return '+y' if dy > 0 else '-y'
+
+
+def overlap_edges(image: np.ndarray, overlap_fraction: float) -> Dict[str, np.ndarray]:
+    """The four strips `crop_overlap` can cut from *image*, keyed by side:
+    `crop_overlap(a, b, dx, dy, f)` is
+    ``(overlap_edges(a, f)[s], overlap_edges(b, f)[opposite of s])`` for
+    ``s = _edge_side(dx, dy)``. Lets a pass that only needs the overlaps
+    keep (or save) these instead of whole frames."""
+    h, w = image.shape
+    nx, ny = _overlap_px(w, overlap_fraction), _overlap_px(h, overlap_fraction)
+    return {'+x': image[:, w - nx:], '-x': image[:, :nx],
+            '+y': image[h - ny:, :], '-y': image[:ny, :]}
+
+
 def crop_offset_um(
     frame_shape:      Tuple[int, int],
     dx:               float,
@@ -826,6 +849,8 @@ def compute_overlap_correlations(
     load_frame:        Callable[[int], np.ndarray],
     pixel_size_um:     float,
     overlap_fraction:  float,
+    load_edges:        Optional[Callable[[int], Dict[str, np.ndarray]]] = None,
+    frame_shape:       Optional[Tuple[int, int]] = None,
 ) -> Dict[Tuple[int, int, str], float]:
     """
     Pearson correlation between each correspondence's anchor/neighbour
@@ -848,16 +873,31 @@ def compute_overlap_correlations(
     degenerate (zero-variance) crop scores ``0.0``, not ``NaN`` -- a
     zero-variance crop has no real correlation to report, and ``NaN``
     would silently corrupt any downstream mean/plot.
+
+    *load_edges*, if given, returns a fov's `overlap_edges` (at this
+    *overlap_fraction*) in place of loading whole frames with
+    *load_frame*; *frame_shape* is then the full frames' shape. Same
+    result either way. Edges are ~4x overlap_fraction of a frame, so many
+    more fit in the cache.
     """
-    cache = _BoundedFrameCache(load_frame)
+    if load_edges is None:
+        frameCache = _BoundedFrameCache(load_frame)
+        frameShapes: Dict[int, Tuple[int, int]] = {}
+
+        def load_edges(fov):
+            frame = frameCache.get(fov)
+            frameShapes[fov] = frame.shape
+            return overlap_edges(frame, overlap_fraction)
+        get_edges = load_edges
+    else:
+        get_edges = _BoundedFrameCache(load_edges, maxsize=64).get
 
     directionToDxDy = {label: (dx, dy) for label, dx, dy in _DIRECTIONS}
     correlations: Dict[Tuple[int, int, str], float] = {}
     for c in correspondences:
         dx, dy = directionToDxDy[c.direction]
-        anchorFrame = cache.get(c.anchor_fov)
-        anchorCrop, neighborCrop = crop_overlap(
-            anchorFrame, cache.get(c.neighbor_fov), dx, dy, overlap_fraction)
+        anchorCrop = get_edges(c.anchor_fov)[_edge_side(dx, dy)]
+        neighborCrop = get_edges(c.neighbor_fov)[_edge_side(-dx, -dy)]
         anchorCrop = anchorCrop.astype(np.float64)
         neighborCrop = neighborCrop.astype(np.float64)
 
@@ -867,7 +907,8 @@ def compute_overlap_correlations(
         # a position, just inverted here to turn a position back into a
         # shift to apply to the crop before correlating.
         cropOffset = np.array(crop_offset_um(
-            anchorFrame.shape, dx, dy, overlap_fraction, pixel_size_um))
+            frame_shape if frame_shape is not None else frameShapes[c.anchor_fov],
+            dx, dy, overlap_fraction, pixel_size_um))
         finalOffset = np.subtract(positions[c.neighbor_fov], positions[c.anchor_fov])
         extraShiftUm = finalOffset - cropOffset
         if extraShiftUm[0] != 0.0 or extraShiftUm[1] != 0.0:

@@ -265,6 +265,40 @@ def test_compute_overlap_correlations_matches_at_correct_shift():
     assert wrongCorrelations[(0, 1, '+x')] < correctCorrelations[(0, 1, '+x')]
 
 
+def test_overlap_edges_match_crop_overlap():
+    rng = np.random.default_rng(2)
+    anchor, neighbor = rng.random((40, 50)), rng.random((40, 50))
+    for dx, dy, side, opposite in ((1, 0, '+x', '-x'), (-1, 0, '-x', '+x'),
+                                   (0, 1, '+y', '-y'), (0, -1, '-y', '+y')):
+        anchorCrop, neighborCrop = globalpositions.crop_overlap(
+            anchor, neighbor, dx, dy, 0.2)
+        np.testing.assert_array_equal(
+            globalpositions.overlap_edges(anchor, 0.2)[side], anchorCrop)
+        np.testing.assert_array_equal(
+            globalpositions.overlap_edges(neighbor, 0.2)[opposite], neighborCrop)
+
+
+def test_compute_overlap_correlations_from_edges_matches_frames():
+    rng = np.random.default_rng(3)
+    frames = {f: rng.random((30, 40)) for f in range(4)}
+    positions = {0: (0.0, 0.0), 1: (3.3, 0.1), 2: (0.2, 2.6), 3: (-3.1, 0.0)}
+    correspondences = [
+        globalpositions.NeighborCorrespondence(0, 1, '+x', (3.2, 0), (3.3, 0.1), 0.0),
+        globalpositions.NeighborCorrespondence(0, 2, '+y', (0, 2.4), (0.2, 2.6), 0.0),
+        globalpositions.NeighborCorrespondence(0, 3, '-x', (-3.2, 0), (-3.1, 0), 0.0),
+        globalpositions.NeighborCorrespondence(2, 0, '-y', (0, -2.4), (-0.2, -2.6), 0.0)]
+
+    fromFrames = globalpositions.compute_overlap_correlations(
+        correspondences, positions, frames.__getitem__,
+        pixel_size_um=0.1, overlap_fraction=0.2)
+    fromEdges = globalpositions.compute_overlap_correlations(
+        correspondences, positions, None, pixel_size_um=0.1,
+        overlap_fraction=0.2,
+        load_edges=lambda f: globalpositions.overlap_edges(frames[f], 0.2),
+        frame_shape=(30, 40))
+    assert fromEdges == fromFrames
+
+
 def test_compute_overlap_correlations_degenerate_crop_returns_zero_not_nan():
     frames = {0: np.zeros((10, 10)), 1: np.zeros((10, 10))}
     nominal = {0: (0.0, 0.0), 1: (5.0, 0.0)}

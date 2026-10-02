@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from merlin.analysis import globalalign
+from merlin.util import globalpositions
 
 
 def test_simple_global_alignment_fov_coordinates_to_global(simple_merfish_data):
@@ -163,6 +164,33 @@ def test_least_squares_global_alignment_skips_overlap_correlations(
             [figuresDir,
              '.'.join(['merlin', task.analysisName, figureName]) + '.png'])
         assert os.path.exists(figurePath) == expected, figurePath
+
+
+def test_register_fov_neighbors_saves_overlap_edges_for_max_projection(
+        simple_merfish_data):
+    fiducialTask = globalalign.RegisterFovNeighbors(
+        simple_merfish_data, parameters={},
+        analysisName='registerFovNeighbors_fiducialEdges')
+    fiducialTask.save()
+    fiducialTask.run()
+    fovs = simple_merfish_data.get_fovs()
+    assert not fiducialTask.has_overlap_edges(fovs, 0.0)
+
+    task = globalalign.RegisterFovNeighbors(
+        simple_merfish_data,
+        parameters={'max_projection_data_channel': 'bit2',
+                    'remove_hot_pixels': False},
+        analysisName='registerFovNeighbors_maxProjectionEdges')
+    task.save()
+    task.run()
+    # the fixture's two fovs don't overlap, so the inferred fraction is 0
+    # and each edge is the minimum single pixel row/column
+    assert task.has_overlap_edges(fovs, 0.0)
+    assert not task.has_overlap_edges(fovs, 0.25)
+    image = globalalign._load_registration_image(
+        simple_merfish_data, task.parameters, 0)
+    for side, edge in globalpositions.overlap_edges(image, 0.0).items():
+        np.testing.assert_array_equal(task.get_overlap_edges(0)[side], edge)
 
 
 def test_registration_image_max_projection_by_channel_name(simple_merfish_data):

@@ -1,6 +1,8 @@
+import os
 from abc import abstractmethod
 import numpy as np
 import pandas as pd
+from typing import Dict
 from typing import Tuple
 from typing import List
 from shapely import geometry
@@ -502,10 +504,14 @@ class RegisterFovNeighbors(analysistask.ParallelAnalysisTask):
                 self.dataSet, self.parameters['overlap_fraction'])
 
         template = self._fiducial_template()
+        anchorImage = []
 
         def load_frame(fov):
-            return _load_registration_image(
+            image = _load_registration_image(
                 self.dataSet, self.parameters, fov, template)
+            if fov == fragmentIndex:
+                anchorImage.append(image)
+            return image
 
         correspondences = globalpositions.register_fov_against_neighbors(
             fragmentIndex, nominalPositions, load_frame,
@@ -524,6 +530,49 @@ class RegisterFovNeighbors(analysistask.ParallelAnalysisTask):
                 for c in correspondences
             ], columns=self._CORRESPONDENCE_COLUMNS),
             'neighbor_correspondences_raw', self, resultIndex=fragmentIndex)
+
+        # A max projection reads every z plane (~8 s for 100 planes), and
+        # LeastSquaresGlobalAlignment's overlap-correlation pass would
+        # otherwise rebuild it ~3 times per fov in one serial job. Its
+        # overlap edges (~4x overlap_fraction of the frame) are saved here
+        # instead; a fiducial frame is cheap enough to reload.
+        if self.parameters['max_projection_data_channel'] is not None:
+            if not anchorImage:  # no neighbour, so registration loaded nothing
+                anchorImage.append(load_frame(fragmentIndex))
+            for side, edge in globalpositions.overlap_edges(
+                    anchorImage[0], overlapFraction).items():
+                self.dataSet.save_numpy_analysis_result(
+                    edge, self._edge_result_name(side), self.analysisName,
+                    resultIndex=fragmentIndex, subdirectory='overlap_edges')
+
+    @staticmethod
+    def _edge_result_name(side: str) -> str:
+        return 'overlap_edge_' + side.replace('+', 'p').replace('-', 'm')
+
+    def get_overlap_edges(self, fov: int) -> Dict[str, np.ndarray]:
+        """*fov*'s saved `globalpositions.overlap_edges`, keyed by side."""
+        return {side: self.dataSet.load_numpy_analysis_result(
+                    self._edge_result_name(side), self.analysisName,
+                    resultIndex=fov, subdirectory='overlap_edges')
+                for side in globalpositions.EDGE_SIDES}
+
+    def has_overlap_edges(self, fovs, overlapFraction: float) -> bool:
+        """Whether every fov in *fovs* has saved overlap edges, cut at
+        *overlapFraction* (the edges of an earlier run at a different
+        fraction can't be reused)."""
+        if self.parameters['max_projection_data_channel'] is None:
+            return False
+        for fov in fovs:
+            for side in globalpositions.EDGE_SIDES:
+                if not os.path.exists(self.dataSet._analysis_result_save_path(
+                        self._edge_result_name(side), self.analysisName,
+                        fov, 'overlap_edges', '.npy')):
+                    return False
+        width, height = self.dataSet.get_image_dimensions()
+        edges = self.get_overlap_edges(fovs[0])
+        return edges['+x'].shape[1] == globalpositions._overlap_px(
+            width, overlapFraction) and edges['+y'].shape[0] == \
+            globalpositions._overlap_px(height, overlapFraction)
 
 
 class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
@@ -616,26 +665,23 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
         # compute_overlap_correlations pass, which loads ~2.6-2.9 images
         # per fov (the 8-frame cache misses) at ~0.44 s each for a
         # fiducial frame, mostly remove_hot_pixels' two full-frame
-        # medians. A max-projection registration image instead reads
-        # every z plane: 7.4-8.4 s for 100 DAPI planes on BC553_sample_02
-        # disk, ~0.08 s per plane. frameCount stands in for the fov count.
+        # medians. With a max-projection registration image the pass reads
+        # RegisterFovNeighbors' saved overlap edges instead (rebuilding the
+        # projection took 7.4-8.4 s per load for 100 DAPI planes on
+        # BC553_sample_02 disk): 0.058 s per fov's edges plus 0.039 s per
+        # correspondence (~4 per fov), measured on 40 BC553 fovs; 0.4 s
+        # per fov is used. frameCount stands in for the fov count.
         # Without the pass, the fit plus 5 cross-validation refits took
         # under 1 min each on 2020 fovs.
         if not self.parameters['overlap_correlations']:
             return 6
-        channel = self.registrationTask.parameters['max_projection_data_channel']
-        if channel is None:
-            secondsPerLoad = 0.5
+        if self.registrationTask.parameters['max_projection_data_channel'] is None:
+            secondsPerFov = 1.5
         else:
-            dataOrganization = self.dataSet.get_data_organization()
-            if isinstance(channel, str):
-                channel = dataOrganization.get_data_channel_index(channel)
-            planeCount = len(np.atleast_1d(
-                dataOrganization.data.loc[channel, 'zPos']))
-            secondsPerLoad = 0.5 + 0.08 * planeCount
+            secondsPerFov = 0.4
         return resourceestimate.estimate_stack_time_minutes(
             frameCount=len(self.dataSet.get_fovs()),
-            secondsPerFrame=3 * secondsPerLoad, baselineMinutes=1)
+            secondsPerFrame=secondsPerFov, baselineMinutes=6)
 
     def get_dependencies(self):
         return [self.parameters['neighbor_registration_task']]
@@ -694,10 +740,18 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
             # Only kept correspondences fed the correction fit, so only
             # those are meaningful to score against the FINAL positions;
             # rejected ones get no correlation (NaN).
-            correlations = globalpositions.compute_overlap_correlations(
-                kept, correctedPositions, load_frame,
-                pixel_size_um=micronsPerPixel, overlap_fraction=overlapFraction) \
-                if self.parameters['overlap_correlations'] else {}
+            correlations = {}
+            if self.parameters['overlap_correlations']:
+                useEdges = self.registrationTask.has_overlap_edges(
+                    fovs, overlapFraction)
+                width, height = self.dataSet.get_image_dimensions()
+                correlations = globalpositions.compute_overlap_correlations(
+                    kept, correctedPositions, load_frame,
+                    pixel_size_um=micronsPerPixel,
+                    overlap_fraction=overlapFraction,
+                    load_edges=(self.registrationTask.get_overlap_edges
+                                if useEdges else None),
+                    frame_shape=(height, width))
             self.dataSet.save_dataframe_to_csv(
                 pd.DataFrame([
                     {'anchor_fov': c.anchor_fov, 'neighbor_fov': c.neighbor_fov,

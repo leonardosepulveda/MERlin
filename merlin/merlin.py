@@ -2,7 +2,6 @@ import argparse
 import cProfile
 import logging
 import os
-import json
 import re
 import sys
 import time
@@ -81,7 +80,8 @@ def build_parser():
     parser.add_argument('-k', '--snakemake-parameters',
                         help='the name of the snakemake parameters file, '
                         'for distributed execution on a SLURM cluster via '
-                        'snakemake-executor-plugin-slurm')
+                        'snakemake-executor-plugin-slurm '
+                        '(.json or .yaml/.yml, detected by extension)')
     parser.add_argument('--allow-ragged-z-stacks', action='store_true',
                         help='tolerate fovs whose raw files have fewer '
                         'z frames than the deepest z position configured '
@@ -190,7 +190,7 @@ def merlin():
                 else os.sep.join([m.SNAKEMAKE_PARAMETERS_HOME,
                                   args.snakemake_parameters])
         with open(snakemakeParametersPath) as f:
-            snakemakeParameters = json.load(f)
+            snakemakeParameters = _load_json_or_yaml(f)
         if snakemakeParameters.get('cluster_config'):
             with open(snakemakeParameters['cluster_config']) as f:
                 clusterConfig = _load_json_or_yaml(f)

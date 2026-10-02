@@ -139,7 +139,9 @@ Executing on a high performance cluster
 MERlin executes tasks through Snakemake_, a workflow management system. Each task can be distributed over a high performance
 cluster that is run by a scheduler, such as SLURM or Sge, by indicating the appropriate command to submit the job to snakemake.
 See the `merlin-parameters-example <https://github.com/emanuega/merlin-parameters-example>`_ repository for an example snakemake
-configuration file. Additional arguments can be specified as indicated in the
+configuration file. Like the analysis parameters, the snakemake parameters file (passed with ``-k``) can be JSON or
+YAML, chosen by extension; YAML allows ``#`` comments, e.g. to record why ``nodes`` (the cap on each run's submitted
+jobs) has its value. Additional arguments can be specified as indicated in the
 `snakemake api documentation <https://snakemake.readthedocs.io/en/stable/api_reference/snakemake.html>`_.
 
 .. code-block:: none

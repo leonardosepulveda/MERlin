@@ -13,8 +13,9 @@ def is_yaml_path(path: str) -> bool:
 def load_json_or_yaml(fileObj: TextIO) -> Dict:
     """Parse an open file handle as YAML or JSON depending on its own
     extension (`.yaml`/`.yml` vs anything else, parsed as JSON as
-    before). Shared by analysis-parameter recipes, cluster-resource-
-    allocation configs and microscope parameters -- all plain
+    before). Shared by analysis-parameter recipes, snakemake parameters,
+    cluster-resource-allocation configs and microscope parameters -- all
+    plain
     JSON/YAML-compatible mapping/sequence structures, so this is purely a
     choice of parser, and dispatching on extension keeps every existing
     .json file (and any caller that doesn't set an extension) working

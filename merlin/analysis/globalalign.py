@@ -580,6 +580,14 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
             self.parameters['mad_threshold'] = 5.0
         if 'affine_prior_weight' not in self.parameters:
             self.parameters['affine_prior_weight'] = 1e-3
+        if 'overlap_correlations' not in self.parameters:
+            # False skips the compute_overlap_correlations QC pass (the
+            # `correlation` column is left NaN and the two overlap-
+            # correlation figures are not drawn). The corrected positions
+            # don't depend on it. Worth turning off when each fov's
+            # registration image is a many-plane max projection: that pass
+            # reloads ~2.9 images per fov.
+            self.parameters['overlap_correlations'] = True
 
     #: No frame is ever held beyond the bounded `_BoundedFrameCache` used
     #: by this task's own final `compute_overlap_correlations` QC pass
@@ -605,13 +613,29 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
     def get_estimated_time(self):
         # Measured on the same two runs: 25.5 min (LT066m) and 13.2 min
         # (BC555d), ~1.3 s per fov. Nearly all of it is the final
-        # compute_overlap_correlations pass, which loads ~2.6 frames per
-        # fov (the 8-frame cache misses) at ~0.44 s each, mostly
-        # remove_hot_pixels' two full-frame medians. frameCount stands in
-        # for the fov count.
+        # compute_overlap_correlations pass, which loads ~2.6-2.9 images
+        # per fov (the 8-frame cache misses) at ~0.44 s each for a
+        # fiducial frame, mostly remove_hot_pixels' two full-frame
+        # medians. A max-projection registration image instead reads
+        # every z plane: 7.4-8.4 s for 100 DAPI planes on BC553_sample_02
+        # disk, ~0.08 s per plane. frameCount stands in for the fov count.
+        # Without the pass, the fit plus 5 cross-validation refits took
+        # under 1 min each on 2020 fovs.
+        if not self.parameters['overlap_correlations']:
+            return 6
+        channel = self.registrationTask.parameters['max_projection_data_channel']
+        if channel is None:
+            secondsPerLoad = 0.5
+        else:
+            dataOrganization = self.dataSet.get_data_organization()
+            if isinstance(channel, str):
+                channel = dataOrganization.get_data_channel_index(channel)
+            planeCount = len(np.atleast_1d(
+                dataOrganization.data.loc[channel, 'zPos']))
+            secondsPerLoad = 0.5 + 0.08 * planeCount
         return resourceestimate.estimate_stack_time_minutes(
-            frameCount=len(self.dataSet.get_fovs()), secondsPerFrame=1.5,
-            baselineMinutes=1)
+            frameCount=len(self.dataSet.get_fovs()),
+            secondsPerFrame=3 * secondsPerLoad, baselineMinutes=1)
 
     def get_dependencies(self):
         return [self.parameters['neighbor_registration_task']]
@@ -672,7 +696,8 @@ class LeastSquaresGlobalAlignment(SimpleGlobalAlignment):
             # rejected ones get no correlation (NaN).
             correlations = globalpositions.compute_overlap_correlations(
                 kept, correctedPositions, load_frame,
-                pixel_size_um=micronsPerPixel, overlap_fraction=overlapFraction)
+                pixel_size_um=micronsPerPixel, overlap_fraction=overlapFraction) \
+                if self.parameters['overlap_correlations'] else {}
             self.dataSet.save_dataframe_to_csv(
                 pd.DataFrame([
                     {'anchor_fov': c.anchor_fov, 'neighbor_fov': c.neighbor_fov,

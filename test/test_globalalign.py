@@ -118,6 +118,53 @@ def test_least_squares_global_alignment_generates_verification_figures(
         assert os.path.exists(figurePath), figurePath
 
 
+def test_least_squares_global_alignment_skips_overlap_correlations(
+        simple_merfish_data):
+    # Same known correspondences as the figures test above, with the
+    # overlap-correlation QC pass turned off.
+    registrationTask = globalalign.RegisterFovNeighbors(
+        simple_merfish_data, parameters={},
+        analysisName='registerFovNeighbors_noCorrelations')
+    registrationTask.save()
+    nominal = {f: simple_merfish_data.get_fov_offset(f) for f in (0, 1)}
+    for anchor, neighbor, direction in ((0, 1, '+y'), (1, 0, '-y')):
+        simple_merfish_data.save_dataframe_to_csv(
+            pd.DataFrame([{
+                'anchor_fov': anchor, 'neighbor_fov': neighbor,
+                'direction': direction,
+                'nominal_x': nominal[neighbor][0],
+                'nominal_y': nominal[neighbor][1],
+                'measured_x': nominal[neighbor][0] + 0.5,
+                'measured_y': nominal[neighbor][1] + 0.2, 'error': 0.1}]),
+            'neighbor_correspondences_raw', registrationTask,
+            resultIndex=anchor)
+
+    task = globalalign.LeastSquaresGlobalAlignment(
+        simple_merfish_data,
+        parameters={'neighbor_registration_task': registrationTask.analysisName,
+                    'overlap_correlations': False},
+        analysisName='leastSquaresGlobalAlignNoCorrelations')
+    task.save()
+    task.run()
+    assert task.is_complete()
+    assert task.get_estimated_time() == 6
+
+    correspondenceDF = simple_merfish_data.load_dataframe_from_csv(
+        'neighbor_correspondences', task)
+    assert len(correspondenceDF) == 2
+    assert correspondenceDF['correlation'].isna().all()
+
+    figuresDir = simple_merfish_data.figuresPath
+    for figureName, expected in (('direction_reliability', True),
+                                 ('grid_overlay', True),
+                                 ('overlap_correlation_grid', False),
+                                 ('overlap_correlation_histogram', False)):
+        figurePath = os.sep.join(
+            [figuresDir,
+             '.'.join(['merlin', task.analysisName, figureName]) + '.png'])
+        assert os.path.exists(figurePath) == expected, figurePath
+
+
 def test_registration_image_max_projection_by_channel_name(simple_merfish_data):
     # The fixture's channels have one z plane each, so the max projection
     # is that plane; the channel is given by name.

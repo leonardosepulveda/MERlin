@@ -133,7 +133,10 @@ def _load_overlap_correlation_edges(alignTask) -> pd.DataFrame:
     """
     correspondenceDF = alignTask.dataSet.load_dataframe_from_csv(
         'neighbor_correspondences', alignTask)
-    kept = correspondenceDF[correspondenceDF['kept']]
+    # correlation is NaN for every row when the task's
+    # overlap_correlations parameter is off
+    kept = correspondenceDF[correspondenceDF['kept']
+                            & correspondenceDF['correlation'].notna()]
     if kept.empty:
         return kept
     fovA = np.minimum(kept['anchor_fov'], kept['neighbor_fov'])

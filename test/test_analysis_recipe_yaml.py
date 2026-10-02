@@ -70,6 +70,31 @@ def test_load_json_or_yaml_cluster_config_comment_is_a_no_op(tmp_path):
     assert clusterConfig['FiducialCorrelationWarp'] == {'partition': 'zhuang'}
 
 
+def test_load_json_or_yaml_snakemake_parameters_yaml_matches_json(tmp_path):
+    # The -k snakemake parameters file goes through the same loader, so a
+    # YAML version (with a comment explaining `nodes`) parses to the same
+    # dict as the JSON one.
+    parameters = {'cluster_config': '/path/to/cluster_config.yaml',
+                  'nodes': 150, 'restart_times': 2,
+                  'job_name_prefix': 's2-BC553d'}
+    jsonPath = tmp_path / 'parameters_test.json'
+    jsonPath.write_text(json.dumps(parameters))
+    yamlPath = tmp_path / 'parameters_test.yaml'
+    yamlPath.write_text(
+        "cluster_config: /path/to/cluster_config.yaml\n"
+        "# cap on this run's submitted jobs\n"
+        "nodes: 150\n"
+        "restart_times: 2\n"
+        "job_name_prefix: s2-BC553d\n")
+
+    with open(jsonPath, 'r') as f:
+        jsonParameters = m._load_json_or_yaml(f)
+    with open(yamlPath, 'r') as f:
+        yamlParameters = m._load_json_or_yaml(f)
+
+    assert yamlParameters == jsonParameters == parameters
+
+
 def test_snakefile_generator_accepts_yaml_recipe(simple_merfish_data):
     # Mirrors test_snakemake.py's test_snakemake_generator_task_chain, but
     # sources the same task-chain definition from a YAML string instead of a

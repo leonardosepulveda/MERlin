@@ -799,21 +799,27 @@ class HDF5SpatialFeatureDB(SpatialFeatureDB):
             chosen zIndex's boundaries). A feature with no occupied
             z-plane at all is skipped.
         """
+        # A fov has ~100 zIndex groups per feature, so this is dominated
+        # by per-group hdf5 metadata access: the whole file is read into
+        # memory in one go (driver='core') instead of seeking for each
+        # group, and occupancy uses h5py's low-level group API
+        # (get_num_objs), skipping the high-level Group wrappers.
         boundaryList: List[List[geometry.Polygon]] = []
         try:
             with self._dataSet.open_hdf5_file('r', 'feature_data',
                                               self._analysisTask, fov,
-                                              'features') as f:
+                                              'features',
+                                              driver='core') as f:
                 featureGroup = f.require_group('featuredata')
                 for k in featureGroup.keys():
                     featG = featureGroup[k]
-                    zNames = sorted(
-                        (name for name in featG.keys()
-                         if name.startswith('zIndex_')),
-                        key=lambda name: int(name.split('_')[1]))
-                    occupied = [name for name in zNames
-                               if len([x for x in featG[name].keys()
-                                      if x[:2] == 'p_']) > 0]
+                    occupied = []
+                    i = 0
+                    while featG.id.links.exists(b'zIndex_%d' % i):
+                        zName = b'zIndex_%d' % i
+                        if h5py.h5g.open(featG.id, zName).get_num_objs() > 0:
+                            occupied.append(zName.decode())
+                        i += 1
                     if not occupied:
                         continue
                     chosenGroup = featG[occupied[len(occupied) // 2]]

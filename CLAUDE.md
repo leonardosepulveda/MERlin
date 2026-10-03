@@ -208,3 +208,10 @@ Commit and push as you go — do not leave finished work uncommitted.
   user's explicit go-ahead.
 - Standing authorization to branch, commit, and push without asking each
   time — merging to `master` still needs the user's go-ahead.
+- Versioning: each feature/fix branch adds a line under `## [Unreleased]`
+  at the end of `CHANGELOG.md` (versions are listed oldest first). A
+  release is its own `release/X.Y.Z` branch: bump `setup.py` and move the
+  Unreleased lines under the new version. After it merges, tag the merge
+  commit `vX.Y.Z`, push the tag, and rerun `pip install -e .` so
+  `merlin.version()` reports the new number. The CHANGELOG header explains
+  why the major number stays at 0.

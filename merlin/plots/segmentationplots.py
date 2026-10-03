@@ -7,6 +7,12 @@ from merlin.plots._base import AbstractPlot
 
 class SegmentationBoundaryPlot(AbstractPlot):
 
+    # Boundaries come at pixel resolution (~500 points per cell).
+    # Simplifying to this tolerance (in microns, the svg's units) keeps
+    # ~10-30 points per cell, which looks the same at whole-section scale
+    # and keeps the svg to hundreds of MB rather than many GB.
+    SIMPLIFY_TOLERANCE_UM = 0.5
+
     def __init__(self, analysisTask):
         super().__init__(analysisTask)
 
@@ -81,6 +87,9 @@ class SegmentationBoundaryPlot(AbstractPlot):
                 '<svg xmlns="http://www.w3.org/2000/svg" '
                 'viewBox="%.2f %.2f %.2f %.2f">\n'
                 '<title>Segmentation boundaries</title>\n'
+                '<style>polyline{fill:none;stroke:#1f77b4;'
+                'stroke-width:0.75;vector-effect:non-scaling-stroke}'
+                '</style>\n'
                 % (minX, -maxY, maxX - minX, maxY - minY))
 
             # Stream one fov at a time -- each fov's own boundaries (at
@@ -92,13 +101,11 @@ class SegmentationBoundaryPlot(AbstractPlot):
                 featuresForFov = featureDB.read_feature_boundaries_at_own_z(fov)
                 featuresForFov = [x for y in featuresForFov for x in y]
                 for feature in featuresForFov:
+                    feature = feature.simplify(self.SIMPLIFY_TOLERANCE_UM)
                     xCoords, yCoords = feature.exterior.coords.xy
                     points = ' '.join(
-                        '%.2f,%.2f' % (x, -y)
+                        '%.1f,%.1f' % (x, -y)
                         for x, y in zip(xCoords, yCoords))
-                    svgFile.write(
-                        '<polyline points="%s" fill="none" '
-                        'stroke="#1f77b4" stroke-width="0.75" '
-                        'vector-effect="non-scaling-stroke"/>\n' % points)
+                    svgFile.write('<polyline points="%s"/>\n' % points)
 
             svgFile.write('</svg>\n')

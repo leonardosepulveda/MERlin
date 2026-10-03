@@ -46,3 +46,28 @@ def test_plotengine(simple_merfish_data):
     assert plotEngine.get_plots()[0].is_complete()
 
     simple_merfish_data.delete_analysis(randomTask)
+
+
+def test_radial_distribution_matches_per_row_distances():
+    """The vectorized _radial_distribution must bin exactly like the old
+    per-row (iterrows) loop, on float32 x/y as stored in the barcode
+    database."""
+    import pandas
+    from merlin.plots.filterplots import FOVSpatialDistributionMetadata
+
+    m = FOVSpatialDistributionMetadata.__new__(FOVSpatialDistributionMetadata)
+    m._width, m._height = 2048, 2048
+    m.radialBins = np.arange(0, 1024, 1024 / 200)
+    rng = np.random.default_rng(0)
+    barcodes = pandas.DataFrame({
+        'barcode_id': rng.integers(0, 10, 100000).astype(np.uint16),
+        'x': rng.uniform(0, 2048, 100000).astype(np.float32),
+        'y': rng.uniform(0, 2048, 100000).astype(np.float32)})
+    ids = [1, 3, 5]
+
+    selected = barcodes[barcodes['barcode_id'].isin(ids)]
+    expected = np.histogram(
+        [m._radial_distance(r['x'], r['y'])
+         for _, r in selected.iterrows()], bins=m.radialBins)[0]
+
+    assert np.array_equal(m._radial_distribution(barcodes, ids), expected)

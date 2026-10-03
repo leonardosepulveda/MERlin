@@ -130,4 +130,4 @@ major version).
 
 ### Changed
 - `SegmentationBoundaryPlot.svg` boundaries are simplified to 0.5 µm and
-  written with 0.1 µm precision, about 25x smaller.
+  written with 0.1 µm precision, about 40x smaller.

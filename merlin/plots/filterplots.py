@@ -345,6 +345,8 @@ class AdaptiveFilterCountsPerArea(AbstractPlot):
 
 class FOVSpatialDistributionMetadata(PlotMetadata):
 
+    SAVE_EVERY = 50
+
     def __init__(self, analysisTask, taskDict):
         super().__init__(analysisTask, taskDict)
         self.filterTask = self._taskDict['filter_task']
@@ -390,8 +392,11 @@ class FOVSpatialDistributionMetadata(PlotMetadata):
     def _radial_distribution(self, inputBarcodes, barcodeIDs):
         selectBarcodes = inputBarcodes[
                 inputBarcodes['barcode_id'].isin(barcodeIDs)]
-        radialDistances = [self._radial_distance(r['x'], r['y'])
-                           for i, r in selectBarcodes.iterrows()]
+        # float64 to match the per-row values iterrows() used to give
+        # (x/y are stored as float32), so bin assignments are unchanged.
+        radialDistances = self._radial_distance(
+            selectBarcodes['x'].to_numpy(dtype=np.float64),
+            selectBarcodes['y'].to_numpy(dtype=np.float64))
         return np.histogram(radialDistances, bins=self.radialBins)[0]
 
     def _spatial_distribution(self, inputBarcodes, barcodeIDs):
@@ -405,10 +410,13 @@ class FOVSpatialDistributionMetadata(PlotMetadata):
             return 0
 
     def update(self) -> None:
-        updated = False
         filterTask = self._taskDict['filter_task']
         codebook = filterTask.get_codebook()
 
+        # Saved every SAVE_EVERY fovs, not only at the end, so a run that
+        # is killed partway (e.g. a Done rule hitting its time limit)
+        # resumes from there instead of from the first fov.
+        newlyComplete = 0
         for i in range(filterTask.fragment_count()):
             if not self.completeFragments[i] and filterTask.is_complete(i):
                 fovBarcodes = filterTask.get_barcode_database().get_barcodes(
@@ -423,21 +431,26 @@ class FOVSpatialDistributionMetadata(PlotMetadata):
                         fovBarcodes, self.singleColorBarcodes)
                     self.multiColorCounts += self._radial_distribution(
                         fovBarcodes, self.multiColorBarcodes)
-                    updated = True
 
                 self.completeFragments[i] = True
+                newlyComplete += 1
+                if newlyComplete % self.SAVE_EVERY == 0:
+                    self._save()
 
-        if updated:
-            self._save_numpy_metadata(self.completeFragments,
-                                      'complete_fragments')
-            self._save_numpy_metadata(self.multiColorCounts,
-                                      'multi_color_radial_counts')
-            self._save_numpy_metadata(self.singleColorCounts,
-                                      'single_color_radial_counts')
-            self._save_numpy_metadata(self.spatialCodingCounts,
-                                      'spatial_coding_counts')
-            self._save_numpy_metadata(self.spatialBlankCounts,
-                                      'spatial_blank_counts')
+        if newlyComplete % self.SAVE_EVERY != 0:
+            self._save()
+
+    def _save(self) -> None:
+        self._save_numpy_metadata(self.completeFragments,
+                                  'complete_fragments')
+        self._save_numpy_metadata(self.multiColorCounts,
+                                  'multi_color_radial_counts')
+        self._save_numpy_metadata(self.singleColorCounts,
+                                  'single_color_radial_counts')
+        self._save_numpy_metadata(self.spatialCodingCounts,
+                                  'spatial_coding_counts')
+        self._save_numpy_metadata(self.spatialBlankCounts,
+                                  'spatial_blank_counts')
 
     def is_complete(self) -> bool:
         return all(self.completeFragments)

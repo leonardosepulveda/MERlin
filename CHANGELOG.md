@@ -121,3 +121,13 @@ major version).
   without a task.json. See `git log --first-parent v0.1.6..v0.2.0`.
 
 ## [Unreleased]
+
+### Fixed
+- Inline figures in parallel tasks' Done rules no longer exceed the 3 h
+  limit on large experiments: the barcode radial-distribution metadata is
+  vectorized (same bins, ~500x faster) and saved every 50 fovs, so a retry
+  resumes. Segmentation-boundary reads are ~2x faster.
+
+### Changed
+- `SegmentationBoundaryPlot.svg` boundaries are simplified to 0.5 µm and
+  written with 0.1 µm precision, about 40x smaller.

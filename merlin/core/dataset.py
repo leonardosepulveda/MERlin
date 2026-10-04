@@ -599,7 +599,8 @@ class DataSet(object):
 
     def open_hdf5_file(self, mode: str, resultName: str,
                        analysisTask: TaskOrName = None, resultIndex: int = None,
-                       subdirectory: str = None) -> h5py.File:
+                       subdirectory: str = None,
+                       driver: str = None) -> h5py.File:
         """Open an hdf5 file stored in this data set.
 
         Args:
@@ -614,6 +615,8 @@ class DataSet(object):
             subdirectory: subdirectory of the analysis task that the dataframe
                 should be saved to or None if the dataframe should be
                 saved to the root directory for the analysis task.
+            driver: h5py file driver, or None for h5py's default. 'core'
+                reads the whole file into memory when opened.
         Returns:
             a h5py file object connected to the hdf5 file
         Raise:
@@ -627,7 +630,7 @@ class DataSet(object):
             raise FileNotFoundError(('Unable to open %s for reading since ' +
                                     'it does not exist.') % hPath)
 
-        return h5py.File(hPath, mode)
+        return h5py.File(hPath, mode, driver=driver)
 
     def delete_hdf5_file(self, resultName: str, analysisTask: TaskOrName = None,
                          resultIndex: int = None, subdirectory: str = None

@@ -1,3 +1,5 @@
+import pandas
+
 from merlin.core import analysistask
 
 
@@ -33,14 +35,25 @@ class ExportBarcodes(analysistask.AnalysisTask):
         filterTask = self.dataSet.load_analysis_task(
                 self.parameters['filter_task'])        
 
-        barcodeData = filterTask.get_barcode_database().get_barcodes(
-            columnList=self.columns)
-
+        barcodeDB = filterTask.get_barcode_database()
         if self.excludeBlanks:
-            codebook = filterTask.get_codebook()
-            barcodeData = barcodeData[
-                    barcodeData['barcode_id'].isin(
-                        codebook.get_coding_indexes())]
+            codingIndexes = filterTask.get_codebook().get_coding_indexes()
 
-        self.dataSet.save_dataframe_to_csv(barcodeData, 'barcodes', self,
-                                           index=False)
+        # Written one fov at a time as parquet row groups, so memory stays
+        # at one fov's barcodes. A large experiment has billions of
+        # barcodes, too many to hold at once or to write as csv in time.
+        with self.dataSet.open_parquet_chunk_writer(
+                'barcodes', self) as writer:
+            for fov in self.dataSet.get_fovs():
+                barcodeData = barcodeDB.get_barcodes(
+                    fov=fov, columnList=self.columns)
+
+                if self.excludeBlanks:
+                    barcodeData = barcodeData[
+                            barcodeData['barcode_id'].isin(codingIndexes)]
+
+                writer.write(barcodeData)
+
+        if not writer.wrote_any:
+            self.dataSet.save_dataframe_to_parquet(
+                pandas.DataFrame(columns=self.columns), 'barcodes', self)

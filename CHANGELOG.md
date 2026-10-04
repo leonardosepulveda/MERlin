@@ -127,6 +127,13 @@ major version).
   barcode radial-distribution metadata is vectorized (same bins, ~500x
   faster) and saved every 50 fovs, so a retry resumes. Segmentation-boundary
   reads are ~2x faster.
+- CombineCleanedBoundaries no longer times out on large experiments. Three
+  loops that grew with the square of the data size are now near-linear,
+  with the same kept cells (ties are broken by node order). On LT066
+  (1138 fovs, 2.05M cells), it takes 2 min and 2.5 GB, down from over 3 h
+  at 100 GB.
+- ExportBarcodes no longer runs out of memory: it reads and writes one
+  fov at a time.
 
 ### Changed
 - Verification figures are drawn by a separate `<Task>Figures` snakemake
@@ -137,3 +144,7 @@ major version).
   Running a task with `merlin -t` alone no longer draws its figures.
 - `SegmentationBoundaryPlot.svg` boundaries are simplified to 0.5 µm and
   written with 0.1 µm precision, about 40x smaller.
+- ExportBarcodes writes `barcodes.parquet` instead of `barcodes.csv`
+  (**breaking** for anything that reads the csv). On LT066 (2.0 billion
+  barcodes), the csv would have been ~105 GB and taken ~7 h to write. The
+  parquet is ~37 GB and takes ~22 min to write.

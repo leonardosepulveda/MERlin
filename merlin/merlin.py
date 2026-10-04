@@ -53,6 +53,9 @@ def build_parser():
     parser.add_argument('--check-done', action='store_true',
                         help='flag to only check if the analysis task is ' +
                         'done')
+    parser.add_argument('--figures-only', action='store_true',
+                        help='only draw the verification figures of the '
+                        'analysis task given by -t, which must be complete')
     parser.add_argument(
         '-t', '--analysis-task',
         help='the name of the analysis task to execute. If no '
@@ -209,7 +212,10 @@ def merlin():
     if not args.generate_only:
         if args.analysis_task:
             task = dataSet.load_analysis_task(args.analysis_task)
-            if args.check_done:
+            if args.figures_only:
+                print('Drawing figures for %s' % args.analysis_task)
+                task.generate_figures()
+            elif args.check_done:
                 # checking completion creates the .done file for parallel tasks
                 # where completion has not yet been checked
                 if task.is_complete():

@@ -116,7 +116,6 @@ class AnalysisTask(ABC):
             self._run_analysis()
             self.dataSet.record_analysis_complete(self)
             logger.info('Completed ' + self.get_analysis_name())
-            self._generate_figures_safely()
             self.dataSet.close_logger(self)
         except Exception as e:
             logger.exception(e)
@@ -222,9 +221,8 @@ class AnalysisTask(ABC):
         return self.parameters
 
     def _generate_verification_figures(self) -> None:
-        """Generate quick, on-the-fly verification figures for this analysis
-        task, called automatically once the task is complete (see run() /
-        ParallelAnalysisTask.is_complete()).
+        """Generate quick verification figures for this analysis task,
+        called by generate_figures() once the task is complete.
 
         The default implementation does nothing. A subclass that wants
         verification output should override this and call
@@ -247,6 +245,24 @@ class AnalysisTask(ABC):
         figure does not prevent the others.
         """
         pass
+
+    def has_verification_figures(self) -> bool:
+        """True if this task's class overrides
+        _generate_verification_figures, i.e. it has figures to draw."""
+        return type(self)._generate_verification_figures \
+            is not AnalysisTask._generate_verification_figures
+
+    def generate_figures(self) -> None:
+        """Draw this task's verification figures and record that they were
+        drawn.
+
+        Run by the task's own <task>Figures snakemake rule (see
+        snakewriter), after the task is done. Nothing else depends on that
+        rule, so a slow or failing figure never delays or stops the rest of
+        the pipeline.
+        """
+        self._generate_figures_safely()
+        self.dataSet.record_analysis_figures(self)
 
     def _generate_figures_safely(self) -> None:
         """Call _generate_verification_figures, logging (not raising) any
@@ -499,10 +515,6 @@ class ParallelAnalysisTask(AnalysisTask):
                 if len(missingCount) > 0:
                     return False
                 else:
-                    # Figures before the done flag: if drawing them kills
-                    # the process (e.g. out of memory), the flag is not
-                    # written and the next check draws them again.
-                    self._generate_figures_safely()
                     self.dataSet.record_analysis_complete(self)
                     return True
         else:

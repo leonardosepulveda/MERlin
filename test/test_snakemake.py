@@ -250,3 +250,28 @@ def test_snakemake_rule_shell_passes_dataset_flags(simple_merfish_task,
         assert '--allow-missing-channels' in shell
         assert '--allow-ragged-z-stacks' in shell
         assert '--recalculate-filemap' not in shell
+
+
+class _FigureParallelTask(testtask.SimpleParallelAnalysisTask):
+    def _generate_verification_figures(self):
+        pass
+
+
+def test_snakemake_rule_adds_figures_rule_only_for_tasks_with_figures(
+        simple_merfish_data):
+    """A task with figures gets a <task>Figures rule that waits on the
+    task's done file and calls --figures-only. Nothing else depends on
+    that rule."""
+    task = _FigureParallelTask(simple_merfish_data, analysisName='figTask')
+    rules = snakewriter.SnakemakeRule(task).as_string()
+    assert 'rule figTaskFigures:' in rules
+    figuresRule = rules[rules.index('rule figTaskFigures:'):]
+    assert simple_merfish_data.analysis_done_filename(task).replace(
+        '\\', '/') in figuresRule
+    assert '--figures-only' in figuresRule
+    assert simple_merfish_data.analysis_figures_filename(task).replace(
+        '\\', '/') in figuresRule
+
+    plain = testtask.SimpleParallelAnalysisTask(
+        simple_merfish_data, analysisName='plainTask')
+    assert 'Figures' not in snakewriter.SnakemakeRule(plain).as_string()

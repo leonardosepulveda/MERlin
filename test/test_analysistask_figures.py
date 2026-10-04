@@ -34,20 +34,6 @@ class FigureGeneratingParallelTask(testtask.SimpleParallelAnalysisTask):
         plt.close(fig)
 
 
-class KilledOnceFigureParallelTask(FigureGeneratingParallelTask):
-    """A parallel task whose first figure generation kills the process
-    (SystemExit, not caught like an Exception), as an out-of-memory kill
-    would."""
-
-    killed = False
-
-    def _generate_verification_figures(self):
-        if not KilledOnceFigureParallelTask.killed:
-            KilledOnceFigureParallelTask.killed = True
-            raise SystemExit('killed while drawing figures')
-        super()._generate_verification_figures()
-
-
 def _figure_path(dataSet, taskName, figureName):
     return os.sep.join([dataSet.figuresPath,
                         '.'.join(['merlin', taskName, figureName]) + '.png'])
@@ -68,25 +54,42 @@ def test_default_generate_verification_figures_is_a_noop(simple_merfish_data):
                        for name in os.listdir(figuresDir))
 
 
-def test_generate_verification_figures_runs_after_task_completes(
-        simple_merfish_data):
+def test_run_does_not_draw_figures(simple_merfish_data):
+    """Figures are drawn by generate_figures() (the task's own Figures
+    rule), not by run()."""
+    task = FigureGeneratingTask(
+        simple_merfish_data, parameters={}, analysisName='runNoFigureTask')
+    task.save()
+    task.run()
+    assert task.is_complete()
+    assert not os.path.exists(
+        _figure_path(simple_merfish_data, 'runNoFigureTask', 'a_figure'))
+
+
+def test_generate_figures_draws_and_records(simple_merfish_data):
     task = FigureGeneratingTask(
         simple_merfish_data, parameters={}, analysisName='figureGeneratingTask')
     task.save()
     task.run()
-    assert task.is_complete()
+    task.generate_figures()
     assert os.path.exists(
         _figure_path(simple_merfish_data, 'figureGeneratingTask', 'a_figure'))
+    assert os.path.exists(
+        simple_merfish_data.analysis_figures_filename(task))
 
 
-def test_failing_verification_figure_does_not_break_the_task(
-        simple_merfish_data):
+def test_failing_verification_figure_is_still_recorded(simple_merfish_data):
+    """A figure that raises is logged, not raised, so the Figures rule
+    still finishes."""
     task = FailingFigureTask(
         simple_merfish_data, parameters={}, analysisName='failingFigureTask')
     task.save()
-    task.run()  # must not raise
+    task.run()
+    task.generate_figures()  # must not raise
     assert task.is_complete()
     assert not task.is_error()
+    assert os.path.exists(
+        simple_merfish_data.analysis_figures_filename(task))
 
 
 def test_custom_figures_path_is_used_as_is(custom_figures_merfish_data):
@@ -95,7 +98,7 @@ def test_custom_figures_path_is_used_as_is(custom_figures_merfish_data):
         analysisName='customFiguresPathTask')
     task.save()
     task.run()
-    assert task.is_complete()
+    task.generate_figures()
 
     # figuresPath is used exactly as given, not nested under analysisPath.
     assert custom_figures_merfish_data.figuresPath \
@@ -104,41 +107,30 @@ def test_custom_figures_path_is_used_as_is(custom_figures_merfish_data):
         custom_figures_merfish_data, 'customFiguresPathTask', 'a_figure'))
 
 
-def test_parallel_task_generates_figure_once_after_last_fragment(
-        simple_merfish_data):
+def test_parallel_task_completion_does_not_draw_figures(simple_merfish_data):
+    """The done check only writes the done flag, so a slow figure can
+    never hold up the tasks that depend on this one."""
     task = FigureGeneratingParallelTask(
-        simple_merfish_data, parameters={}, analysisName='figureGeneratingParallelTask')
+        simple_merfish_data, parameters={},
+        analysisName='figureGeneratingParallelTask')
     task.save()
     figurePath = _figure_path(
-        simple_merfish_data, 'figureGeneratingParallelTask', 'a_parallel_figure')
+        simple_merfish_data, 'figureGeneratingParallelTask',
+        'a_parallel_figure')
 
-    for i in range(task.fragment_count() - 1):
+    for i in range(task.fragment_count()):
         task.run(i)
-        assert not os.path.exists(figurePath), \
-            'figure must not appear before every fragment is complete'
-
-    task.run(task.fragment_count() - 1)
     assert task.is_complete()
-    assert os.path.exists(figurePath)
-
-
-def test_parallel_task_killed_during_figures_is_not_marked_done(
-        simple_merfish_data):
-    """The done flag is written only after the figures, so a check that dies
-    while drawing them leaves the task not done, and the next check draws
-    them again instead of skipping them for good."""
-    task = KilledOnceFigureParallelTask(
-        simple_merfish_data, parameters={}, analysisName='killedFigureParallelTask')
-    task.save()
-    figurePath = _figure_path(
-        simple_merfish_data, 'killedFigureParallelTask', 'a_parallel_figure')
-
-    with pytest.raises(SystemExit):
-        for i in range(task.fragment_count()):
-            task.run(i)
-        task.is_complete()
-    assert not simple_merfish_data.check_analysis_done(task)
     assert not os.path.exists(figurePath)
 
-    assert task.is_complete()
+    task.generate_figures()
     assert os.path.exists(figurePath)
+
+
+def test_has_verification_figures(simple_merfish_data):
+    assert FigureGeneratingTask(
+        simple_merfish_data, parameters={},
+        analysisName='hasFiguresTask').has_verification_figures()
+    assert not testtask.SimpleAnalysisTask(
+        simple_merfish_data, parameters={},
+        analysisName='noFiguresTask').has_verification_figures()

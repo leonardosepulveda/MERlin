@@ -123,11 +123,17 @@ major version).
 ## [Unreleased]
 
 ### Fixed
-- Inline figures in parallel tasks' Done rules no longer exceed the 3 h
-  limit on large experiments: the barcode radial-distribution metadata is
-  vectorized (same bins, ~500x faster) and saved every 50 fovs, so a retry
-  resumes. Segmentation-boundary reads are ~2x faster.
+- Verification figures no longer take hours on large experiments: the
+  barcode radial-distribution metadata is vectorized (same bins, ~500x
+  faster) and saved every 50 fovs, so a retry resumes. Segmentation-boundary
+  reads are ~2x faster.
 
 ### Changed
+- Verification figures are drawn by a separate `<Task>Figures` snakemake
+  rule after each task is done (`merlin -t <Task> --figures-only`), not
+  inside the task's run or its Done rule. Nothing depends on the Figures
+  rule, so slow or failing figures no longer delay or stop the pipeline.
+  Its cluster resources can be set per rule, e.g. `DecodeFigures:`.
+  Running a task with `merlin -t` alone no longer draws its figures.
 - `SegmentationBoundaryPlot.svg` boundaries are simplified to 0.5 µm and
   written with 0.1 µm precision, about 40x smaller.

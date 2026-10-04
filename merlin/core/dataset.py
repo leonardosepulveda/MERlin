@@ -965,6 +965,10 @@ class DataSet(object):
                               fragmentIndex: int = None) -> None:
         self._record_analysis_event(analysisTask, 'error', fragmentIndex)
 
+    def record_analysis_figures(
+            self, analysisTask: analysistask.AnalysisTask) -> None:
+        self._record_analysis_event(analysisTask, 'figures')
+
 
     def get_analysis_start_time(self, analysisTask: analysistask.AnalysisTask,
                                 fragmentIndex: int = None) -> float:
@@ -1049,6 +1053,10 @@ class DataSet(object):
                                fragmentIndex: int = None) -> str:
         return self._analysis_status_file(analysisTask, 'done', fragmentIndex)
 
+    def analysis_figures_filename(
+            self, analysisTask: analysistask.AnalysisTask) -> str:
+        return self._analysis_status_file(analysisTask, 'figures')
+
     def check_analysis_error(self, analysisTask: analysistask.AnalysisTask,
                              fragmentIndex: int = None) -> bool:
         return self._check_analysis_event(analysisTask, 'error', fragmentIndex)
@@ -1063,6 +1071,7 @@ class DataSet(object):
         self._reset_analysis_event(analysisTask, 'done', fragmentIndex)
         self._reset_analysis_event(analysisTask, 'error', fragmentIndex)
         self._reset_analysis_event(analysisTask, 'done')
+        self._reset_analysis_event(analysisTask, 'figures')
 
 class ImageDataSet(DataSet):
 

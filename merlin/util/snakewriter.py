@@ -261,6 +261,18 @@ class SnakemakeRule(object):
             self._analysisTask.dataSet.dataSetName)
         return self._add_quotes(shellString)
 
+    def _generate_figures_shell(self) -> str:
+        shellString = self._base_shell_command()
+        shellString += ' --figures-only'
+        shellString += ' ' + self._clean_string(
+            self._analysisTask.dataSet.dataSetName)
+        return self._add_quotes(shellString)
+
+    def figures_output(self) -> str:
+        return self._add_quotes(self._clean_string(
+            self._analysisTask.dataSet.analysis_figures_filename(
+                self._analysisTask)))
+
     def as_string(self) -> str:
         ruleName = self._analysisTask.get_analysis_name()
         fullString = ('rule %s:\n\tinput: %s\n\toutput: %s\n\tmessage: %s%s\n\t'
@@ -292,6 +304,24 @@ class SnakemakeRule(object):
                    self._generate_resources(
                        self._cluster_resources_for_rule(doneRuleName)),
                    self._generate_done_shell())
+        # Figures get their own rule, run once the task is done. Nothing
+        # depends on it, so slow or failing figures never hold up or stop
+        # the tasks downstream.
+        if self._analysisTask.has_verification_figures():
+            figuresRuleName = ruleName + 'Figures'
+            fullString += \
+                ('rule %s:\n\tinput: %s\n\toutput: %s\n\tmessage: %s%s\n\t'
+                 + 'shell: %s\n\n')\
+                % (figuresRuleName,
+                   self._add_quotes(self._clean_string(
+                       self._analysisTask.dataSet.analysis_done_filename(
+                           self._analysisTask))),
+                   self.figures_output(),
+                   self._add_quotes(
+                       'Drawing %s figures' % self._analysisTask.analysisName),
+                   self._generate_resources(
+                       self._cluster_resources_for_rule(figuresRuleName)),
+                   self._generate_figures_shell())
         return fullString
 
     def full_output(self) -> str:
@@ -359,7 +389,10 @@ class SnakefileGenerator(object):
 
         workflowString = 'rule all: \n\tinput: ' + \
             ','.join([ruleList[x].full_output()
-                      for x in terminalTasks]) + '\n\n'
+                      for x in terminalTasks]
+                     + [ruleList[x].figures_output()
+                        for x, t in analysisTasks.items()
+                        if t.has_verification_figures()]) + '\n\n'
         workflowString += '\n'.join([x.as_string() for x in ruleList.values()])
 
         return self._dataSet.save_workflow(workflowString)

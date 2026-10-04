@@ -1,4 +1,5 @@
 from abc import abstractmethod
+import heapq
 import multiprocessing
 import numpy as np
 import uuid
@@ -1100,6 +1101,35 @@ def construct_graph(graph, cells, spatialTree, currentFOV, allFOVs, fovBoxes):
     return graph
 
 
+def _remove_max_degree_nodes(graph) -> List:
+    """Repeatedly remove the node with the most edges until no edges are
+    left, and return the remaining nodes in graph's node order.
+
+    Ties go to the node that comes first in graph's node order. A heap
+    with only the removed node's neighbors updated per step keeps this
+    near-linear, instead of recomputing every degree after each removal,
+    which is quadratic and never finishes on a component of ~1e5 cells.
+    """
+    order = {n: i for i, n in enumerate(graph.nodes())}
+    degree = dict(graph.degree())
+    heap = [(-d, order[n], n) for n, d in degree.items()]
+    heapq.heapify(heap)
+    removed = set()
+    while heap:
+        negDegree, _, node = heapq.heappop(heap)
+        if node in removed or -negDegree != degree[node]:
+            continue
+        if degree[node] == 0:
+            break
+        removed.add(node)
+        for neighbor in graph.neighbors(node):
+            if neighbor != node and neighbor not in removed:
+                degree[neighbor] -= 1
+                heapq.heappush(
+                    heap, (-degree[neighbor], order[neighbor], neighbor))
+    return [n for n in graph.nodes() if n not in removed]
+
+
 def remove_overlapping_cells(graph):
     """
     Takes in a graph in which each node is a cell and edges connect cells that
@@ -1128,20 +1158,11 @@ def remove_overlapping_cells(graph):
             cleanedCells.append([component[0], originalFOV, assignedFOV])
         if len(component) > 1:
             sg = nx.subgraph(graph, component)
-            verts = list(nx.articulation_points(sg))
+            verts = set(nx.articulation_points(sg))
             if len(verts) > 0:
                 sg = nx.subgraph(graph,
                                  [x for x in component if x not in verts])
-            allEdges = [[k, v] for k, v in nx.degree(sg)]
-            sortedEdges = sorted(allEdges, key=lambda x: x[1], reverse=True)
-            maxEdges = sortedEdges[0][1]
-            while maxEdges > 0:
-                sg = nx.subgraph(graph, [x[0] for x in sortedEdges[1:]])
-                allEdges = [[k, v] for k, v in nx.degree(sg)]
-                sortedEdges = sorted(allEdges, key=lambda x: x[1],
-                                     reverse=True)
-                maxEdges = sortedEdges[0][1]
-            keptComponents = list(sg.nodes())
+            keptComponents = _remove_max_degree_nodes(sg)
             cellIDs = []
             originalFOVs = []
             assignedFOVs = []
@@ -1151,7 +1172,7 @@ def remove_overlapping_cells(graph):
                 assignedFOVs.append(graph.nodes[c]['assignedFOV'])
             listOfLists = list(zip(cellIDs, originalFOVs, assignedFOVs))
             listOfLists = [list(x) for x in listOfLists]
-            cleanedCells = cleanedCells + listOfLists
+            cleanedCells.extend(listOfLists)
     cleanedCellsDF = pandas.DataFrame(cleanedCells,
                                       columns=['cell_id', 'originalFOV',
                                                'assignedFOV'])

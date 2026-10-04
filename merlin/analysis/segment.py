@@ -950,7 +950,9 @@ class CombineCleanedBoundaries(analysistask.AnalysisTask):
         graph = nx.Graph()
         for currentFOV in allFOVs:
             subGraph = self.cleaningTask.return_exported_data(currentFOV)
-            graph = nx.compose(graph, subGraph)
+            # update() adds in place, like compose() but without copying
+            # the whole graph for every fov.
+            graph.update(subGraph)
 
         cleanedCells = spatialfeature.remove_overlapping_cells(graph)
 

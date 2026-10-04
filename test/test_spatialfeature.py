@@ -349,6 +349,26 @@ def test_remove_overlapping_cells():
     assert p3.get_feature_id() not in keptCells
 
 
+def _remove_max_degree_nodes_naive(graph):
+    """The original algorithm: recompute every degree after each removal."""
+    nodes = list(graph.nodes())
+    rank = {n: i for i, n in enumerate(nodes)}
+    alive = list(nodes)
+    while True:
+        degree = dict(graph.subgraph(alive).degree())
+        best = max(alive, key=lambda n: (degree[n], -rank[n]))
+        if degree[best] == 0:
+            return alive
+        alive = [n for n in alive if n != best]
+
+
+def test_remove_max_degree_nodes_matches_naive():
+    for seed in range(200):
+        graph = nx.gnp_random_graph(25, 0.05 + 0.002 * seed, seed=seed)
+        assert spatialfeature._remove_max_degree_nodes(graph) == \
+            _remove_max_degree_nodes_naive(graph)
+
+
 def _synthetic_label_stack():
     labels = np.zeros((4, 60, 70), dtype=np.uint16)
     labels[0:3, 10:25, 12:30] = 1   # a box spanning three planes

@@ -121,3 +121,11 @@ major version).
   without a task.json. See `git log --first-parent v0.1.6..v0.2.0`.
 
 ## [Unreleased]
+
+### Changed
+- Verification figures are drawn by a separate `<Task>Figures` snakemake
+  rule after each task is done (`merlin -t <Task> --figures-only`), not
+  inside the task's run or its Done rule. Nothing depends on the Figures
+  rule, so slow or failing figures no longer delay or stop the pipeline.
+  Its cluster resources can be set per rule, e.g. `DecodeFigures:`.
+  Running a task with `merlin -t` alone no longer draws its figures.

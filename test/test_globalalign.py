@@ -80,8 +80,8 @@ def test_least_squares_global_alignment_requires_run_before_offset_lookup(
 
 def test_least_squares_global_alignment_generates_verification_figures(
         simple_merfish_data):
-    # Full task.run() (not _run_analysis() directly), so the
-    # generate-figures-after-completion hook actually fires. The fixture's
+    # Full task.run() then generate_figures(), as the task's own rule and
+    # its Figures rule would. The fixture's
     # two fovs do not overlap, so registration itself finds nothing to
     # measure; known correspondences are written in its place so every
     # figure has data to plot.
@@ -109,6 +109,7 @@ def test_least_squares_global_alignment_generates_verification_figures(
     task.save()
     task.run()
     assert task.is_complete()
+    task.generate_figures()
 
     figuresDir = simple_merfish_data.figuresPath
     for figureName in ('direction_reliability', 'grid_overlay',
@@ -148,6 +149,7 @@ def test_least_squares_global_alignment_skips_overlap_correlations(
     task.save()
     task.run()
     assert task.is_complete()
+    task.generate_figures()
     assert task.get_estimated_time() == 6
 
     correspondenceDF = simple_merfish_data.load_dataframe_from_csv(

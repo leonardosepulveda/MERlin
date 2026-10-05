@@ -354,6 +354,8 @@ class AdaptiveFilterBarcodes(AbstractFilterBarcodes):
                 self.parameters['z_duplicate_zPlane_threshold'] = 1
             if 'z_duplicate_xy_pixel_threshold' not in self.parameters:
                 self.parameters['z_duplicate_xy_pixel_threshold'] = np.sqrt(2)
+            # z_duplicate_xy_distance_um, when given, replaces the pixel
+            # threshold, so one value carries over between microscopes
 
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
@@ -408,9 +410,15 @@ class AdaptiveFilterBarcodes(AbstractFilterBarcodes):
     def _remove_z_duplicate_barcodes(self, bc, fov):
         bc = barcodefilters.remove_zplane_duplicates_all_barcodeids(
             bc, self.parameters['z_duplicate_zPlane_threshold'],
-            self.parameters['z_duplicate_xy_pixel_threshold'],
+            self._z_duplicate_xy_pixels(),
             self.dataSet.get_z_positions(fov))
         return bc
+
+    def _z_duplicate_xy_pixels(self) -> float:
+        if 'z_duplicate_xy_distance_um' in self.parameters:
+            return (self.parameters['z_duplicate_xy_distance_um']
+                    / self.dataSet.get_microns_per_pixel())
+        return self.parameters['z_duplicate_xy_pixel_threshold']
 
 
 class GenerateAdaptiveThresholdLocal(analysistask.ParallelAnalysisTask):
@@ -722,5 +730,10 @@ class AdaptiveFilterBarcodesLocal(AdaptiveFilterBarcodes):
         currentBarcodes = decodeTask.get_barcode_database()\
             .get_barcodes(fragmentIndex)
 
-        bcDatabase.write_barcodes(adaptiveTask.extract_barcodes_with_threshold(
-            threshold, currentBarcodes, fragmentIndex), fov=fragmentIndex)
+        currentBarcodes = adaptiveTask.extract_barcodes_with_threshold(
+            threshold, currentBarcodes, fragmentIndex)
+        if self.parameters['remove_z_duplicated_barcodes']:
+            currentBarcodes = self._remove_z_duplicate_barcodes(
+                currentBarcodes, fragmentIndex)
+
+        bcDatabase.write_barcodes(currentBarcodes, fov=fragmentIndex)

@@ -364,10 +364,10 @@ def _seam_graph():
 def test_plane_overlaps_with_z_shift():
     a = _box_cell(0, 0, 0, {1, 2, 3}, halfWidth=0.5)
     b = _box_cell(1, 0, 0, {3, 4, 5}, halfWidth=0.5)
-    planes = [spatialfeature._cell_planes(c) for c in (a, b)]
+    planes = [spatialfeature._cell_planes(c, 1.0) for c in (a, b)]
     pairs = np.array([[0, 1], [0, 1]])
     overlaps = spatialfeature._plane_overlaps(planes, pairs,
-                                              np.array([0.0, 2.0]))
+                                              np.array([0, 2]))
     assert overlaps == pytest.approx([1.0, 3.0])
 
 

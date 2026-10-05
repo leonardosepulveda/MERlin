@@ -973,29 +973,28 @@ def simple_clean_cells(cells: List) -> List:
             if len(cell.get_bounding_box()) == 4 and cell.get_volume() > 0]
 
 
-def _cell_planes(cell: SpatialFeature) -> Dict[float, BaseGeometry]:
-    """The cell's outline in each of its z planes, keyed by z position."""
+def _cell_planes(cell: SpatialFeature, zStep: float
+                 ) -> Dict[int, BaseGeometry]:
+    """The cell's outline in each of its z planes, keyed by the plane
+    index z / zStep."""
     planes = {}
     for z, polygons in zip(cell.get_z_coordinates(), cell.get_boundaries()):
         if len(polygons) == 0:
             continue
-        outline = polygons[0] if len(polygons) == 1 \
-            else unary_union(polygons)
-        if not outline.is_valid:
-            outline = outline.buffer(0)
-        planes[round(float(z), 6)] = outline
+        planes[int(round(float(z) / zStep))] = polygons[0] \
+            if len(polygons) == 1 else unary_union(polygons)
     return planes
 
 
-def _plane_overlaps(planes: List[Dict[float, BaseGeometry]],
+def _plane_overlaps(planes: List[Dict[int, BaseGeometry]],
                     pairs: np.ndarray, zShifts: np.ndarray) -> np.ndarray:
     """Overlap area of each cell pair (i, j), summed over the planes where
-    plane z of cell i meets plane z + zShift of cell j."""
+    plane p of cell i meets plane p + zShift of cell j."""
     pairIndex, outlinesA, outlinesB = [], [], []
     for k, ((i, j), shift) in enumerate(zip(pairs, zShifts)):
         planesB = planes[j]
-        for z, outline in planes[i].items():
-            other = planesB.get(round(z + shift, 6))
+        for p, outline in planes[i].items():
+            other = planesB.get(p + shift)
             if other is not None:
                 pairIndex.append(k)
                 outlinesA.append(outline)
@@ -1023,10 +1022,10 @@ def construct_overlap_graph(
     Neighbouring fovs can disagree in z by a whole number of planes (a
     tilted coverslip under per-fov focus). Cells of another fov are
     therefore compared after shifting them by that fov's seam offset: the
-    median z difference of the clear duplicates, the pairs whose z
-    projections overlap by at least overlapThreshold and whose best overlap
-    within +-maxZShift planes passes it too. With fewer than minSeamPairs
-    duplicates the shift is 0.
+    median z difference of the clear duplicates, the pairs whose bounding
+    boxes overlap by at least overlapThreshold of the smaller box and
+    whose best overlap within +-maxZShift planes passes overlapThreshold.
+    With fewer than minSeamPairs duplicates the shift is 0.
 
     Args:
         currentFOV: the fov whose cells are added
@@ -1046,9 +1045,10 @@ def construct_overlap_graph(
         fovOfCell += [fov] * len(fovCells)
         cells += fovCells
     fovOfCell = np.array(fovOfCell)
-    planes = [_cell_planes(c) for c in cells]
+    planes = [_cell_planes(c, zStep) for c in cells]
+    planeCount = np.array([len(p) for p in planes])
     areaSum = np.array([sum(o.area for o in p.values()) for p in planes])
-    zCentre = np.array([sum(z * o.area for z, o in p.items()) / a
+    zCentre = np.array([sum(z * o.area for z, o in p.items()) * zStep / a
                         if a > 0 else np.nan
                         for p, a in zip(planes, areaSum)])
     bounds = np.array([c.get_bounding_box() for c in cells]).reshape(-1, 4)
@@ -1069,41 +1069,43 @@ def construct_overlap_graph(
     qi, qj = tree.query(shapely.box(*bounds[own].T), predicate='intersects')
     i, j = own[qi], qj
     keep = (i != j) & ((fovOfCell[j] != currentFOV) | (i < j))
-    pairs = np.stack([i[keep], j[keep]], axis=1)
-    smaller = np.minimum(areaSum[pairs[:, 0]], areaSum[pairs[:, 1]])
+    i, j = i[keep], j[keep]
+    # Every plane's overlap lies inside the two bounding boxes, so a pair
+    # whose box overlap times its plane count can't reach the threshold is
+    # never linked, and its polygons needn't be intersected.
+    boxOverlap = np.prod(np.clip(
+        np.minimum(bounds[i, 2:], bounds[j, 2:])
+        - np.maximum(bounds[i, :2], bounds[j, :2]), 0, None), axis=1)
+    smaller = np.minimum(areaSum[i], areaSum[j])
+    possible = boxOverlap * np.minimum(planeCount[i], planeCount[j]) \
+        >= overlapThreshold * smaller
+    pairs = np.stack([i[possible], j[possible]], axis=1)
+    smaller = smaller[possible]
+    boxArea = np.prod(bounds[:, 2:] - bounds[:, :2], axis=1)
+    boxFraction = boxOverlap[possible] / np.minimum(
+        boxArea[pairs[:, 0]], boxArea[pairs[:, 1]])
     neighbourFOV = fovOfCell[pairs[:, 1]]
 
-    # z projections, only for the cells in cross-fov pairs
-    projections = np.full(len(cells), None, dtype=object)
-    crossCells = np.unique(pairs[neighbourFOV != currentFOV])
-    projections[crossCells] = [unary_union(list(planes[k].values()))
-                               for k in crossCells]
     seamRows = []
-    zShift = np.zeros(len(pairs))
+    zShift = np.zeros(len(pairs), dtype=int)
+    shifts = np.arange(-maxZShift, maxZShift + 1)
     for fov in fovList:
         if fov == currentFOV:
             continue
         sel = np.nonzero(neighbourFOV == fov)[0]
+        candidates = sel[boxFraction[sel] >= overlapThreshold]
         offset, nPairs = np.nan, 0
-        if len(sel):
-            a, b = pairs[sel, 0], pairs[sel, 1]
-            projOverlap = shapely.area(shapely.intersection(
-                projections[a], projections[b])) / np.minimum(
-                shapely.area(projections[a]), shapely.area(projections[b]))
-            candidates = sel[projOverlap >= overlapThreshold]
-            shifts = np.arange(-maxZShift, maxZShift + 1)
+        if len(candidates):
             overlaps = np.stack([_plane_overlaps(
-                planes, pairs[candidates],
-                np.full(len(candidates), s * zStep)) for s in shifts], axis=1) \
-                if len(candidates) else np.zeros((0, len(shifts)))
-            duplicates = candidates[
-                overlaps.max(axis=1, initial=0) / smaller[candidates]
-                >= overlapThreshold] if len(candidates) else candidates
+                planes, pairs[candidates], np.full(len(candidates), s))
+                for s in shifts], axis=1)
+            duplicates = candidates[overlaps.max(axis=1) / smaller[candidates]
+                                    >= overlapThreshold]
             nPairs = len(duplicates)
             if nPairs >= minSeamPairs:
                 offset = float(np.median(zCentre[pairs[duplicates, 1]]
                                          - zCentre[pairs[duplicates, 0]]))
-                zShift[sel] = np.round(offset / zStep) * zStep
+                zShift[sel] = int(np.round(offset / zStep))
         seamRows.append({'fov': currentFOV, 'neighbor_fov': fov,
                          'n_pairs': nPairs, 'z_offset_um': offset})
 

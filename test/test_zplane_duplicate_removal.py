@@ -145,3 +145,23 @@ def test_single_barcodeid_matches_all_barcodeids():
     allIDs = barcodefilters.remove_zplane_duplicates_all_barcodeids(
         pd.DataFrame(bcSet), 1, np.sqrt(2), zpositions)
     assert sorted(single['barcode']) == sorted(allIDs['barcode'])
+
+
+def test_overlap_barcode_kept_by_nearest_fov():
+    # fovs 0 and 1 are 100 apart in x; both decoded x = 40..60
+    centers = np.array([[0, 0], [100, 0], [0, 100]])
+    x = np.array([40, 49, 51, 60])
+    for fov, kept in [(0, [40, 49]), (1, [51, 60])]:
+        bcDF = pd.DataFrame({'global_x': x, 'global_y': np.zeros(4),
+                             'fov': fov})
+        owned = barcodefilters.keep_barcodes_of_nearest_fov(
+            bcDF, fov, [0, 1, 2], centers)
+        assert list(owned['global_x']) == kept
+
+
+def test_overlap_ownership_uses_fov_ids():
+    centers = np.array([[0, 0], [100, 0]])
+    bcDF = pd.DataFrame({'global_x': [10, 90], 'global_y': [0, 0]})
+    owned = barcodefilters.keep_barcodes_of_nearest_fov(
+        bcDF, 7, [3, 7], centers)
+    assert list(owned['global_x']) == [90]

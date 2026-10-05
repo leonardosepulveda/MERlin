@@ -114,3 +114,26 @@ def _z_duplicate_keep_mask(barcodes: pd.DataFrame, zPlanes: int,
     keep[order[first]] = True
     return keep
 
+
+def keep_barcodes_of_nearest_fov(barcodes: pd.DataFrame, fov: int,
+                                 fovIDs: List[int],
+                                 fovCenters: np.ndarray) -> pd.DataFrame:
+    """ Keep the barcodes that *fov* owns. Neighbouring fovs overlap, so a
+        molecule in the overlap is decoded once in each fov. A barcode is
+        owned by the fov whose image centre is nearest to it, over all
+        fovs, so each overlap is counted once.
+
+    Args:
+        barcodes: barcodes decoded in *fov*, with global_x and global_y
+        fov: the fov the barcodes were decoded in
+        fovIDs: every fov of the dataset
+        fovCenters: (len(fovIDs), 2) global x, y of each fov's image centre,
+                    in the same units as global_x and global_y
+    Returns:
+        the barcodes owned by *fov*
+    """
+    if len(barcodes) == 0:
+        return barcodes
+    nearest = cKDTree(fovCenters).query(
+        barcodes[['global_x', 'global_y']].values)[1]
+    return barcodes[np.asarray(fovIDs)[nearest] == fov]

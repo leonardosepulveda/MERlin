@@ -10,10 +10,29 @@ from merlin.util import barcodefilters
 class AbstractFilterBarcodes(decode.BarcodeSavingParallelAnalysisTask):
     """
     An abstract class for filtering barcodes identified by pixel-based decoding.
+
+    With remove_overlap_duplicates (default True), a fov keeps only the
+    barcodes nearer to its own image centre than to any other fov's, so a
+    molecule in the overlap of two fovs is counted once. Fov positions come
+    from global_align_task, by default the decode task's.
     """
 
     def __init__(self, dataSet, parameters=None, analysisName=None):
         super().__init__(dataSet, parameters, analysisName)
+        if 'remove_overlap_duplicates' not in self.parameters:
+            self.parameters['remove_overlap_duplicates'] = True
+
+    def _keep_owned_barcodes(self, barcodes, fov):
+        if not self.parameters['remove_overlap_duplicates']:
+            return barcodes
+        alignName = self.parameters.get('global_align_task')
+        if alignName is None:
+            alignName = self.dataSet.load_analysis_task(
+                self.parameters['decode_task']).parameters['global_align_task']
+        boxes = self.dataSet.load_analysis_task(alignName).get_fov_boxes()
+        centers = np.array([b.centroid.coords[0] for b in boxes])
+        return barcodefilters.keep_barcodes_of_nearest_fov(
+            barcodes, fov, self.dataSet.get_fovs(), centers)
 
     def get_codebook(self):
         decodeTask = self.dataSet.load_analysis_task(
@@ -65,11 +84,11 @@ class FilterBarcodes(AbstractFilterBarcodes):
         intensityThreshold = self.parameters['intensity_threshold']
         distanceThreshold = self.parameters['distance_threshold']
         barcodeDB = self.get_barcode_database()
-        barcodeDB.write_barcodes(
+        barcodeDB.write_barcodes(self._keep_owned_barcodes(
             decodeTask.get_barcode_database().get_filtered_barcodes(
                 areaThreshold, intensityThreshold,
                 distanceThreshold=distanceThreshold, fov=fragmentIndex),
-            fov=fragmentIndex)
+            fragmentIndex), fov=fragmentIndex)
 
 
 class GenerateAdaptiveThreshold(analysistask.AnalysisTask):
@@ -399,6 +418,8 @@ class AdaptiveFilterBarcodes(AbstractFilterBarcodes):
         if self.parameters['remove_z_duplicated_barcodes']:
             currentBarcodes = self._remove_z_duplicate_barcodes(
                 currentBarcodes, fragmentIndex)
+        currentBarcodes = self._keep_owned_barcodes(
+            currentBarcodes, fragmentIndex)
 
         bcDatabase.write_barcodes(currentBarcodes, fov=fragmentIndex)
 
@@ -735,5 +756,7 @@ class AdaptiveFilterBarcodesLocal(AdaptiveFilterBarcodes):
         if self.parameters['remove_z_duplicated_barcodes']:
             currentBarcodes = self._remove_z_duplicate_barcodes(
                 currentBarcodes, fragmentIndex)
+        currentBarcodes = self._keep_owned_barcodes(
+            currentBarcodes, fragmentIndex)
 
         bcDatabase.write_barcodes(currentBarcodes, fov=fragmentIndex)

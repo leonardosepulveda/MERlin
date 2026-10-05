@@ -1,5 +1,4 @@
 from abc import abstractmethod
-import heapq
 import multiprocessing
 import numpy as np
 import uuid
@@ -8,14 +7,15 @@ from skimage import measure
 from typing import List
 from typing import Tuple
 from typing import Dict
+import shapely
 from shapely import geometry
+from shapely.geometry.base import BaseGeometry
+from shapely.ops import unary_union
 import h5py
 import merlin
 import pandas
 import networkx as nx
-import rtree
 from scipy import ndimage
-from scipy.spatial import cKDTree
 
 
 from merlin.core import dataset
@@ -973,207 +973,229 @@ def simple_clean_cells(cells: List) -> List:
             if len(cell.get_bounding_box()) == 4 and cell.get_volume() > 0]
 
 
-def append_cells_to_spatial_tree(tree: rtree.index.Index,
-                                 cells: List, idToNum: Dict):
-    for element in cells:
-        tree.insert(idToNum[element.get_feature_id()],
-                    element.get_bounding_box(), obj=element)
-
-
-def construct_tree(cells: List,
-                   spatialIndex: rtree.index.Index = rtree.index.Index(),
-                   count: int = 0, idToNum: Dict = dict()):
-    """
-    Builds or adds to an rtree with a list of cells
-
-    Args:
-        cells: list of spatial features
-        spatialIndex: an existing rtree to append to
-        count: number of existing entries in existing rtree
-        idToNum: dict containing feature ID as key, and number in rtree as value
-
-    Returns:
-        spatialIndex: an rtree updated with the input cells
-        count: number of entries in rtree
-        idToNum: dict containing feature ID as key, and number in rtree as value
-    """
-
-    for i in range(len(cells)):
-        idToNum[cells[i].get_feature_id()] = count
-        count += 1
-    append_cells_to_spatial_tree(spatialIndex, cells, idToNum)
-
-    return spatialIndex, count, idToNum
-
-
-def return_overlapping_cells(currentCell, cells: List):
-    """
-    Determines if there is overlap between a cell of interest and a list of
-    other cells. In the event that the cell of interest is entirely contained
-    within one of the cells in the cells it is being compared to, an empty
-    list is returned. Otherwise, the cell of interest and any overlapping
-    cells are returned.
-    Args:
-        currentCell: A spatial feature of interest
-        cells: A list of spatial features to compare to, the spatial feature
-               of interest is expected to be in this list
-
-    Returns:
-        A list of spatial features including the cell of interest and all
-        overlapping cells, or an empty list if the cell of intereset is
-        entirely contained within one of the cells it is compared to
-    """
-    areas = [currentCell.intersection(x) for x in cells]
-    overlapping = [cells[i] for i, x in enumerate(areas) if x > 0]
-    benchmark = currentCell.intersection(currentCell)
-    contained = [x for x in overlapping if
-                 x.intersection(currentCell) == benchmark]
-    if len(contained) > 1:
-        overlapping = []
-    else:
-        toReturn = []
-        for c in overlapping:
-            if c.get_feature_id() == currentCell.get_feature_id():
-                toReturn.append(c)
-            else:
-                if c.intersection(currentCell) != c.intersection(c):
-                    toReturn.append(c)
-        overlapping = toReturn
-
-    return overlapping
-
-
-def construct_graph(graph, cells, spatialTree, currentFOV, allFOVs, fovBoxes):
-    """
-    Adds the cells from the current fov to a graph where each node is a cell
-    and edges connect overlapping cells.
-
-    Args:
-        graph: An undirected graph, either empty of already containing cells
-        cells: A list of spatial features to potentially add to graph
-        spatialTree: an rtree index containing each cell in the dataset
-        currentFOV: the fov currently being added to the graph
-        allFOVs: a list of all fovs in the dataset
-        fovBoxes: a list of shapely polygons containing the bounds of each fov
-
-    Returns:
-        A graph updated to include cells from the current fov
-    """
-
-    fovIntersections = sorted([i for i, x in enumerate(fovBoxes) if
-                               fovBoxes[currentFOV].intersects(x)])
-
-    coords = [x.centroid.coords.xy for x in fovBoxes]
-    xcoords = [x[0][0] for x in coords]
-    ycoords = [x[1][0] for x in coords]
-    coordsDF = pandas.DataFrame(data=np.array(list(zip(xcoords, ycoords))),
-                                index=allFOVs,
-                                columns=['centerX', 'centerY'])
-    fovTree = cKDTree(data=coordsDF.loc[fovIntersections,
-                                        ['centerX', 'centerY']].values)
-    for cell in cells:
-        overlappingCells = spatialTree.intersection(
-            cell.get_bounding_box(), objects=True)
-        toCheck = [x.object for x in overlappingCells]
-        cellsToConsider = return_overlapping_cells(
-            cell, toCheck)
-        if len(cellsToConsider) == 0:
-            pass
-        else:
-            for cellToConsider in cellsToConsider:
-                xmin, ymin, xmax, ymax =\
-                    cellToConsider.get_bounding_box()
-                xCenter = (xmin + xmax) / 2
-                yCenter = (ymin + ymax) / 2
-                [d, i] = fovTree.query(np.array([xCenter, yCenter]))
-                assignedFOV = coordsDF.loc[fovIntersections, :]\
-                    .index.values.tolist()[i]
-                if cellToConsider.get_feature_id() not in graph.nodes:
-                    graph.add_node(cellToConsider.get_feature_id(),
-                                   originalFOV=cellToConsider.get_fov(),
-                                   assignedFOV=assignedFOV)
-            if len(cellsToConsider) > 1:
-                for cellToConsider1 in cellsToConsider:
-                    if cellToConsider1.get_feature_id() !=\
-                            cell.get_feature_id():
-                        graph.add_edge(cell.get_feature_id(),
-                                       cellToConsider1.get_feature_id())
-    return graph
-
-
-def _remove_max_degree_nodes(graph) -> List:
-    """Repeatedly remove the node with the most edges until no edges are
-    left, and return the remaining nodes in graph's node order.
-
-    Ties go to the node that comes first in graph's node order. A heap
-    with only the removed node's neighbors updated per step keeps this
-    near-linear, instead of recomputing every degree after each removal,
-    which is quadratic and never finishes on a component of ~1e5 cells.
-    """
-    order = {n: i for i, n in enumerate(graph.nodes())}
-    degree = dict(graph.degree())
-    heap = [(-d, order[n], n) for n, d in degree.items()]
-    heapq.heapify(heap)
-    removed = set()
-    while heap:
-        negDegree, _, node = heapq.heappop(heap)
-        if node in removed or -negDegree != degree[node]:
+def _cell_planes(cell: SpatialFeature) -> Dict[float, BaseGeometry]:
+    """The cell's outline in each of its z planes, keyed by z position."""
+    planes = {}
+    for z, polygons in zip(cell.get_z_coordinates(), cell.get_boundaries()):
+        if len(polygons) == 0:
             continue
-        if degree[node] == 0:
-            break
-        removed.add(node)
-        for neighbor in graph.neighbors(node):
-            if neighbor != node and neighbor not in removed:
-                degree[neighbor] -= 1
-                heapq.heappush(
-                    heap, (-degree[neighbor], order[neighbor], neighbor))
-    return [n for n in graph.nodes() if n not in removed]
+        outline = polygons[0] if len(polygons) == 1 \
+            else unary_union(polygons)
+        if not outline.is_valid:
+            outline = outline.buffer(0)
+        planes[round(float(z), 6)] = outline
+    return planes
 
 
-def remove_overlapping_cells(graph):
-    """
-    Takes in a graph in which each node is a cell and edges connect cells that
-    overlap eachother in space. Removes overlapping cells, preferentially
-    eliminating the cell that overlaps the most cells (i.e. if cell A overlaps
-    cells B, C, and D, whereas cell B only overlaps cell A, cell C only overlaps
-    cell A, and cell D only overlaps cell A, then cell A will be removed,
-    leaving cells B, C, and D remaining because there is no more overlap
-    within this group of cells).
+def _plane_overlaps(planes: List[Dict[float, BaseGeometry]],
+                    pairs: np.ndarray, zShifts: np.ndarray) -> np.ndarray:
+    """Overlap area of each cell pair (i, j), summed over the planes where
+    plane z of cell i meets plane z + zShift of cell j."""
+    pairIndex, outlinesA, outlinesB = [], [], []
+    for k, ((i, j), shift) in enumerate(zip(pairs, zShifts)):
+        planesB = planes[j]
+        for z, outline in planes[i].items():
+            other = planesB.get(round(z + shift, 6))
+            if other is not None:
+                pairIndex.append(k)
+                outlinesA.append(outline)
+                outlinesB.append(other)
+    if not pairIndex:
+        return np.zeros(len(pairs))
+    areas = shapely.area(shapely.intersection(
+        np.array(outlinesA, dtype=object), np.array(outlinesB, dtype=object)))
+    return np.bincount(pairIndex, weights=areas, minlength=len(pairs))
+
+
+def construct_overlap_graph(
+        currentFOV: int, cellsByFOV: Dict[int, List[SpatialFeature]],
+        fovExtents: Dict[int, Tuple[float, float, float, float]],
+        zStep: float, overlapThreshold: float = 0.5, maxZShift: int = 4,
+        minSeamPairs: int = 10) -> Tuple[nx.Graph, pandas.DataFrame]:
+    """Build the overlap graph for the cells of one fov.
+
+    Two cells are linked when the volume they share is at least
+    overlapThreshold of the smaller cell's volume (per-plane areas summed
+    over z). Smaller overlaps are slivers where the outlines of
+    neighbouring cells touch, and linking them chains whole seams into one
+    component.
+
+    Neighbouring fovs can disagree in z by a whole number of planes (a
+    tilted coverslip under per-fov focus). Cells of another fov are
+    therefore compared after shifting them by that fov's seam offset: the
+    median z difference of the clear duplicates, the pairs whose z
+    projections overlap by at least overlapThreshold and whose best overlap
+    within +-maxZShift planes passes it too. With fewer than minSeamPairs
+    duplicates the shift is 0.
+
     Args:
-        graph: An undirected graph, in which each node is a cell and each
-               edge connects overlapping cells. nodes are expected to have
-               the following attributes: originalFOV, assignedFOV
+        currentFOV: the fov whose cells are added
+        cellsByFOV: the cells of currentFOV and of every fov whose image
+            overlaps it
+        fovExtents: the global (xmin, ymin, xmax, ymax) of each fov's image
+        zStep: the spacing of the z planes, in microns
     Returns:
-        A pandas dataframe containing the feature ID of all cells after removing
-        all instances of overlap. There are columns for cell_id, originalFOV,
-        and assignedFOV
+        the graph, whose nodes carry originalFOV, assignedFOV (the fov
+        whose image centre is nearest) and edgeDistance (distance from the
+        cell's bounding-box centre to its own image edge), and a table of
+        the seam offsets to each neighbouring fov (z_offset_um is the z of
+        the neighbour's copy minus this fov's copy, NaN if not measured)
     """
-    connectedComponents = list(nx.connected_components(graph))
-    cleanedCells = []
-    connectedComponents = [list(x) for x in connectedComponents]
-    for component in connectedComponents:
-        if len(component) == 1:
-            originalFOV = graph.nodes[component[0]]['originalFOV']
-            assignedFOV = graph.nodes[component[0]]['assignedFOV']
-            cleanedCells.append([component[0], originalFOV, assignedFOV])
-        if len(component) > 1:
-            sg = nx.subgraph(graph, component)
-            verts = set(nx.articulation_points(sg))
-            if len(verts) > 0:
-                sg = nx.subgraph(graph,
-                                 [x for x in component if x not in verts])
-            keptComponents = _remove_max_degree_nodes(sg)
-            cellIDs = []
-            originalFOVs = []
-            assignedFOVs = []
-            for c in keptComponents:
-                cellIDs.append(c)
-                originalFOVs.append(graph.nodes[c]['originalFOV'])
-                assignedFOVs.append(graph.nodes[c]['assignedFOV'])
-            listOfLists = list(zip(cellIDs, originalFOVs, assignedFOVs))
-            listOfLists = [list(x) for x in listOfLists]
-            cleanedCells.extend(listOfLists)
-    cleanedCellsDF = pandas.DataFrame(cleanedCells,
-                                      columns=['cell_id', 'originalFOV',
-                                               'assignedFOV'])
-    return cleanedCellsDF
+    fovOfCell, cells = [], []
+    for fov, fovCells in cellsByFOV.items():
+        fovOfCell += [fov] * len(fovCells)
+        cells += fovCells
+    fovOfCell = np.array(fovOfCell)
+    planes = [_cell_planes(c) for c in cells]
+    areaSum = np.array([sum(o.area for o in p.values()) for p in planes])
+    zCentre = np.array([sum(z * o.area for z, o in p.items()) / a
+                        if a > 0 else np.nan
+                        for p, a in zip(planes, areaSum)])
+    bounds = np.array([c.get_bounding_box() for c in cells]).reshape(-1, 4)
+    centres = (bounds[:, :2] + bounds[:, 2:]) / 2
+    extents = np.array([fovExtents[f] for f in fovOfCell]).reshape(-1, 4)
+    edgeDistance = np.min(np.hstack([centres - extents[:, :2],
+                                     extents[:, 2:] - centres]), axis=1)
+    fovList = list(cellsByFOV)
+    fovCentres = np.array([[(fovExtents[f][0] + fovExtents[f][2]) / 2,
+                            (fovExtents[f][1] + fovExtents[f][3]) / 2]
+                           for f in fovList])
+    assignedFOV = np.array(fovList)[np.argmin(
+        ((centres[:, None, :] - fovCentres[None, :, :]) ** 2).sum(axis=2),
+        axis=1)] if len(cells) else np.array([], dtype=int)
+
+    own = np.nonzero(fovOfCell == currentFOV)[0]
+    tree = shapely.STRtree(shapely.box(*bounds.T))
+    qi, qj = tree.query(shapely.box(*bounds[own].T), predicate='intersects')
+    i, j = own[qi], qj
+    keep = (i != j) & ((fovOfCell[j] != currentFOV) | (i < j))
+    pairs = np.stack([i[keep], j[keep]], axis=1)
+    smaller = np.minimum(areaSum[pairs[:, 0]], areaSum[pairs[:, 1]])
+    neighbourFOV = fovOfCell[pairs[:, 1]]
+
+    # z projections, only for the cells in cross-fov pairs
+    projections = np.full(len(cells), None, dtype=object)
+    crossCells = np.unique(pairs[neighbourFOV != currentFOV])
+    projections[crossCells] = [unary_union(list(planes[k].values()))
+                               for k in crossCells]
+    seamRows = []
+    zShift = np.zeros(len(pairs))
+    for fov in fovList:
+        if fov == currentFOV:
+            continue
+        sel = np.nonzero(neighbourFOV == fov)[0]
+        offset, nPairs = np.nan, 0
+        if len(sel):
+            a, b = pairs[sel, 0], pairs[sel, 1]
+            projOverlap = shapely.area(shapely.intersection(
+                projections[a], projections[b])) / np.minimum(
+                shapely.area(projections[a]), shapely.area(projections[b]))
+            candidates = sel[projOverlap >= overlapThreshold]
+            shifts = np.arange(-maxZShift, maxZShift + 1)
+            overlaps = np.stack([_plane_overlaps(
+                planes, pairs[candidates],
+                np.full(len(candidates), s * zStep)) for s in shifts], axis=1) \
+                if len(candidates) else np.zeros((0, len(shifts)))
+            duplicates = candidates[
+                overlaps.max(axis=1, initial=0) / smaller[candidates]
+                >= overlapThreshold] if len(candidates) else candidates
+            nPairs = len(duplicates)
+            if nPairs >= minSeamPairs:
+                offset = float(np.median(zCentre[pairs[duplicates, 1]]
+                                         - zCentre[pairs[duplicates, 0]]))
+                zShift[sel] = np.round(offset / zStep) * zStep
+        seamRows.append({'fov': currentFOV, 'neighbor_fov': fov,
+                         'n_pairs': nPairs, 'z_offset_um': offset})
+
+    overlapFraction = _plane_overlaps(planes, pairs, zShift) / smaller
+    linked = overlapFraction >= overlapThreshold
+
+    graph = nx.Graph()
+    nodes = set(own) | set(pairs[linked].ravel())
+    for k in sorted(nodes):
+        graph.add_node(cells[k].get_feature_id(),
+                       originalFOV=int(fovOfCell[k]),
+                       assignedFOV=int(assignedFOV[k]),
+                       edgeDistance=float(edgeDistance[k]))
+    for (a, b), fraction in zip(pairs[linked], overlapFraction[linked]):
+        graph.add_edge(cells[a].get_feature_id(), cells[b].get_feature_id(),
+                       overlap=float(fraction))
+    seams = pandas.DataFrame(seamRows, columns=[
+        'fov', 'neighbor_fov', 'n_pairs', 'z_offset_um'])
+    return graph, seams
+
+
+def remove_overlapping_cells(graph: nx.Graph) -> pandas.DataFrame:
+    """Keep one cell wherever cells overlap.
+
+    Cells are visited from the farthest from their own image edge to the
+    nearest, and a cell is kept unless it is linked to a cell already
+    kept. Near an image edge a cell is often cut by the border, while the
+    neighbouring fov sees it whole, so the copy away from its edge wins.
+    Ties keep graph order.
+
+    Args:
+        graph: an undirected graph from construct_overlap_graph, with the
+            originalFOV, assignedFOV and edgeDistance node attributes
+    Returns:
+        A pandas dataframe with the cell_id, originalFOV and assignedFOV of
+        every kept cell, in graph order
+    """
+    nodes = list(graph.nodes())
+    missing = [n for n in nodes if 'edgeDistance' not in graph.nodes[n]]
+    if missing:
+        raise ValueError(
+            '%d cells have no edgeDistance; the graph was built by an older '
+            'CleanCellBoundaries, rerun it' % len(missing))
+    distance = np.array([graph.nodes[n]['edgeDistance'] for n in nodes])
+    blocked = set()
+    kept = set()
+    for k in np.argsort(-distance, kind='stable'):
+        node = nodes[k]
+        if node in blocked:
+            continue
+        kept.add(node)
+        blocked.update(graph.neighbors(node))
+    return pandas.DataFrame(
+        [[n, graph.nodes[n]['originalFOV'], graph.nodes[n]['assignedFOV']]
+         for n in nodes if n in kept],
+        columns=['cell_id', 'originalFOV', 'assignedFOV'])
+
+
+def solve_fov_z_offsets(seams: pandas.DataFrame,
+                        fovs: List[int]) -> pandas.DataFrame:
+    """Per-fov z offsets that best explain the measured seam offsets.
+
+    A seam row says that a cell seen by fov and neighbor_fov lies
+    z_offset_um higher in neighbor_fov's planes. With the common z defined
+    as local z + offset, offset[fov] - offset[neighbor_fov] = z_offset_um.
+    Rows are weighted by the square root of their duplicate count, and the
+    offsets of each connected group of fovs average to 0. A fov with no
+    measured seam gets 0.
+
+    Returns:
+        a dataframe with the columns fov and z_offset_um
+    """
+    fovs = list(fovs)
+    index = {f: k for k, f in enumerate(fovs)}
+    measured = seams.dropna(subset=['z_offset_um'])
+    measured = measured[measured.fov.isin(index)
+                        & measured.neighbor_fov.isin(index)]
+    graph = nx.Graph()
+    graph.add_nodes_from(fovs)
+    graph.add_edges_from(zip(measured.fov, measured.neighbor_fov))
+    rows, values = [], []
+    for f, g, offset, n in zip(measured.fov, measured.neighbor_fov,
+                               measured.z_offset_um, measured.n_pairs):
+        row = np.zeros(len(fovs))
+        w = np.sqrt(n)
+        row[index[f]], row[index[g]] = w, -w
+        rows.append(row)
+        values.append(w * offset)
+    for component in nx.connected_components(graph):
+        row = np.zeros(len(fovs))
+        row[[index[f] for f in component]] = 1
+        rows.append(row)
+        values.append(0)
+    solution = np.linalg.lstsq(np.array(rows), np.array(values), rcond=None)[0]
+    return pandas.DataFrame({'fov': fovs, 'z_offset_um': solution})

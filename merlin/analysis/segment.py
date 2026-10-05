@@ -10,7 +10,6 @@ from skimage import transform
 from skimage import color
 from skimage import util
 from skimage import io
-import rtree
 from shapely import geometry
 from typing import List, Dict, Tuple
 from scipy.spatial import cKDTree
@@ -852,15 +851,33 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
 
 
 class CleanCellBoundaries(analysistask.ParallelAnalysisTask):
-    '''
-    A task to construct a network graph where each cell is a node, and overlaps
-    are represented by edges. This graph is then refined to assign cells to the
-    fov they are closest to (in terms of centroid). This graph is then refined
-    to eliminate overlapping cells to leave a single cell occupying a given
-    position.
-    '''
+    """
+    Builds, for each fov, the graph of its cells and the cells they overlap
+    in the same or neighbouring fovs (`spatialfeature.construct_overlap_graph`).
+    Two cells are linked only when they share at least overlap_threshold of
+    the smaller cell's volume, after correcting the z offset between the
+    two fovs. Each fov also saves the z offset it measured to each
+    neighbour, which CombineCleanedBoundaries turns into per-fov offsets.
+
+    Parameters (defaults from LT066, 33 fovs around fov 1078):
+        overlap_threshold (0.5): overlap / smaller cell volume. Cross-fov
+            pairs peak near 0 (slivers where outlines touch) and near 0.9
+            (the same cell seen twice), with the trough at 0.5.
+        max_z_shift_planes (4): the largest seam z offset searched, in
+            planes. LT066 fovs disagree by 3 planes (1.57 um) across x
+            seams and 1 plane across y seams.
+        min_seam_pairs (10): the fewest duplicates needed to measure a
+            seam's z offset; below that the seam is not shifted.
+    """
     def __init__(self, dataSet, parameters=None, analysisName=None):
         super().__init__(dataSet, parameters, analysisName)
+
+        if 'overlap_threshold' not in self.parameters:
+            self.parameters['overlap_threshold'] = 0.5
+        if 'max_z_shift_planes' not in self.parameters:
+            self.parameters['max_z_shift_planes'] = 4
+        if 'min_seam_pairs' not in self.parameters:
+            self.parameters['min_seam_pairs'] = 10
 
         self.segmentTask = self.dataSet.load_analysis_task(
             self.parameters['segment_task'])
@@ -884,6 +901,17 @@ class CleanCellBoundaries(analysistask.ParallelAnalysisTask):
         return self.dataSet.load_graph_from_pickle(
             'cleaned_cells', self, fragmentIndex)
 
+    def get_seam_offsets(self, fragmentIndex) -> pandas.DataFrame:
+        """The z offsets this fov measured to its neighbours (see
+        `spatialfeature.construct_overlap_graph`)."""
+        return self.dataSet.load_dataframe_from_csv(
+            'seam_z_offsets', self, resultIndex=fragmentIndex)
+
+    def _z_step(self) -> float:
+        zPositions = np.unique(self.dataSet.get_z_positions())
+        return float(np.median(np.diff(zPositions))) \
+            if len(zPositions) > 1 else 1.0
+
     def _run_analysis(self, fragmentIndex) -> None:
         allFOVs = np.array(self.dataSet.get_fovs())
         fovBoxes = self.alignTask.get_fov_boxes()
@@ -891,37 +919,35 @@ class CleanCellBoundaries(analysistask.ParallelAnalysisTask):
                                    fovBoxes[fragmentIndex].intersects(x)])
         intersectingFOVs = list(allFOVs[np.array(fovIntersections)])
 
-        spatialTree = rtree.index.Index()
-        count = 0
-        idToNum = dict()
-        for currentFOV in intersectingFOVs:
-            cells = self.segmentTask.get_feature_database()\
-                .read_features(currentFOV)
-            cells = spatialfeature.simple_clean_cells(cells)
+        featureDB = self.segmentTask.get_feature_database()
+        cellsByFOV = {fov: spatialfeature.simple_clean_cells(
+            featureDB.read_features(fov)) for fov in intersectingFOVs}
+        fovExtents = {fov: fovBoxes[i].bounds
+                      for i, fov in zip(fovIntersections, intersectingFOVs)}
 
-            spatialTree, count, idToNum = spatialfeature.construct_tree(
-                cells, spatialTree, count, idToNum)
+        graph, seams = spatialfeature.construct_overlap_graph(
+            fragmentIndex, cellsByFOV, fovExtents, self._z_step(),
+            overlapThreshold=self.parameters['overlap_threshold'],
+            maxZShift=self.parameters['max_z_shift_planes'],
+            minSeamPairs=self.parameters['min_seam_pairs'])
 
-        graph = nx.Graph()
-        cells = self.segmentTask.get_feature_database()\
-            .read_features(fragmentIndex)
-        cells = spatialfeature.simple_clean_cells(cells)
-        graph = spatialfeature.construct_graph(graph, cells,
-                                               spatialTree, fragmentIndex,
-                                               allFOVs, fovBoxes)
-
+        self.dataSet.save_dataframe_to_csv(
+            seams, 'seam_z_offsets', self, resultIndex=fragmentIndex,
+            index=False)
         self.dataSet.save_graph_as_pickle(
             graph, 'cleaned_cells', self, fragmentIndex)
 
 
 class CombineCleanedBoundaries(analysistask.AnalysisTask):
     """
-    A task to construct a network graph where each cell is a node, and overlaps
-    are represented by edges. This graph is then refined to assign cells to the
-    fov they are closest to (in terms of centroid). This graph is then refined
-    to eliminate overlapping cells to leave a single cell occupying a given
-    position.
+    Joins the per-fov overlap graphs of CleanCellBoundaries and keeps one
+    cell wherever cells overlap, preferring the cell farthest from its own
+    image edge (`spatialfeature.remove_overlapping_cells`).
 
+    Also solves the per-fov z offsets from the seam offsets
+    (`spatialfeature.solve_fov_z_offsets`) and saves them as
+    fov_z_offsets.csv: local z + z_offset_um puts every fov in one common
+    z frame.
     """
     def __init__(self, dataSet, parameters=None, analysisName=None):
         super().__init__(dataSet, parameters, analysisName)
@@ -945,19 +971,31 @@ class CombineCleanedBoundaries(analysistask.AnalysisTask):
         return self.dataSet.load_dataframe_from_csv(
             'all_cleaned_cells', analysisTask=self.analysisName, **kwargs)
 
+    def get_fov_z_offsets(self) -> pandas.Series:
+        """The z offset of each fov in microns, indexed by fov."""
+        return self.dataSet.load_dataframe_from_csv(
+            'fov_z_offsets', analysisTask=self.analysisName,
+            index_col='fov')['z_offset_um']
+
     def _run_analysis(self):
         allFOVs = self.dataSet.get_fovs()
         graph = nx.Graph()
+        seams = []
         for currentFOV in allFOVs:
             subGraph = self.cleaningTask.return_exported_data(currentFOV)
             # update() adds in place, like compose() but without copying
             # the whole graph for every fov.
             graph.update(subGraph)
+            seams.append(self.cleaningTask.get_seam_offsets(currentFOV))
 
         cleanedCells = spatialfeature.remove_overlapping_cells(graph)
-
         self.dataSet.save_dataframe_to_csv(cleanedCells, 'all_cleaned_cells',
                                            analysisTask=self)
+
+        offsets = spatialfeature.solve_fov_z_offsets(
+            pandas.concat(seams, ignore_index=True), allFOVs)
+        self.dataSet.save_dataframe_to_csv(offsets, 'fov_z_offsets',
+                                           analysisTask=self, index=False)
 
 
 class RefineCellDatabases(FeatureSavingAnalysisTask):

@@ -323,50 +323,128 @@ def test_find_overlapping_cells():
             and (p2 not in t5) and (p3 not in t5) and (p4 not in t5))
 
 
-def test_remove_overlapping_cells():
-    allFOVs = [0,1]
-    fovBoxes = [geometry.box(-1, -1, 2, 2), geometry.box(2, 2, 6, 6)]
-    currentFOV = 0
-    cells = spatialfeature.simple_clean_cells(allCells)
-
-    spatialIndex, _, _ = spatialfeature.construct_tree(cells)
-
-    G = nx.Graph()
-    G = spatialfeature.construct_graph(G, cells, spatialIndex,
-                                       currentFOV, allFOVs, fovBoxes)
-
-    cleanedCellsDF = spatialfeature.remove_overlapping_cells(G)
-    keptCells = cleanedCellsDF['cell_id'].values.tolist()
-
-    assert G.nodes[p5.get_feature_id()]['originalFOV'] == 0
-    assert G.nodes[p5.get_feature_id()]['assignedFOV'] == 1
-    assert G.nodes[p1.get_feature_id()]['originalFOV'] == 0
-    assert G.nodes[p1.get_feature_id()]['assignedFOV'] == 0
-    assert p1.get_feature_id() in keptCells
-    assert p4.get_feature_id() in keptCells
-    assert p5.get_feature_id() in keptCells
-    assert p2.get_feature_id() not in keptCells
-    assert p3.get_feature_id() not in keptCells
+def _box_cell(fov, x, y, zs, halfWidth=0.6):
+    """A square cell centred on (x, y), present in the z planes zs of a
+    0..5 stack with 1 um spacing."""
+    square = geometry.box(x - halfWidth, y - halfWidth,
+                          x + halfWidth, y + halfWidth)
+    return spatialfeature.SpatialFeature(
+        [[square] if z in zs else [] for z in range(6)], fov,
+        zCoordinates=np.arange(6, dtype=float))
 
 
-def _remove_max_degree_nodes_naive(graph):
-    """The original algorithm: recompute every degree after each removal."""
-    nodes = list(graph.nodes())
-    rank = {n: i for i, n in enumerate(nodes)}
-    alive = list(nodes)
-    while True:
-        degree = dict(graph.subgraph(alive).degree())
-        best = max(alive, key=lambda n: (degree[n], -rank[n]))
-        if degree[best] == 0:
-            return alive
-        alive = [n for n in alive if n != best]
+def _two_fov_seam():
+    """Fov 0's image spans x 0..10 and fov 1's x 8..18. Three cells in the
+    band are seen by both, and fov 1 sees them 2 planes higher. A fourth
+    cell of fov 0 grazes the first duplicate by 0.05 um."""
+    extents = {0: (0, 0, 10, 10), 1: (8, 0, 18, 10)}
+    copies0 = [_box_cell(0, x, y, {1, 2, 3})
+               for x, y in ((8.75, 3), (8.75, 5), (9.4, 7))]
+    copies1 = [_box_cell(1, x, y, {3, 4, 5})
+               for x, y in ((8.75, 3), (8.75, 5), (9.4, 7))]
+    graze = spatialfeature.SpatialFeature(
+        [[geometry.box(5, 2.4, 8.2, 3.6)] if z in {1, 2, 3} else []
+         for z in range(6)], 0, zCoordinates=np.arange(6, dtype=float))
+    return extents, {0: copies0 + [graze], 1: copies1}, copies0, copies1, \
+        graze
 
 
-def test_remove_max_degree_nodes_matches_naive():
-    for seed in range(200):
-        graph = nx.gnp_random_graph(25, 0.05 + 0.002 * seed, seed=seed)
-        assert spatialfeature._remove_max_degree_nodes(graph) == \
-            _remove_max_degree_nodes_naive(graph)
+def _seam_graph():
+    extents, cells, copies0, copies1, graze = _two_fov_seam()
+    graph = nx.Graph()
+    seams = []
+    for fov in (0, 1):
+        g, s = spatialfeature.construct_overlap_graph(
+            fov, cells, extents, zStep=1.0, minSeamPairs=2)
+        graph.update(g)
+        seams.append(s)
+    return graph, seams, copies0, copies1, graze
+
+
+def test_plane_overlaps_with_z_shift():
+    a = _box_cell(0, 0, 0, {1, 2, 3}, halfWidth=0.5)
+    b = _box_cell(1, 0, 0, {3, 4, 5}, halfWidth=0.5)
+    planes = [spatialfeature._cell_planes(c, 1.0) for c in (a, b)]
+    pairs = np.array([[0, 1], [0, 1]])
+    overlaps = spatialfeature._plane_overlaps(planes, pairs,
+                                              np.array([0, 2]))
+    assert overlaps == pytest.approx([1.0, 3.0])
+
+
+def test_construct_overlap_graph_links_duplicates_after_z_shift():
+    graph, seams, copies0, copies1, graze = _seam_graph()
+    for a, b in zip(copies0, copies1):
+        assert graph.has_edge(a.get_feature_id(), b.get_feature_id())
+    # a 0.05 um sliver is not a conflict
+    assert graph.degree(graze.get_feature_id()) == 0
+    assert graph.number_of_edges() == 3
+
+    assert seams[0].loc[0, 'neighbor_fov'] == 1
+    assert seams[0].loc[0, 'n_pairs'] == 3
+    assert seams[0].loc[0, 'z_offset_um'] == pytest.approx(2.0)
+    assert seams[1].loc[0, 'z_offset_um'] == pytest.approx(-2.0)
+
+    node = graph.nodes[copies0[0].get_feature_id()]
+    assert node['originalFOV'] == 0
+    assert node['edgeDistance'] == pytest.approx(1.25)
+    assert graph.nodes[copies1[0].get_feature_id()]['edgeDistance'] == \
+        pytest.approx(0.75)
+
+
+def test_construct_overlap_graph_without_z_shift_misses_duplicates():
+    extents, cells, _, _, _ = _two_fov_seam()
+    graph, seams = spatialfeature.construct_overlap_graph(
+        0, cells, extents, zStep=1.0, minSeamPairs=4)
+    # 3 duplicates are too few to measure the seam, so it is not shifted
+    # and the copies share only 1 of their 3 planes
+    assert np.isnan(seams.loc[0, 'z_offset_um'])
+    assert graph.number_of_edges() == 0
+
+
+def test_remove_overlapping_cells_keeps_copy_away_from_edge():
+    graph, _, copies0, copies1, graze = _seam_graph()
+    kept = set(spatialfeature.remove_overlapping_cells(graph)['cell_id'])
+    assert kept == {copies0[0].get_feature_id(), copies0[1].get_feature_id(),
+                    copies1[2].get_feature_id(), graze.get_feature_id()}
+
+
+def test_remove_overlapping_cells_rejects_old_graphs():
+    graph = nx.Graph()
+    graph.add_node(1, originalFOV=0, assignedFOV=0)
+    with pytest.raises(ValueError, match='rerun'):
+        spatialfeature.remove_overlapping_cells(graph)
+
+
+def test_solve_fov_z_offsets():
+    _, seams, _, _, _ = _seam_graph()
+    import pandas
+    seams = pandas.concat(seams + [pandas.DataFrame(
+        {'fov': [1], 'neighbor_fov': [2], 'n_pairs': [5],
+         'z_offset_um': [0.5]})], ignore_index=True)
+    offsets = spatialfeature.solve_fov_z_offsets(seams, [0, 1, 2, 3])
+    offsets = offsets.set_index('fov')['z_offset_um']
+    # offset[fov] - offset[neighbor] = z_offset_um, mean 0 per group
+    assert offsets[0] - offsets[1] == pytest.approx(2.0)
+    assert offsets[1] - offsets[2] == pytest.approx(0.5)
+    assert offsets[[0, 1, 2]].sum() == pytest.approx(0.0, abs=1e-9)
+    assert offsets[3] == 0
+
+
+def test_solve_fov_z_offsets_fills_unmeasured_seams_from_a_plane():
+    import pandas
+    # three fovs in a row; only the first seam has enough duplicates
+    seams = pandas.DataFrame({'fov': [0, 1, 1], 'neighbor_fov': [1, 2, 0],
+                              'n_pairs': [100, 3, 100],
+                              'z_offset_um': [1.5, np.nan, -1.5]})
+    centres = {0: (0, 0), 1: (10, 0), 2: (20, 0)}
+    offsets = spatialfeature.solve_fov_z_offsets(
+        seams, [0, 1, 2], centres).set_index('fov')['z_offset_um']
+    assert offsets[0] - offsets[1] == pytest.approx(1.5)
+    assert offsets[1] - offsets[2] == pytest.approx(1.5)
+    # without centres fov 2 is on its own
+    offsets = spatialfeature.solve_fov_z_offsets(
+        seams, [0, 1, 2]).set_index('fov')['z_offset_um']
+    assert offsets[2] == 0
 
 
 def _synthetic_label_stack():

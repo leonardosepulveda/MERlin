@@ -20,6 +20,16 @@ def test_simple_global_alignment_fov_coordinates_to_global(simple_merfish_data):
     assert global1010[1] == pytest.approx(fov0Offset[1] + 10 * micronsPerPixel)
 
 
+def test_fov_global_extent_covers_the_whole_image(simple_merfish_data):
+    task = globalalign.SimpleGlobalAlignment(simple_merfish_data, parameters={})
+    micronsPerPixel = simple_merfish_data.get_microns_per_pixel()
+    width, height = simple_merfish_data.get_image_dimensions()
+    x0, y0, x1, y1 = task.fov_global_extent(0)
+    assert x1 - x0 == pytest.approx(width * micronsPerPixel)
+    assert y1 - y0 == pytest.approx(height * micronsPerPixel)
+    assert task.get_fov_boxes()[0].bounds == pytest.approx((x0, y0, x1, y1))
+
+
 def test_least_squares_global_alignment_runs_and_persists(simple_merfish_data):
     # test_positions.csv places the 2 fovs 195um apart in y, far more than
     # the tiny 128x128 synthetic frames are wide, so they do not overlap at

@@ -134,6 +134,43 @@ major version).
   at 100 GB.
 - ExportBarcodes no longer runs out of memory: it reads and writes one
   fov at a time.
+- Fov boxes (`GlobalAlignment.fov_global_extent`, `get_fov_boxes`) cover
+  the whole image. They assumed 2048 px images, so on 2304 px images
+  (LT066) they were 182.9 µm wide instead of 205.7 µm, anchored at pixel
+  0, and missed most of the image-overlap band.
+- Overlap removal no longer loses cells at fov seams (**breaking**: rerun
+  CleanCellBoundaries before CombineCleanedBoundaries; graphs from older
+  runs are rejected).
+  - The old rule linked any two cells that overlapped at all, and slivers
+    where outlines touch chained each seam into one component.
+  - Cells are now linked only when they share at least
+    `overlap_threshold` (0.5) of the smaller cell's volume.
+  - Where cells conflict, the one farthest from its own image edge is
+    kept, because a cell near the edge is often cut by the border.
+  - On the 13 LT066 fovs whose 8 neighbours were all in a 33-fov test
+    block, it keeps 14,510 cells instead of 12,756.
+    - In the overlap bands it keeps 3,316 cells instead of 2,700.
+    - Away from seams it keeps 99.8% of cells instead of 91.8%.
+    - Cell density is now flat across the seams.
+
+### Added
+- Per-fov z offsets. Neighbouring fovs can disagree in z; on LT066 the
+  same cell sits 1.57 µm higher in the right-hand fov and 0.54 µm higher
+  in the upper fov.
+  - CleanCellBoundaries measures the offset to each neighbour from
+    duplicated cells (`max_z_shift_planes`, `min_seam_pairs`). It uses
+    that offset when comparing their cells.
+  - CombineCleanedBoundaries solves per-fov offsets into
+    `fov_z_offsets.csv` (`get_fov_z_offsets()`): local z + offset is a
+    common z.
+    - Seams with too few cells to measure are filled from a plane fitted
+      to the measured ones.
+    - On the LT066 block, the solution fits the measured seams to
+      0.24 µm rms.
+  - PartitionBarcodes moves neighbouring fovs' barcodes into the current
+    fov's planes before assigning them to cells (`apply_fov_z_offsets`,
+    default on).
+  - Exported barcodes and cell boundaries still use each fov's own z.
 
 ### Changed
 - Verification figures are drawn by a separate `<Task>Figures` snakemake

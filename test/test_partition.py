@@ -48,3 +48,19 @@ def test_z_shift_is_zero_without_offsets(simple_merfish_data, monkeypatch,
     shift = task._z_shift_to_fov(_FakeAssignmentTask(combineName), 0,
                                  np.array([0, 1]))
     assert shift == pytest.approx([0, 0])
+
+
+def test_z_shift_is_zero_for_an_older_combine_run(simple_merfish_data,
+                                                 monkeypatch):
+    task = _partition(simple_merfish_data, monkeypatch)
+
+    class _OldCombineTask:
+        def get_fov_z_offsets(self):
+            raise FileNotFoundError
+
+    monkeypatch.setattr(simple_merfish_data, 'load_analysis_task',
+                        lambda name: _OldCombineTask())
+    with pytest.warns(UserWarning, match='fov_z_offsets'):
+        shift = task._z_shift_to_fov(_FakeAssignmentTask('Combine'), 0,
+                                     np.array([0, 1]))
+    assert shift == pytest.approx([0, 0])

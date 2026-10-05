@@ -1,3 +1,4 @@
+import warnings
 import pandas
 import numpy as np
 
@@ -66,8 +67,15 @@ class PartitionBarcodes(analysistask.ParallelAnalysisTask):
         combineName = assignmentTask.parameters.get('combine_cleaning_task')
         if not self.parameters['apply_fov_z_offsets'] or combineName is None:
             return np.zeros(len(barcodeFOVs))
-        offsets = self.dataSet.load_analysis_task(
-            combineName).get_fov_z_offsets()
+        try:
+            offsets = self.dataSet.load_analysis_task(
+                combineName).get_fov_z_offsets()
+        except FileNotFoundError:
+            warnings.warn(
+                '{0} has no fov_z_offsets (it ran before they existed); '
+                'barcodes keep their own fov\'s z. Rerun CleanCellBoundaries '
+                'and {0} to apply them.'.format(combineName))
+            return np.zeros(len(barcodeFOVs))
         zPositions = np.unique(self.dataSet.get_z_positions())
         zStep = float(np.median(np.diff(zPositions))) \
             if len(zPositions) > 1 else 1.0

@@ -170,6 +170,8 @@ major version).
   - PartitionBarcodes moves neighbouring fovs' barcodes into the current
     fov's planes before assigning them to cells (`apply_fov_z_offsets`,
     default on).
+    - With a CombineCleanedBoundaries output from before this change, it
+      warns and leaves z as it is.
   - Exported barcodes and cell boundaries still use each fov's own z.
 
 ### Changed

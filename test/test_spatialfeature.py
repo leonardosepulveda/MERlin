@@ -430,6 +430,23 @@ def test_solve_fov_z_offsets():
     assert offsets[3] == 0
 
 
+def test_solve_fov_z_offsets_fills_unmeasured_seams_from_a_plane():
+    import pandas
+    # three fovs in a row; only the first seam has enough duplicates
+    seams = pandas.DataFrame({'fov': [0, 1, 1], 'neighbor_fov': [1, 2, 0],
+                              'n_pairs': [100, 3, 100],
+                              'z_offset_um': [1.5, np.nan, -1.5]})
+    centres = {0: (0, 0), 1: (10, 0), 2: (20, 0)}
+    offsets = spatialfeature.solve_fov_z_offsets(
+        seams, [0, 1, 2], centres).set_index('fov')['z_offset_um']
+    assert offsets[0] - offsets[1] == pytest.approx(1.5)
+    assert offsets[1] - offsets[2] == pytest.approx(1.5)
+    # without centres fov 2 is on its own
+    offsets = spatialfeature.solve_fov_z_offsets(
+        seams, [0, 1, 2]).set_index('fov')['z_offset_um']
+    assert offsets[2] == 0
+
+
 def _synthetic_label_stack():
     labels = np.zeros((4, 60, 70), dtype=np.uint16)
     labels[0:3, 10:25, 12:30] = 1   # a box spanning three planes

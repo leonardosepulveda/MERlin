@@ -945,7 +945,8 @@ class CombineCleanedBoundaries(analysistask.AnalysisTask):
     image edge (`spatialfeature.remove_overlapping_cells`).
 
     Also solves the per-fov z offsets from the seam offsets
-    (`spatialfeature.solve_fov_z_offsets`) and saves them as
+    (`spatialfeature.solve_fov_z_offsets`, unmeasured seams filled from a
+    plane fitted to the measured ones) and saves them as
     fov_z_offsets.csv: local z + z_offset_um puts every fov in one common
     z frame.
     """
@@ -992,8 +993,11 @@ class CombineCleanedBoundaries(analysistask.AnalysisTask):
         self.dataSet.save_dataframe_to_csv(cleanedCells, 'all_cleaned_cells',
                                            analysisTask=self)
 
+        fovBoxes = self.cleaningTask.alignTask.get_fov_boxes()
+        fovCentres = {fov: (box.centroid.x, box.centroid.y)
+                      for fov, box in zip(allFOVs, fovBoxes)}
         offsets = spatialfeature.solve_fov_z_offsets(
-            pandas.concat(seams, ignore_index=True), allFOVs)
+            pandas.concat(seams, ignore_index=True), allFOVs, fovCentres)
         self.dataSet.save_dataframe_to_csv(offsets, 'fov_z_offsets',
                                            analysisTask=self, index=False)
 

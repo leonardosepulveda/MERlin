@@ -1162,33 +1162,51 @@ def remove_overlapping_cells(graph: nx.Graph) -> pandas.DataFrame:
         columns=['cell_id', 'originalFOV', 'assignedFOV'])
 
 
-def solve_fov_z_offsets(seams: pandas.DataFrame,
-                        fovs: List[int]) -> pandas.DataFrame:
+def solve_fov_z_offsets(
+        seams: pandas.DataFrame, fovs: List[int],
+        fovCentres: Dict[int, Tuple[float, float]] = None) -> pandas.DataFrame:
     """Per-fov z offsets that best explain the measured seam offsets.
 
     A seam row says that a cell seen by fov and neighbor_fov lies
     z_offset_um higher in neighbor_fov's planes. With the common z defined
     as local z + offset, offset[fov] - offset[neighbor_fov] = z_offset_um.
-    Rows are weighted by the square root of their duplicate count, and the
-    offsets of each connected group of fovs average to 0. A fov with no
-    measured seam gets 0.
+    Rows are weighted by the square root of their duplicate count.
+
+    Seams with too few cells to measure (z_offset_um NaN) would leave fovs
+    in separate groups with unrelated offsets. Given fovCentres, they are
+    filled from a plane fitted to the measured seams (offset = a * dx +
+    b * dy between the fov centres, the signature of a tilted coverslip)
+    with weight 1. Each still-separate group averages to 0, so a fov with
+    no seam at all gets 0.
 
     Returns:
         a dataframe with the columns fov and z_offset_um
     """
     fovs = list(fovs)
     index = {f: k for k, f in enumerate(fovs)}
+    seams = seams[seams.fov.isin(index) & seams.neighbor_fov.isin(index)]
     measured = seams.dropna(subset=['z_offset_um'])
-    measured = measured[measured.fov.isin(index)
-                        & measured.neighbor_fov.isin(index)]
+    weights = np.sqrt(measured.n_pairs.values.astype(float))
+    equations = list(zip(measured.fov, measured.neighbor_fov,
+                         measured.z_offset_um, weights))
+    missing = seams[seams.z_offset_um.isna()]
+    if fovCentres is not None and len(measured) >= 2 and len(missing):
+        def displacement(table):
+            return np.array([np.subtract(fovCentres[g], fovCentres[f])
+                             for f, g in zip(table.fov, table.neighbor_fov)]
+                            ).reshape(-1, 2)
+        plane = np.linalg.lstsq(
+            displacement(measured) * weights[:, None],
+            measured.z_offset_um.values * weights, rcond=None)[0]
+        equations += [(f, g, offset, 1.0) for f, g, offset in zip(
+            missing.fov, missing.neighbor_fov, displacement(missing) @ plane)]
+
     graph = nx.Graph()
     graph.add_nodes_from(fovs)
-    graph.add_edges_from(zip(measured.fov, measured.neighbor_fov))
+    graph.add_edges_from((f, g) for f, g, _, _ in equations)
     rows, values = [], []
-    for f, g, offset, n in zip(measured.fov, measured.neighbor_fov,
-                               measured.z_offset_um, measured.n_pairs):
+    for f, g, offset, w in equations:
         row = np.zeros(len(fovs))
-        w = np.sqrt(n)
         row[index[f]], row[index[g]] = w, -w
         rows.append(row)
         values.append(w * offset)

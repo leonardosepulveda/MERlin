@@ -9,12 +9,20 @@ class PartitionBarcodes(analysistask.ParallelAnalysisTask):
     """
     An analysis task that assigns RNAs and sequential signals to cells
     based on the boundaries determined during the segment task.
+
+    A fov's cells are matched against the barcodes of every fov whose image
+    overlaps it. With apply_fov_z_offsets (default True) and an assignment
+    task that has a combine_cleaning_task, the z of a neighbouring fov's
+    barcodes is first moved into this fov's planes using the per-fov z
+    offsets of CombineCleanedBoundaries.
     """
 
     def __init__(self, dataSet, parameters=None, analysisName=None):
         super().__init__(dataSet, parameters, analysisName)
         if 'boundary_correction_buffer_size' not in self.parameters:
             self.parameters['boundary_correction_buffer_size'] = 0.5
+        if 'apply_fov_z_offsets' not in self.parameters:
+            self.parameters['apply_fov_z_offsets'] = True
 
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
@@ -50,6 +58,22 @@ class PartitionBarcodes(analysistask.ParallelAnalysisTask):
         return self.dataSet.load_dataframe_from_csv(
             'counts_per_cell', self.get_analysis_name(), fov, index_col=0)
 
+    def _z_shift_to_fov(self, assignmentTask, fov: int,
+                        barcodeFOVs: np.ndarray) -> np.ndarray:
+        """The shift, in planes, that moves each barcode's z into the planes
+        of *fov*: (offset of the barcode's fov - offset of *fov*) divided by
+        the plane spacing. Zeros when there are no offsets to apply."""
+        combineName = assignmentTask.parameters.get('combine_cleaning_task')
+        if not self.parameters['apply_fov_z_offsets'] or combineName is None:
+            return np.zeros(len(barcodeFOVs))
+        offsets = self.dataSet.load_analysis_task(
+            combineName).get_fov_z_offsets()
+        zPositions = np.unique(self.dataSet.get_z_positions())
+        zStep = float(np.median(np.diff(zPositions))) \
+            if len(zPositions) > 1 else 1.0
+        return (offsets.reindex(barcodeFOVs).fillna(0).values
+                - offsets.get(fov, 0.0)) / zStep
+
     def _run_analysis(self, fragmentIndex):
         if self.parameters['boundary_correction_buffer_size'] == 0:
             self._run_analysis_traditional(fragmentIndex)
@@ -81,6 +105,8 @@ class PartitionBarcodes(analysistask.ParallelAnalysisTask):
                     [currentFOVBarcodes, partialBC], axis = 0) # pandas > 2
 
         currentFOVBarcodes = currentFOVBarcodes.reset_index().copy(deep=True)
+        currentFOVBarcodes['z'] += self._z_shift_to_fov(
+            assignmentTask, fragmentIndex, currentFOVBarcodes['fov'].values)
 
         sDB = assignmentTask.get_feature_database()
         currentCells = sDB.read_features(fragmentIndex)
@@ -222,6 +248,8 @@ class PartitionBarcodes(analysistask.ParallelAnalysisTask):
                     [currentFOVBarcodes, partialBC], axis = 0) # pandas > 2
 
         currentFOVBarcodes = currentFOVBarcodes.reset_index().copy(deep=True)
+        currentFOVBarcodes['z'] += self._z_shift_to_fov(
+            assignmentTask, fragmentIndex, currentFOVBarcodes['fov'].values)
 
         sDB = assignmentTask.get_feature_database()
         currentCells = sDB.read_features(fragmentIndex)

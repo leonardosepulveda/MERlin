@@ -144,7 +144,10 @@ major version).
   Running a task with `merlin -t` alone no longer draws its figures.
 - `SegmentationBoundaryPlot.svg` boundaries are simplified to 0.5 µm and
   written with 0.1 µm precision, about 40x smaller.
-- ExportBarcodes writes `barcodes.parquet` instead of `barcodes.csv`
-  (**breaking** for anything that reads the csv). On LT066 (2.0 billion
-  barcodes), the csv would have been ~105 GB and taken ~7 h to write. The
-  parquet is ~37 GB and takes ~22 min to write.
+- ExportBarcodes writes `barcodes.parquet` instead of `barcodes.csv` by
+  default (**breaking** for anything that reads the csv). On LT066 (2.0
+  billion barcodes), the csv would have been ~105 GB and taken ~7 h to
+  write. The task now takes 29 min and writes a 35 GB parquet.
+  - Set `"format": "csv"` in its parameters to keep writing
+    `barcodes.csv`. That file is identical to before, and it is also
+    written one fov at a time.

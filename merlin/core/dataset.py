@@ -436,7 +436,8 @@ class DataSet(object):
     def save_dataframe_to_csv(
             self, dataframe: pandas.DataFrame, resultName: str,
             analysisTask: TaskOrName = None, resultIndex: int = None,
-            subdirectory: str = None, **kwargs) -> None:
+            subdirectory: str = None, append: bool = False,
+            **kwargs) -> None:
         """Save a pandas data frame to a csv file stored in this dataset.
 
         If a previous pandas data frame has been save with the same resultName,
@@ -453,12 +454,14 @@ class DataSet(object):
             subdirectory: subdirectory of the analysis task that the dataframe
                 should be saved to or None if the dataframe should be
                 saved to the root directory for the analysis task.
+            append: if True, add the rows to the end of the existing file
+                instead of overwriting it
             **kwargs: arguments to pass on to pandas.to_csv
         """
         savePath = self._analysis_result_save_path(
                 resultName, analysisTask, resultIndex, subdirectory, '.csv')
 
-        with open(savePath, 'w') as f:
+        with open(savePath, 'a' if append else 'w') as f:
             dataframe.to_csv(f, **kwargs)
 
     def load_dataframe_from_csv(

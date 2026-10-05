@@ -152,6 +152,22 @@ major version).
     - In the overlap bands it keeps 3,316 cells instead of 2,700.
     - Away from seams it keeps 99.8% of cells instead of 91.8%.
     - Cell density is now flat across the seams.
+- Barcodes in the overlap of two fovs are no longer counted twice. Decode
+  crops 100 px per edge, which on LT066 leaves 188 µm tiles on a 182 µm
+  grid, so ~6 µm strips were decoded by both fovs, and PartitionBarcodes
+  and ExportBarcodes counted them twice.
+  - The filter tasks (FilterBarcodes, AdaptiveFilterBarcodes(Local)) now
+    keep a barcode only in the fov whose image centre is nearest
+    (`remove_overlap_duplicates`, default on). Fov positions come from the
+    decode task's `global_align_task`.
+  - On a 9-fov LT066 block this drops 5.5% of barcodes (4.7-6.0% per
+    fov).
+  - Takes effect when the filter task is rerun.
+- z-duplicate removal (`remove_z_duplicated_barcodes`) is about 100x
+  faster, with the same kept barcodes: an LT066 fov (2.4 M barcodes, 101
+  planes) takes 8 s.
+- AdaptiveFilterBarcodesLocal applies `remove_z_duplicated_barcodes`. It
+  accepted the parameter but ignored it.
 
 ### Added
 - Per-fov z offsets. Neighbouring fovs can disagree in z; on LT066 the
@@ -173,6 +189,16 @@ major version).
     - With a CombineCleanedBoundaries output from before this change, it
       warns and leaves z as it is.
   - Exported barcodes and cell boundaries still use each fov's own z.
+- `z_duplicate_xy_distance_um` for AdaptiveFilterBarcodes: the
+  z-duplicate radius in µm, used instead of
+  `z_duplicate_xy_pixel_threshold` when set.
+  - At 0.5 µm planes, one molecule is decoded on about 2.3 planes. On
+    LT066 fov 786, 57% of barcodes have a same-gene barcode within
+    0.27 µm on the next plane, against 0.014% for a different gene.
+  - On spinning-disk data such as LT066, set
+    `remove_z_duplicated_barcodes: true` and
+    `z_duplicate_xy_distance_um: 0.27`. On a 9-fov block that leaves 1
+    barcode per 2.28.
 
 ### Changed
 - Verification figures are drawn by a separate `<Task>Figures` snakemake

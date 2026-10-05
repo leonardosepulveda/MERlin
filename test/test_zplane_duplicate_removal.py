@@ -121,3 +121,27 @@ def test_empty_barcodes():
     keptBC = barcodefilters.remove_zplane_duplicates_all_barcodeids(
         bcDF, zplane_cutoff, xy_cutoff, zpositions)
     assert type(keptBC) == pd.DataFrame
+
+
+def test_chain_over_four_planes_keeps_brightest():
+    zpositions = [0, 0.5, 1, 1.5, 2, 2.5]
+    chain = [generate_barcode(100, 5, 400 + 0.8 * i, 700, 1 + i, 10 + i % 3)
+             for i in range(4)]
+    otherGene = generate_barcode(100, 6, 400.8, 700, 2, 20)
+    keptBC = barcodefilters.remove_zplane_duplicates_all_barcodeids(
+        pd.DataFrame(chain + [otherGene]), 1, np.sqrt(2), zpositions)
+    # linked plane to plane, so one barcode is kept though the ends are
+    # 3 planes and 2.4 px apart; the other gene is not linked
+    assert sorted(keptBC['barcode']) == sorted(
+        [chain[2]['barcode'], otherGene['barcode']])
+
+
+def test_single_barcodeid_matches_all_barcodeids():
+    zpositions = [0, 1.5, 3, 4.5, 6, 7.5, 9]
+    bcSet = [b1, b2, b1_above_dimmer, b1_closeby_above_brighter,
+             b2_above_brighter, b1_closeby_below_brighter]
+    single = barcodefilters.remove_zplane_duplicates_single_barcodeid(
+        pd.DataFrame(bcSet), 1, np.sqrt(2), zpositions)
+    allIDs = barcodefilters.remove_zplane_duplicates_all_barcodeids(
+        pd.DataFrame(bcSet), 1, np.sqrt(2), zpositions)
+    assert sorted(single['barcode']) == sorted(allIDs['barcode'])

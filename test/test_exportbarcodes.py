@@ -41,15 +41,19 @@ class _FakeFilterTask:
         return _FakeCodebook()
 
 
-def _run_export(dataSet, monkeypatch, perFov, excludeBlanks, name):
+def _run_export(dataSet, monkeypatch, perFov, excludeBlanks, name,
+                outputFormat='parquet'):
     monkeypatch.setattr(dataSet, 'get_fovs', lambda: sorted(perFov))
     monkeypatch.setattr(dataSet, 'load_analysis_task',
                         lambda taskName: _FakeFilterTask(perFov))
     task = ExportBarcodes(dataSet, {'filter_task': 'FakeFilter',
                                     'columns': COLUMNS,
-                                    'exclude_blanks': excludeBlanks},
+                                    'exclude_blanks': excludeBlanks,
+                                    'format': outputFormat},
                           analysisName=name)
     task._run_analysis()
+    if outputFormat == 'csv':
+        return task
     return dataSet.load_dataframe_from_parquet('barcodes', task)
 
 
@@ -81,3 +85,33 @@ def test_export_barcodes_no_barcodes_writes_empty_table(
 
     assert len(exported) == 0
     assert list(exported.columns) == COLUMNS
+
+
+@pytest.mark.parametrize('excludeBlanks', [False, True])
+def test_export_barcodes_csv_matches_single_write(
+        simple_merfish_data, monkeypatch, tmp_path, excludeBlanks):
+    """The csv format, written one fov at a time, is byte-identical to
+    writing all fovs combined in one to_csv call."""
+    perFov = {0: _fov_barcodes(0, 7),
+              1: pandas.DataFrame(columns=COLUMNS),
+              2: _fov_barcodes(2, 5)}
+    task = _run_export(simple_merfish_data, monkeypatch, perFov,
+                       excludeBlanks, 'ExportBarcodesCsvTest%d' % excludeBlanks,
+                       outputFormat='csv')
+
+    combined = pandas.concat(list(perFov.values()), sort=False)
+    if excludeBlanks:
+        combined = combined[combined['barcode_id'].isin([0, 1])]
+    expectedPath = tmp_path / 'expected.csv'
+    combined.to_csv(expectedPath, index=False)
+    exportedPath = simple_merfish_data._analysis_result_save_path(
+        'barcodes', task, None, None, '.csv')
+    with open(exportedPath) as exported, open(expectedPath) as expected:
+        assert exported.read() == expected.read()
+
+
+def test_export_barcodes_rejects_unknown_format(simple_merfish_data):
+    with pytest.raises(ValueError):
+        ExportBarcodes(simple_merfish_data,
+                       {'filter_task': 'FakeFilter', 'format': 'tsv'},
+                       analysisName='ExportBarcodesBadFormatTest')

@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.spatial import cKDTree
-import networkx as nx
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
 import pandas as pd
 from typing import List
 
@@ -19,6 +20,12 @@ def remove_zplane_duplicates_all_barcodeids(barcodes: pd.DataFrame,
         barcodes of different identities but similar abundance between
         adjacent z planes.
 
+        Each barcode is linked to the nearest barcode of the same identity
+        within maxDist on each plane up to zPlanes above and below. Linked
+        barcodes form groups transitively, so with zPlanes = 1 a molecule
+        seen on 4 consecutive planes is still one group. The brightest
+        barcode (mean_intensity) of each group is kept.
+
     Args:
         barcodes: a pandas dataframe containing all the entries for a given
                   barcode identity
@@ -26,6 +33,8 @@ def remove_zplane_duplicates_all_barcodeids(barcodes: pd.DataFrame,
                  potential duplicates
         maxDist: maximum euclidean distance allowed to separate centroids of
                  putative barcode duplicate, in pixels
+        allZPos: the z positions of the fov; only barcodes on its first
+                 len(allZPos) planes are compared
     Returns:
         keptBarcodes: pandas dataframe where barcodes of the same identity that
                       fall within parameters of z plane duplicates have
@@ -33,16 +42,10 @@ def remove_zplane_duplicates_all_barcodeids(barcodes: pd.DataFrame,
     """
     if len(barcodes) == 0:
         return barcodes
-    else:
-        barcodeGroups = barcodes.groupby('barcode_id')
-        bcToKeep = []
-        for bcGroup, bcData in barcodeGroups:
-            bcToKeep.append(
-                remove_zplane_duplicates_single_barcodeid(bcData, zPlanes,
-                                                          maxDist, allZPos))
-        mergedBC = pd.concat(bcToKeep, axis = 0).reset_index(drop=True)
-        mergedBC = mergedBC.sort_values(by=['barcode_id', 'z'])
-        return mergedBC
+    barcodes = barcodes.reset_index(drop=True)
+    keep = _z_duplicate_keep_mask(barcodes, zPlanes, maxDist, len(allZPos))
+    return barcodes[keep].sort_values(
+        by=['barcode_id', 'z'], kind='stable').reset_index(drop=True)
 
 
 def remove_zplane_duplicates_single_barcodeid(barcodes: pd.DataFrame,
@@ -72,36 +75,65 @@ def remove_zplane_duplicates_single_barcodeid(barcodes: pd.DataFrame,
                       'remove_zplane_duplicates_all_barcodeids to handle ' +\
                       'dataframes containing multiple barcode ids'
         raise ValueError(errorString)
-    graph = nx.Graph()
-    zPos = sorted(allZPos)
-    graph.add_nodes_from(barcodes.index.values.tolist())
-    for z in range(0, len(zPos)):
-        zToCompare = [pos for pos, otherZ in enumerate(zPos) if
-                      (pos >= z - zPlanes) & (pos <= z + zPlanes) & (pos != z)] # & ~(pos == z)] apparently ~ is depreciated
-        treeBC = barcodes[barcodes['z'] == z]
-        if len(treeBC) == 0:
-            pass
-        else:
-            tree = cKDTree(treeBC.loc[:, ['x', 'y']].values)
-            for compZ in zToCompare:
-                queryBC = barcodes[barcodes['z'] == compZ]
-                if len(queryBC) == 0:
-                    pass
-                else:
-                    dist, idx = tree.query(queryBC.loc[:, ['x', 'y']].values,
-                                           k=1, distance_upper_bound=maxDist)
-                    currentHits = treeBC.index.values[idx[np.isfinite(dist)]]
-                    comparisonHits = queryBC.index.values[np.isfinite(dist)]
-                    graph.add_edges_from(list(zip(currentHits, comparisonHits)))
-        connectedComponents = [list(x) for x in
-                               list(nx.connected_components(graph))]
+    return barcodes[_z_duplicate_keep_mask(barcodes, zPlanes, maxDist,
+                                           len(allZPos))]
 
-    def choose_brighter_barcode(barcodes, indexes):
-        sortedBC = barcodes.loc[indexes, :].sort_values(by='mean_intensity',
-                                                        ascending=False)
-        return sortedBC.index.values.tolist()[0]
 
-    keptBarcodes = barcodes.loc[sorted([x[0] if len(x) == 1 else
-                                        choose_brighter_barcode(barcodes, x)
-                                        for x in connectedComponents]), :]
-    return keptBarcodes
+def _z_duplicate_keep_mask(barcodes: pd.DataFrame, zPlanes: int,
+                           maxDist: float, planeCount: int) -> np.ndarray:
+    """True for the brightest barcode of each z-duplicate group (see
+    remove_zplane_duplicates_all_barcodeids). One kd-tree holds every
+    barcode at (x, y, z * gap, barcode_id * gap), with gap far larger than
+    maxDist, so a query at (x, y, (z + d) * gap, barcode_id * gap) can only
+    find a barcode of the same identity on plane z + d."""
+    n = len(barcodes)
+    z = barcodes['z'].values.astype(float)
+    compared = (z >= 0) & (z < planeCount)
+    gap = 10 * (maxDist + 1)
+    points = np.c_[barcodes['x'].values, barcodes['y'].values, z * gap,
+                   barcodes['barcode_id'].values * gap]
+    tree = cKDTree(points[compared])
+    comparedIndex = np.flatnonzero(compared)
+    src, dst = [], []
+    for d in [d for d in range(-zPlanes, zPlanes + 1) if d != 0]:
+        query = points[compared] + [0, 0, d * gap, 0]
+        dist, idx = tree.query(query, k=1, distance_upper_bound=maxDist)
+        found = np.isfinite(dist)
+        src.append(comparedIndex[found])
+        dst.append(comparedIndex[idx[found]])
+    src = np.concatenate(src) if src else np.zeros(0, int)
+    dst = np.concatenate(dst) if dst else np.zeros(0, int)
+    graph = coo_matrix((np.ones(len(src), bool), (src, dst)), shape=(n, n))
+    labels = connected_components(graph, directed=False)[1]
+
+    # brightest member of each group; the lowest index among equals
+    order = np.lexsort((np.arange(n), -barcodes['mean_intensity'].values,
+                        labels))
+    first = np.r_[True, np.diff(labels[order]) != 0]
+    keep = np.zeros(n, bool)
+    keep[order[first]] = True
+    return keep
+
+
+def keep_barcodes_of_nearest_fov(barcodes: pd.DataFrame, fov: int,
+                                 fovIDs: List[int],
+                                 fovCenters: np.ndarray) -> pd.DataFrame:
+    """ Keep the barcodes that *fov* owns. Neighbouring fovs overlap, so a
+        molecule in the overlap is decoded once in each fov. A barcode is
+        owned by the fov whose image centre is nearest to it, over all
+        fovs, so each overlap is counted once.
+
+    Args:
+        barcodes: barcodes decoded in *fov*, with global_x and global_y
+        fov: the fov the barcodes were decoded in
+        fovIDs: every fov of the dataset
+        fovCenters: (len(fovIDs), 2) global x, y of each fov's image centre,
+                    in the same units as global_x and global_y
+    Returns:
+        the barcodes owned by *fov*
+    """
+    if len(barcodes) == 0:
+        return barcodes
+    nearest = cKDTree(fovCenters).query(
+        barcodes[['global_x', 'global_y']].values)[1]
+    return barcodes[np.asarray(fovIDs)[nearest] == fov]

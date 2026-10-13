@@ -155,8 +155,11 @@ def test_snakemake_rule_resources_uses_computed_estimate_with_margin(
     snakeRule = snakewriter.SnakemakeRule(task)
     ruleString = snakeRule.as_string()
     # 1000 * 1.2 + 200 (SNAKEMAKE_WRAPPER_MB) = 1400 -> 2000 (whole GB),
-    # 10 * 1.2 + 10 (SNAKEMAKE_LAUNCH_MINUTES) = 22
-    assert 'resources: mem_mb=2000, runtime=22' in ruleString
+    # 10 * 1.2 + 10 (SNAKEMAKE_LAUNCH_MINUTES) = 22, each scaled by the
+    # retry attempt
+    assert 'resources: %s, %s' % (
+        'mem_mb=lambda wildcards, attempt: 2000 * attempt',
+        'runtime=lambda wildcards, attempt: 22 * attempt') in ruleString
     simple_merfish_data.delete_analysis(task)
 
 
@@ -172,7 +175,7 @@ def test_snakemake_rule_resources_explicit_override_wins_over_estimate(
     # estimate entirely -- not even margined
     assert 'mem_mb=5000' in ruleString
     assert 'runtime=20' in ruleString
-    assert 'mem_mb=2000' not in ruleString
+    assert 'attempt' not in ruleString
     simple_merfish_data.delete_analysis(task)
 
 
@@ -186,8 +189,8 @@ def test_snakemake_rule_resources_default_only_does_not_override_estimate(
     clusterConfig = {'__default__': {'mem': 8000, 'time': '3:00:00'}}
     snakeRule = snakewriter.SnakemakeRule(task, clusterConfig=clusterConfig)
     ruleString = snakeRule.as_string()
-    assert 'mem_mb=2000' in ruleString
-    assert 'runtime=22' in ruleString
+    assert 'mem_mb=lambda wildcards, attempt: 2000 * attempt' in ruleString
+    assert 'runtime=lambda wildcards, attempt: 22 * attempt' in ruleString
     simple_merfish_data.delete_analysis(task)
 
 
@@ -202,7 +205,7 @@ def test_snakemake_rule_resources_done_rule_ignores_computed_estimate(
     ruleBlock, doneBlock = ruleString.split(
         'rule %sDone:' % task.get_analysis_name())
     # the task's own rule uses the computed estimate (margined)
-    assert 'mem_mb=2000, runtime=22' in ruleBlock
+    assert 'mem_mb=lambda wildcards, attempt: 2000 * attempt, runtime=lambda wildcards, attempt: 22 * attempt' in ruleBlock
     # the Done rule keeps the plain __default__-derived resources
     assert 'mem_mb=8000, runtime=180' in doneBlock
     simple_merfish_data.delete_analysis(task)
@@ -275,3 +278,30 @@ def test_snakemake_rule_adds_figures_rule_only_for_tasks_with_figures(
     plain = testtask.SimpleParallelAnalysisTask(
         simple_merfish_data, analysisName='plainTask')
     assert 'Figures' not in snakewriter.SnakemakeRule(plain).as_string()
+
+
+def test_snakemake_generator_runs_attempt_scaled_resources(
+        simple_merfish_data):
+    # the attempt-scaled lambdas must be valid Snakefile code that
+    # snakemake evaluates, not just text
+    taskDict = {'analysis_tasks': [
+        {'task': 'SimpleAnalysisTaskWithResourceEstimate',
+         'module': 'merlin.analysis.testtask',
+         'parameters': {'estimated_memory': 1000, 'estimated_time': 10}}
+    ]}
+    generator = snakewriter.SnakefileGenerator(
+        taskDict, simple_merfish_data, clusterConfig={})
+    workflow = generator.generate_workflow()
+    with open(workflow) as f:
+        assert 'lambda wildcards, attempt: 2000 * attempt' in f.read()
+    _run_snakefile_locally(workflow)
+    outputTask = simple_merfish_data.load_analysis_task(
+        'SimpleAnalysisTaskWithResourceEstimate')
+    assert outputTask.is_complete()
+    simple_merfish_data.delete_analysis(outputTask)
+
+
+def test_attempt_scaled_repr():
+    assert repr(snakewriter.AttemptScaled(3000)) \
+        == 'lambda wildcards, attempt: 3000 * attempt'
+    assert snakewriter.AttemptScaled(3000) == 3000

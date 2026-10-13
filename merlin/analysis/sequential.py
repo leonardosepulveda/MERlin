@@ -86,11 +86,19 @@ class SumSignal(analysistask.ParallelAnalysisTask):
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
 
+    #: Fit to sacct (merlin.util.resourceestimate) on BC553 disk/epi and
+    #: BC555 epi. Each FOV's cells are read with their boundaries at
+    #: every z, so memory grows with z count: 1.08 GB at 100 z, 0.65 GB
+    #: at 25 z. Time is mostly launch delay (median 0.5-1.2 min, max
+    #: 13.8 min).
+    providesMemoryEstimate = True
+    providesTimeEstimate = True
+
     def get_estimated_memory(self):
-        return 2048
+        return 230 + 5.8 * len(self.dataSet.get_z_positions())
 
     def get_estimated_time(self):
-        return 1
+        return 4
 
     def get_dependencies(self):
         return [self.parameters['warp_task'],
@@ -268,11 +276,19 @@ class SmfishSignal(analysistask.ParallelAnalysisTask):
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
 
+    #: Fit to sacct (merlin.util.resourceestimate) on BC553 disk/epi and
+    #: BC555 epi, using only jobs after output was streamed per z plane
+    #: (2026-08-31): 1.0-1.6 GB and at most 25 min. Before that change
+    #: BC555 epi reached 6.6 GB. The epi runs (25 z) used more than disk
+    #: (100 z), so a constant rather than a z scaling.
+    providesMemoryEstimate = True
+    providesTimeEstimate = True
+
     def get_estimated_memory(self):
-        return 2048
+        return 1200
 
     def get_estimated_time(self):
-        return 1
+        return 15
 
     def get_dependencies(self):
 
@@ -563,6 +579,10 @@ class SmfishColocalizationSignal(SmfishSignal):
     An analysis task that detects smFISH spots at attempts to find colocalized spots
     and can optionally assign them to segmented cells.
     """
+
+    # SmfishSignal's estimates were not measured on this variant
+    providesMemoryEstimate = False
+    providesTimeEstimate = False
 
     def __init__(self, dataSet, parameters=None, analysisName=None):
         super().__init__(dataSet, parameters, analysisName)

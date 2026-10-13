@@ -263,6 +263,10 @@ class DeconvolutionPreprocess(Preprocess):
         # s/frame (BC555 fit) under-requested LT066 by ~4x. The
         # decon_iterations term is NOT calibrated -- no real data exists
         # at decon_iterations > 0 -- and stays an additive guess.
+        # The baseline was 1 min until 2026-10-13: LT066, BC553 disk and
+        # BC553 epi then had 36, 14 and 335 TIMEOUTs at exactly this
+        # estimate's request, with completed FOVs up to the limit. 5 min
+        # covers them, and a retry gets twice the request.
         bitCount = self.get_codebook().get_bit_count()
         zCount = len(self.dataSet.get_z_positions())
         width, height = self.dataSet.get_image_dimensions()
@@ -272,7 +276,7 @@ class DeconvolutionPreprocess(Preprocess):
             self.parameters['decon_iterations'] * secondsPerIteration)
         return resourceestimate.estimate_stack_time_minutes(
             frameCount=bitCount * zCount, secondsPerFrame=secondsPerFrame,
-            baselineMinutes=1)
+            baselineMinutes=5)
 
     def get_dependencies(self):
         return [self.parameters['warp_task']]

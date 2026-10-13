@@ -887,11 +887,22 @@ class CleanCellBoundaries(analysistask.ParallelAnalysisTask):
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
 
+    #: Fit to sacct (merlin.util.resourceestimate) on LT066, BC553 disk/
+    #: epi and BC555 epi. Each FOV's cells and its neighbours' are held
+    #: with their boundaries at every z, so both grow with z count:
+    #: 8.0 GB and 90 min on LT066 (101 z) against 1.1-1.3 GB and 5-8 min
+    #: at 25 z. BC553 disk (100 z) used 2.9 GB, so cell density matters
+    #: too; it isn't known ahead of a run. Only BC553 epi ran the
+    #: overlap-removal rewrite of 2026-10-05, and used no more than
+    #: before it (1.28 vs 1.34 GB), so the older jobs are used as well.
+    providesMemoryEstimate = True
+    providesTimeEstimate = True
+
     def get_estimated_memory(self):
-        return 2048
+        return 230 + 63 * len(self.dataSet.get_z_positions())
 
     def get_estimated_time(self):
-        return 30
+        return 0.7 * len(self.dataSet.get_z_positions())
 
     def get_dependencies(self):
         return [self.parameters['segment_task'],
@@ -1014,13 +1025,17 @@ class RefineCellDatabases(FeatureSavingAnalysisTask):
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
 
+    #: Fit to sacct (merlin.util.resourceestimate) on LT066 and BC553
+    #: disk/epi: 1.74 GB and 13 min at 101 z, 0.62 GB and 5 min at 25 z,
+    #: growing with the z planes of the cell boundaries it reads.
+    providesMemoryEstimate = True
+    providesTimeEstimate = True
+
     def get_estimated_memory(self):
-        # TODO - refine estimate
-        return 2048
+        return 230 + 10.5 * len(self.dataSet.get_z_positions())
 
     def get_estimated_time(self):
-        # TODO - refine estimate
-        return 5
+        return 2 + 0.02 * len(self.dataSet.get_z_positions())
 
     def get_dependencies(self):
         return [self.parameters['segment_task'],

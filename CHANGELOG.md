@@ -170,6 +170,18 @@ major version).
   accepted the parameter but ignored it.
 
 ### Added
+- CellPoseEvalSAM: runs only cellpose, on a GPU, for a batch of fovs
+  per job (`fovs_per_job`, default 50). The model loads once per batch,
+  and the next fov is read while the GPU evaluates the current one. Each
+  fov's masks are saved as soon as they are done, and a requeued or
+  timed-out batch resumes from the first unsaved fov.
+  - CellPoseSegmentSAM with `eval_task: <name>` then does the rest
+    (expand, z selection, upsampling, mask tiff, features) on a CPU,
+    with the same outputs, so downstream tasks don't change.
+  - Without `eval_task`, CellPoseSegmentSAM runs as before.
+  - Why: in the one-task job, only cellpose's eval uses the GPU. On an
+    H200, eval took 28-43 s of each 100-plane fov's job, and the GPU sat
+    idle during the rest.
 - Per-fov z offsets. Neighbouring fovs can disagree in z; on LT066 the
   same cell sits 1.57 µm higher in the right-hand fov and 0.54 µm higher
   in the upper fov.

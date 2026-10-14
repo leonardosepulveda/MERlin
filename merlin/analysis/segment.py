@@ -702,6 +702,11 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
     def _build_model(self):
         # only import cellpose when we really need it since it is slow
         import cellpose.models
+        import torch
+        # without a usable GPU cellpose quietly runs on the CPU, many times
+        # slower while still holding the GPU; fail so the job is rerun
+        if self.parameters['use_gpu'] and not torch.cuda.is_available():
+            raise RuntimeError('use_gpu is set but torch sees no CUDA GPU')
         # if path_to_user_model exist, override and use user model - must be trained in cellpose
         if self.parameters['path_to_user_model']:
             return cellpose.models.CellposeModel(gpu = self.parameters['use_gpu'],

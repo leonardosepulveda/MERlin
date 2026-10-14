@@ -104,3 +104,14 @@ def test_eval_task_rejects_eval_task_parameter(ragged_merfish_data):
         segment.CellPoseEvalSAM(ragged_merfish_data,
                                 {**CELLPOSE, 'eval_task': 'other'},
                                 analysisName='cpEvalBad')
+
+
+def test_build_model_fails_without_cuda(ragged_merfish_data, monkeypatch):
+    torch = pytest.importorskip('torch')
+    pytest.importorskip('cellpose.models')
+    monkeypatch.setattr(torch.cuda, 'is_available', lambda: False)
+    task = segment.CellPoseEvalSAM(ragged_merfish_data,
+                                   {**CELLPOSE, 'use_gpu': True},
+                                   analysisName='cpEvalNoGpu')
+    with pytest.raises(RuntimeError, match='CUDA'):
+        task._build_model()

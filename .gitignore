@@ -20,3 +20,6 @@ FINDINGS.md
 
 # Local-only scratch/reference material (notebooks, benchmark data, ...)
 cache/
+
+# Local websites (before/after reports etc.), built from cache/ data
+websites/

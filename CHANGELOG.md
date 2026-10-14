@@ -228,6 +228,10 @@ major version).
   - Against the template's requests, this would have saved about
     38,000 GB-hours of memory over these runs. SmfishSignal (32 GB asked,
     1.6 GB used) and Decode are most of it.
+  - CellPoseSegmentSAM's time request is at least 1 h (it was 20-22
+    min). Its GPU jobs are about 98% of the pipeline's fairshare cost, and
+    a timeout wastes the GPU for the whole limit, while a longer limit
+    costs nothing.
   - DeconvolutionPreprocess's time estimate has a 5 min baseline instead
     of 1 min. At 1 min, 385 jobs timed out exactly at its request.
   - Unmeasured subclasses (OptimizeIterationFOV,

@@ -550,7 +550,11 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
             evalSeconds = 1.5 + 0.34 * frameCount
         seconds = 45 + 0.4 * frameCount + evalSeconds \
             + 0.025 * frameCount + 0.03 * 2000
-        return 2 * seconds / 60
+        # Floored so the request is at least 1 h (41.7 x 1.2 + 10 min).
+        # Every timeout burns a GPU for the whole limit, the largest
+        # cost of the pipeline, while a longer limit costs nothing. The
+        # formula alone requested 22 min; BC553 disk reached 20.2 min.
+        return max(2 * seconds / 60, 50 / 1.2)
 
     def get_dependencies(self):
         return [self.parameters['warp_task'],

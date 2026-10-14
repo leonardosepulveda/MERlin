@@ -103,3 +103,9 @@ def test_decode_3d_keeps_stack_scaling():
 def test_unmeasured_subclasses_opt_out(cls):
     assert not cls.providesMemoryEstimate
     assert not cls.providesTimeEstimate
+
+
+def test_cellpose_time_request_is_at_least_one_hour():
+    task = _task(segment.CellPoseSegmentSAM, EPI,
+                 {'channel_2_name': None, 'do_3D': True})
+    assert _requested_minutes(task) == 60

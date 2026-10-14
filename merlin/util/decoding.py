@@ -4,7 +4,6 @@ import cv2
 from typing import Tuple
 from typing import Dict
 from skimage import measure
-from skimage import morphology
 from sklearn.neighbors import NearestNeighbors
 import gc
 
@@ -55,6 +54,23 @@ except ImportError:
 """
 Back to Decoder class
 """
+
+def remove_labels_smaller_than(labels: np.ndarray,
+                               minimumArea: int) -> np.ndarray:
+    """Zero every label whose area is below minimumArea, so labels with
+    area >= minimumArea are kept.
+
+    Replaces skimage's remove_small_objects(labels, min_size=N), whose
+    meaning changed: scikit-image 0.24 removed objects smaller than N,
+    0.26 also removes objects of exactly N pixels.
+    """
+    if minimumArea <= 1:
+        return labels.copy()
+    areas = np.bincount(labels.ravel())
+    small = areas < minimumArea
+    small[0] = False
+    return np.where(small[labels], 0, labels)
+
 
 class PixelBasedDecoder(object):
 
@@ -265,7 +281,7 @@ class PixelBasedDecoder(object):
         # make labels of the decoded image, note the +1 to set the non decoded -1 pixels to zero
         labels = measure.label(decodedImage + 1)
         # remove small objects here to make region props faster
-        labels = morphology.remove_small_objects(labels, min_size = minimumArea)
+        labels = remove_labels_smaller_than(labels, minimumArea)
 
         # this will get plugged into regionprops_table
         intensity_image = np.stack([decodedImage, pixelMagnitudes, distances], axis = -1)
@@ -378,8 +394,8 @@ class PixelBasedDecoder(object):
         # note the +1 to set the non decoded -1 pixels to zero for skimage
         labels = measure.label(decodedImage + 1)
         # remove small objects here to make regionprops quicker
-        labels = morphology.remove_small_objects(labels, 
-                                                min_size = self.refactorAreaThreshold)
+        labels = remove_labels_smaller_than(labels,
+                                            self.refactorAreaThreshold)
 
         # if NO barcodes are detected (labels are all zeros), we need a way to exit gracefully...
         # the return values should not affect the results...

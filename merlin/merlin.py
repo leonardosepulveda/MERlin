@@ -11,7 +11,8 @@ from typing import Dict
 
 from snakemake.api import SnakemakeApi
 from snakemake.settings.types import (
-    ExecutionSettings, OutputSettings, ResourceSettings)
+    DAGSettings, ExecutionSettings, OutputSettings, RerunTrigger,
+    ResourceSettings)
 from snakemake_executor_plugin_slurm import (
     ExecutorSettings as SlurmExecutorSettings)
 from snakemake_interface_logger_plugins.common import LogEvent
@@ -393,7 +394,13 @@ def run_with_snakemake(
             resource_settings=resourceSettings,
             snakefile=Path(snakefilePath),
             workdir=Path(dataSet.get_snakemake_path()))
-        dagApi = workflowApi.dag(dag_settings=None)
+        # A task is done when its .done file exists. Snakemake's default
+        # triggers also rerun finished tasks whose rule code, params or
+        # software env changed, so after a MERlin upgrade a resumed run
+        # re-planned everything (LT066: all 11,915 jobs, Decode and
+        # CellPose included). Only a newer input file reruns a task.
+        dagApi = workflowApi.dag(dag_settings=DAGSettings(
+            rerun_triggers=frozenset({RerunTrigger.MTIME})))
         dagApi.execute_workflow(
             executor=executorName,
             execution_settings=executionSettings,

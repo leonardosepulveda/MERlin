@@ -261,7 +261,6 @@ class SpatialFeature(object):
         new_boundaryList = []
         for i in range(len(self._boundaryList)):
             new_boundaryList.append([])
-            print(f'{i}')
 
             for pg in self._boundaryList[i]:
 
@@ -430,6 +429,7 @@ class SpatialFeature(object):
         bounding_box = self.get_bounding_box()
         
         boundaries = self.get_boundaries()
+        positionList = positionList.copy()
         positionList[:, 2] = np.round(positionList[:, 2])
 
         containmentList = np.zeros(positionList.shape[0], dtype='bool')

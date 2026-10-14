@@ -1,9 +1,155 @@
 import warnings
 import pandas
 import numpy as np
+import shapely
 
 from merlin.core import analysistask
 from merlin.util import spatialfeature
+
+
+def contained_barcodes(cells, x, y, z):
+    """The (barcode index, cell index) pairs of every barcode inside a cell.
+
+    Same rule as SpatialFeature.contains_positions: a barcode is in a cell
+    when one of the cell's polygons in plane round(z) contains (x, y), the
+    boundary excluded. Barcodes are sorted by plane and then x once, so
+    each polygon only tests the barcodes inside its bounding box.
+
+    Returns:
+        two int arrays, barcode indexes and cell indexes, ordered by cell
+    """
+    zRounded = np.round(z)
+    order = np.lexsort((x, zRounded))
+    zSorted, xSorted, ySorted = zRounded[order], x[order], y[order]
+    planeCount = max((len(c.get_boundaries()) for c in cells), default=0)
+    planes = np.arange(planeCount)
+    planeStart = np.searchsorted(zSorted, planes, side='left')
+    planeEnd = np.searchsorted(zSorted, planes, side='right')
+
+    barcodeIndexes, cellIndexes = [], []
+    for cellIndex, cell in enumerate(cells):
+        inside = []
+        for zIndex, polygons in enumerate(cell.get_boundaries()):
+            lo, hi = planeStart[zIndex], planeEnd[zIndex]
+            if lo == hi:
+                continue
+            xPlane = xSorted[lo:hi]
+            for polygon in polygons:
+                if polygon.is_empty:
+                    continue
+                minX, minY, maxX, maxY = polygon.bounds
+                a = lo + np.searchsorted(xPlane, minX, side='left')
+                b = lo + np.searchsorted(xPlane, maxX, side='right')
+                yBox = ySorted[a:b]
+                candidates = a + np.flatnonzero((yBox >= minY)
+                                                & (yBox <= maxY))
+                hits = shapely.contains_xy(polygon, xSorted[candidates],
+                                           ySorted[candidates])
+                inside.append(order[candidates[hits]])
+        if inside:
+            inside = np.unique(np.concatenate(inside))
+            barcodeIndexes.append(inside)
+            cellIndexes.append(np.full(len(inside), cellIndex))
+    if not barcodeIndexes:
+        return np.zeros(0, dtype=int), np.zeros(0, dtype=int)
+    return np.concatenate(barcodeIndexes), np.concatenate(cellIndexes)
+
+
+# the only barcode columns partitioning reads
+_BARCODE_COLUMNS = ['barcode_id', 'fov', 'global_x', 'global_y', 'z']
+
+
+def _barcode_positions(barcodes):
+    return (barcodes['global_x'].values, barcodes['global_y'].values,
+            barcodes['z'].values)
+
+
+def _counts_frame(counts, cells):
+    return pandas.DataFrame(data=counts, columns=range(counts.shape[1]),
+                            index=[c.get_feature_id() for c in cells])
+
+
+def count_traditional(cells, barcodes, barcodeCount):
+    """Counts of each barcode type inside each cell. A barcode inside
+    several cells counts for each of them."""
+    barcodeIds = barcodes['barcode_id'].values.astype(int)
+    b, c = contained_barcodes(cells, *_barcode_positions(barcodes))
+    counts = np.zeros((len(cells), barcodeCount))
+    np.add.at(counts, (c, barcodeIds[b]), 1)
+    return _counts_frame(counts, cells)
+
+
+def count_with_boundary_correction(cells, barcodes, barcodeCount,
+                                   bufferSize):
+    """Counts of each barcode type per cell, each barcode given to at most
+    one cell, using copies of the cells shrunk and expanded by bufferSize.
+
+    A barcode outside every expanded cell is dropped. Otherwise, in order:
+    - inside a shrunk cell: it goes to the first such cell;
+    - inside a cell whose interior (shrunk copy) holds this barcode type,
+      where that cell is the first cell containing it: it goes there;
+    - otherwise it goes to a random one (np.random.choice) of the expanded
+      cells whose interior holds this barcode type;
+    - if there is none, it goes to the first cell containing it, if any.
+    "First" is in the order of cells. The random choices are made in
+    barcode order, so a seeded np.random gives the same result as the
+    earlier per-barcode loop.
+    """
+    barcodeIds = barcodes['barcode_id'].values.astype(int)
+    positions = _barcode_positions(barcodes)
+    nBarcodes = len(barcodeIds)
+    cellCount = len(cells)
+    normal = contained_barcodes(cells, *positions)
+    shrunk = contained_barcodes(
+        [c.make_a_buffered_copy(-bufferSize) for c in cells], *positions)
+    expanded = contained_barcodes(
+        [c.make_a_buffered_copy(bufferSize) for c in cells], *positions)
+
+    interiorCounts = np.zeros((cellCount, barcodeCount))
+    np.add.at(interiorCounts, (shrunk[1], barcodeIds[shrunk[0]]), 1)
+
+    def first_host(pairs):
+        host = np.full(nBarcodes, cellCount)
+        np.minimum.at(host, pairs[0], pairs[1])
+        return host
+
+    firstShrunk = first_host(shrunk)
+    firstNormal = first_host(normal)
+    inExpanded = np.zeros(nBarcodes, dtype=bool)
+    inExpanded[expanded[0]] = True
+    hasShrunk = inExpanded & (firstShrunk < cellCount)
+    hasNormal = inExpanded & ~hasShrunk & (firstNormal < cellCount)
+
+    # expanded hosts whose interior holds the barcode's type
+    eB, eC = expanded
+    keep = interiorCounts[eC, barcodeIds[eB]] > 0
+    eB, eC = eB[keep], eC[keep]
+    hasCandidate = np.zeros(nBarcodes, dtype=bool)
+    hasCandidate[eB] = True
+
+    normalHolds = np.zeros(nBarcodes, dtype=bool)
+    normalHolds[hasNormal] = interiorCounts[
+        firstNormal[hasNormal], barcodeIds[hasNormal]] > 0
+    random = inExpanded & ~hasShrunk & hasCandidate \
+        & ~(hasNormal & normalHolds)
+
+    target = np.full(nBarcodes, -1)
+    target[hasShrunk] = firstShrunk[hasShrunk]
+    toNormal = hasNormal & ~random
+    target[toNormal] = firstNormal[toNormal]
+
+    order = np.lexsort((eC, eB))
+    eB, eC = eB[order], eC[order]
+    pick = random[eB]
+    eB, eC = eB[pick], eC[pick]
+    randomBarcodes, starts = np.unique(eB, return_index=True)
+    for b, hosts in zip(randomBarcodes, np.split(eC, starts[1:])):
+        target[b] = np.random.choice(hosts)
+
+    assigned = target >= 0
+    counts = np.zeros((cellCount, barcodeCount))
+    np.add.at(counts, (target[assigned], barcodeIds[assigned]), 1)
+    return _counts_frame(counts, cells)
 
 class PartitionBarcodes(analysistask.ParallelAnalysisTask):
 
@@ -18,6 +164,9 @@ class PartitionBarcodes(analysistask.ParallelAnalysisTask):
     offsets of CombineCleanedBoundaries.
     """
 
+    providesMemoryEstimate = True
+    providesTimeEstimate = True
+
     def __init__(self, dataSet, parameters=None, analysisName=None):
         super().__init__(dataSet, parameters, analysisName)
         if 'boundary_correction_buffer_size' not in self.parameters:
@@ -29,10 +178,13 @@ class PartitionBarcodes(analysistask.ParallelAnalysisTask):
         return len(self.dataSet.get_fovs())
 
     def get_estimated_memory(self):
-        return 2048
+        # LT066 fovs 265, 604 and 189 (7.7-13.8 M barcodes in the fov and
+        # its neighbours, 1922-2584 cells): 3.3-5.0 GB
+        return 6000
 
     def get_estimated_time(self):
-        return 1
+        # the same fovs: 2.8-5.1 min
+        return 10
 
     def get_dependencies(self):
         return [self.parameters['filter_task'],
@@ -105,7 +257,7 @@ class PartitionBarcodes(analysistask.ParallelAnalysisTask):
 
         bcDB = filterTask.get_barcode_database()
         for fi in fovIntersections:
-            partialBC = bcDB.get_barcodes(fi)
+            partialBC = bcDB.get_barcodes(fi, columnList=_BARCODE_COLUMNS)
             if fi == fovIntersections[0]:
                 currentFOVBarcodes = partialBC.copy(deep=True)
             else:
@@ -121,107 +273,9 @@ class PartitionBarcodes(analysistask.ParallelAnalysisTask):
 
         print(f'FOV {fragmentIndex} has {len(currentCells)} cells.')
 
-        countsDF = pandas.DataFrame(
-            data=np.zeros((len(currentCells), barcodeCount)),
-            columns=range(barcodeCount),
-            index=[x.get_feature_id() for x in currentCells])
-
-        countsDF_shrinked = pandas.DataFrame(
-            data=np.zeros((len(currentCells), barcodeCount)),
-            columns=range(barcodeCount),
-            index=[x.get_feature_id() for x in currentCells])
-
-        # Make a copy of the currentCells with the changed boundaries
-        buffer_size = self.parameters['boundary_correction_buffer_size']
-        currentCells_expanded = [c.make_a_buffered_copy(buffer_size) for c in currentCells]
-        currentCells_shrinked = [c.make_a_buffered_copy(-buffer_size) for c in currentCells]
-
-        # Store the host cells of each barcode
-        N_barcodes = currentFOVBarcodes.shape[0]
-        host_cells_normal = [[] for i in range(N_barcodes)]
-        host_cells_shrinked = [[] for i in range(N_barcodes)]
-        host_cells_expanded = [[] for i in range(N_barcodes)]
-    
-        # Get the host cells for each barcode
-        for i in range(len(currentCells)):
-            cell_normal = currentCells[i]
-            cell_shrinked = currentCells_shrinked[i]
-            cell_expanded = currentCells_expanded[i]
-
-            contained_normal = cell_normal.contains_positions(currentFOVBarcodes.loc[:,
-                                                ['global_x', 'global_y',
-                                                 'z']].values)
-            
-            contained_shrinked = cell_shrinked.contains_positions(currentFOVBarcodes.loc[:,
-                                                ['global_x', 'global_y',
-                                                 'z']].values)
-            
-            contained_expanded = cell_expanded.contains_positions(currentFOVBarcodes.loc[:,
-                                                ['global_x', 'global_y',
-                                                 'z']].values)
-           
-            ids_normal = np.where(contained_normal)[0]
-            ids_shrinked = np.where(contained_shrinked)[0]
-            ids_expanded = np.where(contained_expanded)[0]
-
-            for j in ids_normal:
-                host_cells_normal[j].append(i)
-            for j in ids_shrinked:
-                host_cells_shrinked[j].append(i)
-            for j in ids_expanded:
-                host_cells_expanded[j].append(i)
-
-            # Generate a counting matrix for the shrinked cells
-            count_shrinked = currentFOVBarcodes[contained_shrinked].groupby('barcode_id').size()
-            count_shrinked = count_shrinked.reindex(range(barcodeCount), fill_value=0)
-            countsDF_shrinked.loc[cell_shrinked.get_feature_id(), :] = count_shrinked.values.tolist()
-
-        # Assign each barcode to a cell
-        barcode_types = list(currentFOVBarcodes['barcode_id'])
-
-        for i in range(N_barcodes):
-            # Continue if this barcode is not within any cell
-            if len(host_cells_expanded[i]) == 0:
-                continue
-
-            barcode_id = barcode_types[i]
-            
-            # If the barcode is within the shrinked region of a cell, add it to the cell
-            if len(host_cells_shrinked[i]) > 0:
-                countsDF.iloc[host_cells_shrinked[i][0], barcode_id] += 1
-                continue
-
-            # If a cell contains a barcode in its expanded regions but
-            # doesn't have it in the interior filter it out
-            hce_filtered = [c for c in host_cells_expanded[i] 
-                              if countsDF_shrinked.iloc[c, barcode_id] > 0]
-
-            # If the barcode is within the normal region of a cell
-            if len(host_cells_normal[i]) > 0:
-                cell_normal_id = host_cells_normal[i][0]
-
-                # Assign the barcode to the normal cell if the cell already 
-                # have a same type barcode in its interior
-                if countsDF_shrinked.iloc[cell_normal_id, barcode_id] > 0:
-                    countsDF.iloc[cell_normal_id, barcode_id] += 1
-                
-                # If any other cell that contains the barcode in the expanded region
-                # and have the same barcode type in its interior, assign the barcode 
-                # to that cell
-                elif len(hce_filtered) > 0:
-                    hce = np.random.choice(hce_filtered)
-                    countsDF.iloc[hce, barcode_id] += 1
-
-                # If no other filtered cells contains the barcode, asign it to the normal cell
-                else:
-                    countsDF.iloc[cell_normal_id, barcode_id] += 1
-                
-                continue
-
-            # If a cell only exist in the expanded region, assign it
-            if len(hce_filtered) > 0:
-                hce = np.random.choice(hce_filtered)
-                countsDF.iloc[hce, barcode_id] += 1
+        countsDF = count_with_boundary_correction(
+            currentCells, currentFOVBarcodes, barcodeCount,
+            self.parameters['boundary_correction_buffer_size'])
 
         barcodeNames = [codebook.get_name_for_barcode_index(x)
                         for x in countsDF.columns.values.tolist()]
@@ -248,7 +302,7 @@ class PartitionBarcodes(analysistask.ParallelAnalysisTask):
 
         bcDB = filterTask.get_barcode_database()
         for fi in fovIntersections:
-            partialBC = bcDB.get_barcodes(fi)
+            partialBC = bcDB.get_barcodes(fi, columnList=_BARCODE_COLUMNS)
             if fi == fovIntersections[0]:
                 currentFOVBarcodes = partialBC.copy(deep=True)
             else:
@@ -262,18 +316,8 @@ class PartitionBarcodes(analysistask.ParallelAnalysisTask):
         sDB = assignmentTask.get_feature_database()
         currentCells = sDB.read_features(fragmentIndex)
 
-        countsDF = pandas.DataFrame(
-            data=np.zeros((len(currentCells), barcodeCount)),
-            columns=range(barcodeCount),
-            index=[x.get_feature_id() for x in currentCells])
-
-        for cell in currentCells:
-            contained = cell.contains_positions(currentFOVBarcodes.loc[:,
-                                                ['global_x', 'global_y',
-                                                 'z']].values)
-            count = currentFOVBarcodes[contained].groupby('barcode_id').size()
-            count = count.reindex(range(barcodeCount), fill_value=0)
-            countsDF.loc[cell.get_feature_id(), :] = count.values.tolist()
+        countsDF = count_traditional(currentCells, currentFOVBarcodes,
+                                     barcodeCount)
 
         barcodeNames = [codebook.get_name_for_barcode_index(x)
                         for x in countsDF.columns.values.tolist()]

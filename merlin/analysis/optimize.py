@@ -93,11 +93,23 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
             self.parameters['min_barcodes_for_refactoring'] = 0
 
 
+    #: Fit to sacct (merlin.util.resourceestimate) on 50 FOVs per
+    #: iteration of LT066, BC553 epi and BC555 epi. The first iteration
+    #: (no previous_iteration) peaked at 4.1 GB and 4 min; every later
+    #: one at 7.0 GB and 158 min, highest on BC555 epi, which has the
+    #: fewest z planes and bits -- so constants, not a z or bit scaling.
+    providesMemoryEstimate = True
+    providesTimeEstimate = True
+
     def get_estimated_memory(self):
-        return 4000
+        if 'previous_iteration' not in self.parameters:
+            return 3300
+        return 5700
 
     def get_estimated_time(self):
-        return 60
+        if 'previous_iteration' not in self.parameters:
+            return 2
+        return 135
 
     def _generate_verification_figures(self) -> None:
         """Generate the optimizationplots figures (optimize_task-only) as
@@ -552,6 +564,10 @@ class OptimizeIterationFOV(OptimizeIteration):
     An analysis task for performing a single iteration of scale factor
     optimization.
     """
+
+    # OptimizeIteration's estimates were not measured on this variant
+    providesMemoryEstimate = False
+    providesTimeEstimate = False
 
     def __init__(self, dataSet, parameters=None, analysisName=None):
         super().__init__(dataSet, parameters, analysisName)

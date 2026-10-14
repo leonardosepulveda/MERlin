@@ -379,11 +379,20 @@ class AdaptiveFilterBarcodes(AbstractFilterBarcodes):
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
 
+    #: Fit to sacct (merlin.util.resourceestimate) on LT066, BC553 epi
+    #: and BC555 epi: 2.3 GB at 101 z, 0.65-0.73 GB at 25 z, growing
+    #: with the z planes of the barcodes it holds. At most 3 min. The
+    #: overlap and z-duplicate changes of 2026-10-05 didn't change
+    #: LT066's usage (2.1 GB before, 2.3 GB after), so the older jobs
+    #: are used as well.
+    providesMemoryEstimate = True
+    providesTimeEstimate = True
+
     def get_estimated_memory(self):
-        return 1000
+        return 230 + 15.5 * len(self.dataSet.get_z_positions())
 
     def get_estimated_time(self):
-        return 30
+        return 2
 
     def get_dependencies(self):
         return [self.parameters['adaptive_task'],
@@ -721,6 +730,10 @@ class AdaptiveFilterBarcodesLocal(AdaptiveFilterBarcodes):
 
     Here we use the local adaptive filter generated from GenerateAdaptiveThresholdLocal
     """
+
+    # AdaptiveFilterBarcodes' estimates were not measured on this variant
+    providesMemoryEstimate = False
+    providesTimeEstimate = False
 
     def __init__(self, dataSet, parameters=None, analysisName=None):
         super().__init__(dataSet, parameters, analysisName)

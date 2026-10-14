@@ -1,17 +1,29 @@
-"""Shared math for the small set of AnalysisTask subclasses whose
-get_estimated_memory()/get_estimated_time() give a real, geometry-driven
-estimate (providesResourceEstimate = True) instead of an unused
+"""Shared math for the AnalysisTask subclasses whose
+get_estimated_memory()/get_estimated_time() give a real estimate
+(providesMemoryEstimate/providesTimeEstimate = True) instead of an unused
 placeholder constant. See merlin.core.analysistask.AnalysisTask
-.providesResourceEstimate for the opt-in contract, and
+.providesMemoryEstimate for the opt-in contract, and
 merlin.util.snakewriter for how the estimate is turned into a cluster
 resource request (a safety margin is applied there, not here -- these
 functions return the raw estimate).
 
-Every constant below is a first-pass, deliberately conservative guess
-calibrated against at most one real measurement (see each call site's own
-docstring for which, if any) -- not a validated model. Tighten them
-against real measured jobs as they become available rather than trusting
-these numbers.
+Calibration (2026-10-13). The estimates marked "fit to sacct" at their
+call sites were fit to every completed SLURM job of five runs from
+2026-08-28 to 2026-10-13: LT066 (101 z, 2304x2304, 26 bits), BC553 and
+BC555 disk (100 z, 2304x2304) and epi (25 z, 2048x2048, 16 bits). Only
+jobs that ran the task's current code were used, unless a call site says
+otherwise. Each estimate is set so that estimate x RESOURCE_ESTIMATE_MARGIN
+plus the wrapper covers, with at least 5% to spare, the largest per-FOV
+max RSS and elapsed time of every run. That is the slowest FOV, not the
+typical one, because snakemake requests one size for all of a rule's
+jobs. A rare FOV beyond it gets 2x on its retry (snakewriter
+.AttemptScaled).
+
+The predictor is chosen from what the task holds in memory: frame size
+for one-frame-at-a-time tasks, z-plane count for tasks that hold a FOV's
+cell boundaries or barcodes at every z. Where no known property ordered
+the runs (e.g. Decode is heaviest on BC555 epi, which has the fewest z
+planes and bits), the estimate is a constant at the max over runs.
 """
 
 BYTES_PER_PIXEL = 2  # raw MERFISH frames are read as uint16 (imagereader.py)

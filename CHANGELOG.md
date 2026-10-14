@@ -168,6 +168,29 @@ major version).
   planes) takes 8 s.
 - AdaptiveFilterBarcodesLocal applies `remove_z_duplicated_barcodes`. It
   accepted the parameter but ignored it.
+- Decode's `minimum_area` and Optimize's `area_threshold` mean "keep
+  area >= N" again. Under scikit-image 0.26, `remove_small_objects(...,
+  min_size=N)` also removed objects of exactly N pixels, so Decode kept
+  area >= 4 for `minimum_area: 3`, and the Optimize refactors kept
+  area >= 5 for `area_threshold: 4`. Barcodes are now filtered by their
+  pixel count directly, on any scikit-image version.
+  - Reruns find more barcodes than runs done in `merlin_cc_env` so far
+    (LT066, BC553 epi): the 3-px ones in Decode, and 4-px ones in the
+    Optimize refactors.
+- PartitionBarcodes takes minutes per fov instead of hours, with the same
+  counts. On LT066, fov 265 takes 2.8 min instead of 7.0 h, and fovs 604
+  and 189 take 3.5 and 5.1 min (they timed out at 12 h before). Peak
+  memory is 3.3-5.0 GB.
+  - Barcodes are sorted by plane and x once per fov. Each cell polygon
+    then tests only the barcodes in its bounding box, with
+    `shapely.contains_xy`, instead of all barcodes on every plane.
+  - The assignment to cells uses arrays instead of a Python loop over
+    every barcode. With the same `np.random` seed it gives the same
+    counts as before, including the random choices between cells.
+  - It reads only the 5 barcode columns it uses.
+  - Its memory and time estimates are now set (6 GB, 10 min).
+  - `make_a_buffered_copy` no longer prints every z index, and
+    `contains_positions` no longer rounds the caller's z in place.
 
 ### Added
 - CellPoseEvalSAM: runs only cellpose, on a GPU, for a batch of fovs
@@ -213,6 +236,13 @@ major version).
     barcode per 2.28.
 
 ### Changed
+- A resumed run no longer reruns finished tasks because MERlin's code
+  changed. Snakemake's default rerun triggers (code, params, software
+  env, input, mtime) re-planned everything after an upgrade: on LT066,
+  all 11,915 jobs, including Decode, CellPose and every Optimize
+  iteration. Only a missing output, or an input newer than the output,
+  reruns a task now (`--rerun-triggers mtime`). To redo a finished
+  task, delete its outputs as before.
 - Verification figures are drawn by a separate `<Task>Figures` snakemake
   rule after each task is done (`merlin -t <Task> --figures-only`), not
   inside the task's run or its Done rule. Nothing depends on the Figures
@@ -228,3 +258,27 @@ major version).
   - Set `"format": "csv"` in its parameters to keep writing
     `barcodes.csv`. That file is identical to before, and it is also
     written one fov at a time.
+- Memory and time requests for most per-fov tasks come from MERlin's own
+  estimates, fit to every completed job of five runs (LT066, BC553 and
+  BC555 disk and epi). Each request covers the slowest fov of every run
+  by at least 5%. A pinned value in the cluster resource file still wins.
+  - New: Decode (8 GB, 4 h), OptimizeIteration (5 GB/13 min for the
+    first iteration, 8 GB/172 min after), SmfishSignal (2 GB, 28 min),
+    SumSignal, CleanCellBoundaries, RefineCellDatabases,
+    AdaptiveFilterBarcodes (all scaled by z count), GenerateMosaicTile
+    (1 GB, 46 min).
+  - Against the template's requests, this would have saved about
+    38,000 GB-hours of memory over these runs. SmfishSignal (32 GB asked,
+    1.6 GB used) and Decode are most of it.
+  - CellPoseSegmentSAM's time request is at least 1 h (it was 20-22
+    min). Its GPU jobs are about 98% of the pipeline's fairshare cost, and
+    a timeout wastes the GPU for the whole limit, while a longer limit
+    costs nothing.
+  - DeconvolutionPreprocess's time estimate has a 5 min baseline instead
+    of 1 min. At 1 min, 385 jobs timed out exactly at its request.
+  - Unmeasured subclasses (OptimizeIterationFOV,
+    SmfishColocalizationSignal, AdaptiveFilterBarcodesLocal) keep the
+    template's values.
+- A computed request grows with snakemake's retry attempt (2x, then 3x),
+  so a fov that needs more than the estimate succeeds on its retry
+  instead of failing again at the same limit.

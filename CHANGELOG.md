@@ -168,6 +168,15 @@ major version).
   planes) takes 8 s.
 - AdaptiveFilterBarcodesLocal applies `remove_z_duplicated_barcodes`. It
   accepted the parameter but ignored it.
+- Decode's `minimum_area` and Optimize's `area_threshold` mean "keep
+  area >= N" again. Under scikit-image 0.26, `remove_small_objects(...,
+  min_size=N)` also removed objects of exactly N pixels, so Decode kept
+  area >= 4 for `minimum_area: 3`, and the Optimize refactors kept
+  area >= 5 for `area_threshold: 4`. Barcodes are now filtered by their
+  pixel count directly, on any scikit-image version.
+  - Reruns find more barcodes than runs done in `merlin_cc_env` so far
+    (LT066, BC553 epi): the 3-px ones in Decode, and 4-px ones in the
+    Optimize refactors.
 
 ### Added
 - Per-fov z offsets. Neighbouring fovs can disagree in z; on LT066 the

@@ -199,11 +199,17 @@ class GenerateMosaicTile(analysistask.ParallelAnalysisTask):
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
 
+    #: Fit to sacct (merlin.util.resourceestimate) on LT066 and BC553
+    #: disk/epi: at most 0.56 GB whatever the frame or z count. Median
+    #: time is under a minute, but BC553 disk had FOVs up to 42 min.
+    providesMemoryEstimate = True
+    providesTimeEstimate = True
+
     def get_estimated_memory(self):
-        return 2000
+        return 310
 
     def get_estimated_time(self):
-        return 10
+        return 30
 
     def get_dependencies(self):
         dependencies = [self.parameters['global_align_task'],

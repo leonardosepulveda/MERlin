@@ -35,6 +35,21 @@ SNAKEMAKE_WRAPPER_MB = 200
 SNAKEMAKE_LAUNCH_MINUTES = 10
 
 
+class AttemptScaled(int):
+    """A computed mem_mb/runtime that grows with snakemake's retry count.
+
+    Written into the Snakefile as `lambda wildcards, attempt: N * attempt`,
+    so a job that fails (restart_times > 0) is resubmitted with 2x, then
+    3x the first request. This lets the first attempt be tight: a rare FOV
+    that needs more than the estimate gets it on the retry instead of
+    failing again at the same limit. Snakemake can't tell a TIMEOUT or
+    OUT_OF_MEMORY from any other failure, so every retry scales.
+    """
+
+    def __repr__(self):
+        return 'lambda wildcards, attempt: %d * attempt' % int(self)
+
+
 def _parse_slurm_time_to_minutes(timeString: str) -> int:
     """Convert an sbatch-style time limit ('[D-]H(H):MM:SS') to the number
     of minutes expected by snakemake-executor-plugin-slurm's `runtime`
@@ -178,7 +193,8 @@ class SnakemakeRule(object):
                 get_estimated_memory()/get_estimated_time() (times
                 RESOURCE_ESTIMATE_MARGIN, plus SNAKEMAKE_WRAPPER_MB for
                 mem and SNAKEMAKE_LAUNCH_MINUTES for time, rounded up to
-                whole GB/minutes)
+                whole GB/minutes, and multiplied by snakemake's attempt
+                number on a retry -- see AttemptScaled)
                 whenever it opts in via
                 providesMemoryEstimate/providesTimeEstimate, UNLESS
                 ruleName has its own explicit 'mem'/'time' entry in
@@ -196,13 +212,15 @@ class SnakemakeRule(object):
         if useComputedEstimate:
             task = self._analysisTask
             if task.providesMemoryEstimate and 'mem' not in override:
-                resources['mem_mb'] = MEM_ROUNDING_MB * math.ceil(
-                    (task.get_estimated_memory() * RESOURCE_ESTIMATE_MARGIN
-                     + SNAKEMAKE_WRAPPER_MB) / MEM_ROUNDING_MB)
+                resources['mem_mb'] = AttemptScaled(
+                    MEM_ROUNDING_MB * math.ceil(
+                        (task.get_estimated_memory()
+                         * RESOURCE_ESTIMATE_MARGIN
+                         + SNAKEMAKE_WRAPPER_MB) / MEM_ROUNDING_MB))
             if task.providesTimeEstimate and 'time' not in override:
-                resources['runtime'] = math.ceil(
+                resources['runtime'] = AttemptScaled(math.ceil(
                     task.get_estimated_time() * RESOURCE_ESTIMATE_MARGIN
-                    + SNAKEMAKE_LAUNCH_MINUTES)
+                    + SNAKEMAKE_LAUNCH_MINUTES))
 
         return resources
 

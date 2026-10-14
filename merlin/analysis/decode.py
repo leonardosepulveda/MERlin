@@ -107,28 +107,27 @@ class Decode(BarcodeSavingParallelAnalysisTask):
     providesTimeEstimate = True
 
     def get_estimated_memory(self):
-        # Uncalibrated -- no Decode job has been measured. kTask=8 is a
-        # rough guess for float32 promotion (2x uint16) plus a handful of
-        # same-shape intermediate buffers (normalized pixel traces,
-        # magnitude/distance images) the decoder builds per z.
-        bitCount = self.get_codebook().get_bit_count()
+        # Fit to sacct (merlin.util.resourceestimate): 2D decode peaked at
+        # 5.8 GB (LT066, 26 bits, 2304x2304), 5.5 GB (BC553 epi) and
+        # 6.9 GB (BC555 epi, 16 bits, 2048x2048). Bits x frame size would
+        # put LT066 first, so the peak isn't the bit stack; a constant
+        # covers all three. decode_3d (not measured) also holds the whole
+        # z-stack of traces, so it keeps the stack-size scaling on top.
         if self.parameters['decode_3d']:
-            zCount = len(self.dataSet.get_z_positions())
-            frameCount = bitCount * zCount
-        else:
-            frameCount = bitCount
-        return resourceestimate.estimate_stack_memory_mb(
-            self.dataSet, frameCount=frameCount, kTask=8, baselineMb=300)
+            frameCount = self.get_codebook().get_bit_count() \
+                * len(self.dataSet.get_z_positions())
+            return max(5700, resourceestimate.estimate_stack_memory_mb(
+                self.dataSet, frameCount=frameCount, kTask=8,
+                baselineMb=300))
+        return 5700
 
     def get_estimated_time(self):
-        # Uncalibrated. Both decode_3d and the default 2D path loop over
-        # every z plane, decoding all bitCount channels together at each
-        # one (see _run_analysis) -- decode_3d only changes whether that
-        # loop's results are held in memory or written out incrementally,
-        # not how many times the per-z decode step runs.
-        zCount = len(self.dataSet.get_z_positions())
-        return resourceestimate.estimate_stack_time_minutes(
-            frameCount=zCount, secondsPerFrame=8, baselineMinutes=2)
+        # Fit to sacct: BC555 epi (25 z) was slowest, with a 146 min
+        # median, and LT066 (101 z) had 87 of 1225 FOVs time out at
+        # 180 min, so z count doesn't order the runs. Per-FOV time
+        # varies 10x within a run (tissue coverage, not known ahead).
+        # 192 min requests 4 h; the few slower FOVs get 8 h on retry.
+        return 192
 
     def _generate_verification_figures(self) -> None:
         """Generate the decodeplots figures (decode_task-only) as soon as

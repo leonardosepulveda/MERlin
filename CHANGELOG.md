@@ -216,3 +216,27 @@ major version).
   - Set `"format": "csv"` in its parameters to keep writing
     `barcodes.csv`. That file is identical to before, and it is also
     written one fov at a time.
+- Memory and time requests for most per-fov tasks come from MERlin's own
+  estimates, fit to every completed job of five runs (LT066, BC553 and
+  BC555 disk and epi). Each request covers the slowest fov of every run
+  by at least 5%. A pinned value in the cluster resource file still wins.
+  - New: Decode (8 GB, 4 h), OptimizeIteration (5 GB/13 min for the
+    first iteration, 8 GB/172 min after), SmfishSignal (2 GB, 28 min),
+    SumSignal, CleanCellBoundaries, RefineCellDatabases,
+    AdaptiveFilterBarcodes (all scaled by z count), GenerateMosaicTile
+    (1 GB, 46 min).
+  - Against the template's requests, this would have saved about
+    38,000 GB-hours of memory over these runs. SmfishSignal (32 GB asked,
+    1.6 GB used) and Decode are most of it.
+  - CellPoseSegmentSAM's time request is at least 1 h (it was 20-22
+    min). Its GPU jobs are about 98% of the pipeline's fairshare cost, and
+    a timeout wastes the GPU for the whole limit, while a longer limit
+    costs nothing.
+  - DeconvolutionPreprocess's time estimate has a 5 min baseline instead
+    of 1 min. At 1 min, 385 jobs timed out exactly at its request.
+  - Unmeasured subclasses (OptimizeIterationFOV,
+    SmfishColocalizationSignal, AdaptiveFilterBarcodesLocal) keep the
+    template's values.
+- A computed request grows with snakemake's retry attempt (2x, then 3x),
+  so a fov that needs more than the estimate succeeds on its retry
+  instead of failing again at the same limit.

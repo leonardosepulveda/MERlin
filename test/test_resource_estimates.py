@@ -25,6 +25,8 @@ def _task(cls, geometry, parameters=None):
     task = cls.__new__(cls)
     task.dataSet = mock.Mock()
     task.dataSet.get_z_positions.return_value = [0.0] * geometry['nz']
+    task.dataSet.get_z_positions_segmentation.return_value = \
+        [0.0] * geometry['nz']
     task.dataSet.get_image_dimensions.return_value = geometry['image']
     task.parameters = parameters or {}
     codebook = mock.Mock()

@@ -205,6 +205,15 @@ major version).
   - Why: in the one-task job, only cellpose's eval uses the GPU. On an
     H200, eval took 28-43 s of each 100-plane fov's job, and the GPU sat
     idle during the rest.
+  - On LT066 fovs 0-49 (gpu_requeue, preempted twice and resumed), the
+    two tasks used 537 billing-hours (GPU 532, CPU 5) against 4,885 for
+    every production attempt of the one-task job on those fovs (3,222
+    for the completed jobs alone), and 1.3 GPU-hours against 7.9. Same
+    cell count (100,916); median IoU of each cell's best match 0.998; 14
+    of 50 fovs identical.
+  - CellPoseSegmentSAM now raises if `use_gpu` is set and torch sees no
+    CUDA GPU. Cellpose otherwise runs on the CPU without a warning, as
+    it did for 19 min on one H200 node in that test.
 - Per-fov z offsets. Neighbouring fovs can disagree in z; on LT066 the
   same cell sits 1.57 µm higher in the right-hand fov and 0.54 µm higher
   in the upper fov.

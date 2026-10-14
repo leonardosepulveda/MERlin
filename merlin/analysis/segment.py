@@ -498,6 +498,13 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
         if 'feature_extraction_processes' not in self.parameters:
             self.parameters['feature_extraction_processes'] = 1
 
+        # name of a CellPoseEvalSAM task that already ran cellpose on a
+        # GPU. When set, this task only post-processes its masks
+        # (expand, z selection, upsampling, mask tiff, features) and
+        # needs no GPU. None runs cellpose here, as before.
+        if 'eval_task' not in self.parameters:
+            self.parameters['eval_task'] = None
+
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
 
@@ -528,9 +535,18 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
         loadMb = resourceestimate.estimate_stack_memory_mb(
             self.dataSet, frameCount=self._segmentation_frame_count(),
             kTask=8.4, baselineMb=590)
+        if self.parameters['eval_task'] is not None:
+            # post-processing only: no model. LT066 fovs 0-49 (101
+            # planes, 2026-10-14) peaked at 3.3 GiB, well under the
+            # loading term, which is kept as a generous CPU request.
+            return loadMb
         return max(loadMb, 3700)
 
     def get_estimated_time(self):
+        if self.parameters['eval_task'] is not None:
+            # post-processing only. Pilot on an H200 (2026-10-14):
+            # upsample 5 s, mask 10 s, features 9-23 s per 100-plane fov.
+            return 5 + 0.1 * self._segmentation_frame_count()
         # Seconds per stage, measured on the BC553 disk benchmark:
         # - 45 s fixed: imports and model load (40 s on first use on a
         #   node, 5 s after).
@@ -557,8 +573,11 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
         return max(2 * seconds / 60, 41.6)
 
     def get_dependencies(self):
-        return [self.parameters['warp_task'],
-                self.parameters['global_align_task']]
+        dependencies = [self.parameters['warp_task'],
+                        self.parameters['global_align_task']]
+        if self.parameters['eval_task'] is not None:
+            dependencies.append(self.parameters['eval_task'])
+        return dependencies
 
     def get_cell_boundaries(self) -> List[spatialfeature.SpatialFeature]:
         featureDB = self.get_feature_database()
@@ -649,6 +668,139 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
             masks = [self._load_mask_image(fov, zIndex, filename_prefix = 'segmented_mask_') for zIndex in range(num_z)]
             return np.array(masks)
 
+    def _read_eval_input(self, fov: int) -> Dict:
+        """Read and downsample this fov's segmentation stack(s) into the
+        array cellpose evaluates. Also keeps the full-resolution stacks
+        (for dump_segmented_images) and their xy size (for upsampling the
+        masks back)."""
+        channel_1_id = self.dataSet.get_data_organization()\
+            .get_data_channel_index(self.parameters['channel_1_name'])
+        seg_images_1 = self._read_image_stack(fov, channel_1_id)
+        seg_images_2 = None
+        if self.parameters['channel_2_name'] is not None:
+            channel_2_id = self.dataSet.get_data_organization()\
+                .get_data_channel_index(self.parameters['channel_2_name'])
+            seg_images_2 = self._read_image_stack(fov, channel_2_id)
+
+        num_frames, rows_i, cols_i = seg_images_1.shape
+        seg_1, seg_2 = seg_images_1, seg_images_2
+        # downsample the image to save on memory
+        if self.parameters['downsample_factor'] is not None:
+            factor = self.parameters['downsample_factor']
+            rows_f = int(rows_i / factor)
+            cols_f = int(cols_i / factor)
+            seg_1 = transform.resize(seg_images_1, [num_frames, rows_f, cols_f],
+                preserve_range = True).astype(seg_images_1.dtype)
+            if seg_images_2 is not None:
+                seg_2 = transform.resize(seg_images_2, [num_frames, rows_f, cols_f],
+                    preserve_range = True).astype(seg_images_2.dtype)
+
+        # stack the images if necessary
+        if seg_2 is not None:
+            seg_images = np.stack([seg_1, seg_2], axis = 3) # this should be a [z,x,y,c] stack
+        else:
+            seg_images = seg_1
+        return dict(seg_images=seg_images, seg_images_1=seg_images_1,
+                    seg_images_2=seg_images_2, rows=rows_i, cols=cols_i)
+
+    def _build_model(self):
+        # only import cellpose when we really need it since it is slow
+        import cellpose.models
+        import torch
+        # without a usable GPU cellpose quietly runs on the CPU, many times
+        # slower while still holding the GPU; fail so the job is rerun
+        if self.parameters['use_gpu'] and not torch.cuda.is_available():
+            raise RuntimeError('use_gpu is set but torch sees no CUDA GPU')
+        # if path_to_user_model exist, override and use user model - must be trained in cellpose
+        if self.parameters['path_to_user_model']:
+            return cellpose.models.CellposeModel(gpu = self.parameters['use_gpu'],
+                                                pretrained_model=self.parameters['path_to_user_model'])
+        return cellpose.models.CellposeModel(gpu=self.parameters['use_gpu'])
+
+    def _eval_masks(self, model, seg_images: np.ndarray, fov: int) -> np.ndarray:
+        """Run cellpose on the downsampled stack and return its masks, at
+        the downsampled resolution and with every segmentation plane."""
+        import cellpose.utils
+        is_two_channel = seg_images.ndim == 4
+        # there could be an issue here if we have a two channel image but a single z stack... watch out...
+        # axes for cellpose
+        channel_axis = 3 if seg_images.ndim == 4 else None
+
+        diameter = self.parameters['diameter']
+        if diameter is not None and self.parameters['downsample_factor'] is not None:
+            diameter = diameter / self.parameters['downsample_factor']
+
+        if self.parameters['do_3D']:
+            anisotropy = self._get_anisotropy(fov)
+            print(f'cellpose do_3D with anisotropy {anisotropy:.3f}')
+            cellpose_output = model.eval(seg_images,
+                                            do_3D = True,
+                                            z_axis = 0,
+                                            channel_axis = channel_axis,
+                                            anisotropy = anisotropy,
+                                            diameter = diameter,
+                                            flow3D_smooth = self.parameters['flow3D_smooth'],
+                                            flow_threshold = self.parameters['flow_threshold'], 
+                                            cellprob_threshold = self.parameters['cellprob_threshold'],
+                                            min_size = self.parameters['min_size'],
+                                            normalize={"tile_norm_blocksize": self.parameters['tile_norm_blocksize']})
+            return cellpose_output[0]
+
+        # 2D mode is a little different from CP1-3 from what I can tell
+        masks_shape = np.array(seg_images.shape)
+        if is_two_channel:
+            masks_shape = masks_shape[:-1]
+
+        masks_raw = np.zeros(masks_shape, dtype = np.uint16)
+        # have to run this plane by plane
+        for i,im in enumerate(seg_images):
+            cellpose_output = model.eval(im,
+                                            do_3D = False,
+                                            diameter = diameter,
+                                            flow_threshold = self.parameters['flow_threshold'], 
+                                            cellprob_threshold = self.parameters['cellprob_threshold'],
+                                            min_size = self.parameters['min_size'],
+                                            normalize={"tile_norm_blocksize": self.parameters['tile_norm_blocksize']})
+            masks_raw[i] = cellpose_output[0]
+        return cellpose.utils.stitch3D(masks_raw, stitch_threshold=self.parameters['stitch_threshold'])
+
+    def _finish_masks(self, masks: np.ndarray, fov: int, rows_i: int,
+                      cols_i: int):
+        """Expand, keep this fov's regular z planes and upsample cellpose's
+        masks to full resolution. Returns the masks, the kept z positions
+        and the boolean plane selection."""
+        # this will cause masks to grow with the hope that they are a little smoother...
+        if self.parameters['expand_mask'] > 0:
+            for i in range(len(masks)):
+                masks[i] = segmentation.expand_labels(masks[i], int(self.parameters['expand_mask']))
+
+        # recall that the segmentation channel may have more z positions
+        # only take those zpositions
+        zPos = np.array(self.dataSet.get_z_positions(fov))
+        zPos_segment = np.array(self.dataSet.get_z_positions_segmentation(fov))
+        sel = np.isin(zPos_segment, zPos)
+        if sel.sum() != len(zPos):
+            warnings.warn(
+                ('Segmentation z positions for fov {0} do not fully '
+                 "cover this fov's regular z positions (expected {1} "
+                 'matches, found {2}); feature z-coordinates for this '
+                 "fov are derived from the segmentation channel's own "
+                 'retained z positions instead.')
+                .format(fov, len(zPos), sel.sum()))
+        # use the actually-retained z-values (not the unfiltered zPos) --
+        # guaranteed to match masks/seg_images's length and order after
+        # the sel mask, unlike zPos which only coincides with them when
+        # every zPos entry is present in zPos_segment
+        zPosRetained = zPos_segment[sel]
+        masks = masks[sel]
+
+        # upsample the images if they were downsampled
+        if self.parameters['downsample_factor'] is not None:
+            masks = transform.resize(masks, [len(masks),rows_i,cols_i],
+                order = 0,
+                preserve_range = True).astype(masks.dtype)
+        return masks, zPosRetained, sel
+
     def _run_analysis(self, fragmentIndex):
 
         globalTask = self.dataSet.load_analysis_task(
@@ -665,154 +817,43 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
 
         # else run the full analysis
         else:
-
-            # only import cellpose when we really need it since it is slow
-            import cellpose.models
-            import cellpose.utils
-
-            print(f'starting cellposeSAM')
-            # assume single channel first
-            is_two_channel = False
-            if self.parameters['channel_2_name'] is not None:
-                is_two_channel = True
-
-            # get channel index and read images
-            channel_1_id = self.dataSet.get_data_organization().get_data_channel_index(
-                    self.parameters['channel_1_name'])
-            seg_images_1 = self._read_image_stack(fragmentIndex, channel_1_id)
-
-            if is_two_channel:
-                channel_2_id = self.dataSet.get_data_organization().get_data_channel_index(
-                    self.parameters['channel_2_name'])
-                seg_images_2 = self._read_image_stack(fragmentIndex, channel_2_id)
-
-            # downsample the image to save on memory
-            if self.parameters['downsample_factor'] is not None:
-                factor = self.parameters['downsample_factor']
-                num_frames, rows_i, cols_i = seg_images_1.shape
-                rows_f = int(rows_i / factor)
-                cols_f = int(cols_i / factor)
-                seg_images_1 = transform.resize(seg_images_1, [num_frames,rows_f,cols_f],
-                    preserve_range = True).astype(seg_images_1.dtype)
-                if is_two_channel:
-                    seg_images_2 = transform.resize(seg_images_2, [num_frames,rows_f,cols_f],
-                        preserve_range = True).astype(seg_images_2.dtype)
-
-            # stack the images if necessary
-            if is_two_channel:
-                seg_images = np.stack([seg_images_1, seg_images_2], axis = 3) # this should be a [z,x,y,c] stack
+            evalInput = None
+            if self.parameters['eval_task'] is not None:
+                # cellpose already ran in the eval task, on a GPU
+                evalTask = self.dataSet.load_analysis_task(
+                    self.parameters['eval_task'])
+                masks, rows_i, cols_i = evalTask.load_eval_masks(
+                    fragmentIndex)
+                if self.parameters['dump_segmented_images']:
+                    evalInput = self._read_eval_input(fragmentIndex)
             else:
-                seg_images = seg_images_1
+                print(f'starting cellposeSAM')
+                evalInput = self._read_eval_input(fragmentIndex)
+                rows_i, cols_i = evalInput['rows'], evalInput['cols']
+                masks = self._eval_masks(self._build_model(),
+                                         evalInput['seg_images'],
+                                         fragmentIndex)
 
-            # there could be an issue here if we have a two channel image but a single z stack... watch out...
-
-            # axes for cellpose
-            if seg_images.ndim == 2: # single image
-                z_axis = None
-                channel_axis = None
-            if seg_images.ndim == 3:
-                z_axis = 0
-                channel_axis = None
-            if seg_images.ndim == 4: # z stack and channels
-                z_axis = 0
-                channel_axis = 3
-
-            # get ready for cellpose stuff
-            # if path_to_user_model exist, override and use user model - must be trained in cellpose
-            if self.parameters['path_to_user_model']:
-                model = cellpose.models.CellposeModel(gpu = self.parameters['use_gpu'],
-                                                    pretrained_model=self.parameters['path_to_user_model'])
-            else:
-                model = cellpose.models.CellposeModel(gpu=self.parameters['use_gpu'])
-
-            diameter = self.parameters['diameter']
-            if diameter is not None and self.parameters['downsample_factor'] is not None:
-                diameter = diameter / self.parameters['downsample_factor']
-
-            if self.parameters['do_3D']:
-                anisotropy = self._get_anisotropy(fragmentIndex)
-                print(f'cellpose do_3D with anisotropy {anisotropy:.3f}')
-                cellpose_output = model.eval(seg_images,
-                                                do_3D = True,
-                                                z_axis = 0,
-                                                channel_axis = channel_axis,
-                                                anisotropy = anisotropy,
-                                                diameter = diameter,
-                                                flow3D_smooth = self.parameters['flow3D_smooth'],
-                                                flow_threshold = self.parameters['flow_threshold'], 
-                                                cellprob_threshold = self.parameters['cellprob_threshold'],
-                                                min_size = self.parameters['min_size'],
-                                                normalize={"tile_norm_blocksize": self.parameters['tile_norm_blocksize']})
-                masks = cellpose_output[0]
-
-            else: # 2D mode is a little different from CP1-3 from what I can tell
-
-                masks_shape = np.array(seg_images.shape)
-                if is_two_channel:
-                    masks_shape = masks_shape[:-1]
-
-                masks_raw = np.zeros(masks_shape, dtype = np.uint16)
-                # have to run this plane by plane
-                for i,im in enumerate(seg_images):
-                    cellpose_output = model.eval(im,
-                                                    do_3D = False,
-                                                    diameter = diameter,
-                                                    flow_threshold = self.parameters['flow_threshold'], 
-                                                    cellprob_threshold = self.parameters['cellprob_threshold'],
-                                                    min_size = self.parameters['min_size'],
-                                                    normalize={"tile_norm_blocksize": self.parameters['tile_norm_blocksize']})
-                    masks_raw[i] = cellpose_output[0]
-                masks = cellpose.utils.stitch3D(masks_raw, stitch_threshold=self.parameters['stitch_threshold'])
-
-            # this will cause masks to grow with the hope that they are a little smoother...
-            if self.parameters['expand_mask'] > 0:
-                for i in range(len(masks)):
-                    masks[i] = segmentation.expand_labels(masks[i], int(self.parameters['expand_mask']))
-
-
-            # recall that the segmentation channel may have more z positions
-            # only take those zpositions
-            zPos = np.array(self.dataSet.get_z_positions(fragmentIndex))
-            zPos_segment = np.array(self.dataSet.get_z_positions_segmentation(fragmentIndex))
-            sel = np.isin(zPos_segment, zPos)
-            if sel.sum() != len(zPos):
-                warnings.warn(
-                    ('Segmentation z positions for fov {0} do not fully '
-                     "cover this fov's regular z positions (expected {1} "
-                     'matches, found {2}); feature z-coordinates for this '
-                     "fov are derived from the segmentation channel's own "
-                     'retained z positions instead.')
-                    .format(fragmentIndex, len(zPos), sel.sum()))
-            # use the actually-retained z-values (not the unfiltered zPos) --
-            # guaranteed to match masks/seg_images's length and order after
-            # the sel mask, unlike zPos which only coincides with them when
-            # every zPos entry is present in zPos_segment
-            zPosRetained = zPos_segment[sel]
-            masks = masks[sel]
-
-            # upsample the images if they were downsampled
-            if self.parameters['downsample_factor'] is not None:
-                masks = transform.resize(masks, [len(masks),rows_i,cols_i],
-                    order = 0,
-                    preserve_range = True).astype(masks.dtype)
+            masks, zPosRetained, sel = self._finish_masks(
+                masks, fragmentIndex, rows_i, cols_i)
 
             self._save_tiff_images(fragmentIndex, 'segmented_mask_', masks)
             
             if self.parameters['dump_segmented_images']:
 
-                seg_images_1 = seg_images_1[sel]
+                seg_images_1 = evalInput['seg_images_1'][sel]
                 seg_images_1 = transform.resize(seg_images_1, [len(masks),rows_i,cols_i],
                     order = 1,
                     preserve_range = True).astype(seg_images_1.dtype)
-                
-                if is_two_channel:
+                seg_images_2 = evalInput['seg_images_2']
+                if seg_images_2 is not None:
                     seg_images_2 = seg_images_2[sel]
                     seg_images_2 = transform.resize(seg_images_2, [len(masks),rows_i,cols_i],
                         order = 1,
                         preserve_range = True).astype(seg_images_2.dtype)
                     
                 self._save_tiff_images(fragmentIndex, 'segmented_images_1_', seg_images_1)
-                if is_two_channel:
+                if seg_images_2 is not None:
                     self._save_tiff_images(fragmentIndex, 'segmented_images_2_', seg_images_2)
 
         # finish if/else and do the spatial feature part...
@@ -852,6 +893,109 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
 
         featureDB = self.get_feature_database()
         featureDB.write_features(featureList, fragmentIndex)
+
+
+class CellPoseEvalSAM(CellPoseSegmentSAM):
+    """Run only cellpose for CellPoseSegmentSAM, on a GPU, for a batch of
+    fovs per job.
+
+    Each fragment is a batch of `fovs_per_job` fovs. The model is loaded
+    once per batch, and the next fov's stack is read and downsampled in a
+    second thread while the GPU evaluates the current one, so the GPU is
+    held for about the evaluation time alone. Each fov's masks (at the
+    downsampled resolution) are saved as soon as they are done, and a
+    rerun of the batch (after a TIMEOUT or a preemption) skips the fovs
+    already saved.
+
+    A CellPoseSegmentSAM task with `eval_task` set to this task's name
+    then does the rest on a CPU. Both tasks take the same cellpose
+    parameters; the eval task's are the ones used.
+    """
+
+    def __init__(self, dataSet, parameters=None, analysisName=None):
+        super().__init__(dataSet, parameters, analysisName)
+        if 'fovs_per_job' not in self.parameters:
+            self.parameters['fovs_per_job'] = 50
+        if self.parameters['eval_task'] is not None:
+            raise analysistask.InvalidParameterException(
+                'CellPoseEvalSAM runs cellpose itself; eval_task must be '
+                'unset.')
+
+    def _batch_fovs(self, fragmentIndex: int) -> List[int]:
+        fovs = sorted(self.dataSet.get_fovs())
+        size = self.parameters['fovs_per_job']
+        return fovs[fragmentIndex * size:(fragmentIndex + 1) * size]
+
+    def fragment_count(self):
+        return int(np.ceil(len(self.dataSet.get_fovs())
+                           / self.parameters['fovs_per_job']))
+
+    def get_dependencies(self):
+        return [self.parameters['warp_task'],
+                self.parameters['global_align_task']]
+
+    def get_estimated_memory(self):
+        # the next fov's full-resolution stack is loaded while the model
+        # evaluates the current one, so both are held at once. LT066
+        # batch of 50 (101 planes, 2026-10-14) peaked at 14,535 MiB,
+        # the loading term plus 4,938.
+        loadMb = resourceestimate.estimate_stack_memory_mb(
+            self.dataSet, frameCount=self._segmentation_frame_count(),
+            kTask=8.4, baselineMb=590)
+        return loadMb + 5000
+
+    def get_estimated_time(self):
+        # On an H200 (pilot, 2026-10-14) eval took 28-43 s per fov and
+        # reading the next fov overlaps it; 10 + 0.4 s per plane, doubled
+        # for slower cards. A batch that still times out resumes from
+        # the first unsaved fov on its retry.
+        perFovSeconds = 2 * (10 + 0.4 * self._segmentation_frame_count())
+        return 2 + self.parameters['fovs_per_job'] * perFovSeconds / 60
+
+    def _mask_path(self, fov: int) -> str:
+        return os.path.join(
+            self.dataSet.get_analysis_subdirectory(self, 'masks'),
+            'mask_%d.npz' % fov)
+
+    def load_eval_masks(self, fov: int):
+        """This fov's cellpose masks at the downsampled resolution, with
+        every segmentation plane, and the full-resolution rows and
+        columns to upsample them to."""
+        with np.load(self._mask_path(fov)) as saved:
+            return saved['masks'], int(saved['rows']), int(saved['cols'])
+
+    def _save_eval_masks(self, fov: int, masks: np.ndarray, rows: int,
+                         cols: int) -> None:
+        # written to a temporary name and renamed, so a job killed while
+        # saving never leaves a file that a rerun would take as done
+        path = self._mask_path(fov)
+        tmp = path + '.tmp.npz'
+        np.savez_compressed(tmp, masks=masks, rows=rows, cols=cols)
+        os.replace(tmp, path)
+
+    def _run_analysis(self, fragmentIndex):
+        from concurrent.futures import ThreadPoolExecutor
+        todo = [fov for fov in self._batch_fovs(fragmentIndex)
+                if not os.path.exists(self._mask_path(fov))]
+        print('cellpose eval: %d fovs left in batch %d'
+              % (len(todo), fragmentIndex))
+        if not todo:
+            return
+        model = self._build_model()
+        with ThreadPoolExecutor(max_workers=1) as reader:
+            nextInput = reader.submit(self._read_eval_input, todo[0])
+            for i, fov in enumerate(todo):
+                evalInput = nextInput.result()
+                if i + 1 < len(todo):
+                    nextInput = reader.submit(self._read_eval_input,
+                                              todo[i + 1])
+                t0 = time.time()
+                masks = self._eval_masks(model, evalInput['seg_images'], fov)
+                self._save_eval_masks(fov, masks, evalInput['rows'],
+                                      evalInput['cols'])
+                print('fov %d: eval and save %.1f s'
+                      % (fov, time.time() - t0))
+                del evalInput
 
 
 class CleanCellBoundaries(analysistask.ParallelAnalysisTask):

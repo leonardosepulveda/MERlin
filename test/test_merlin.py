@@ -76,3 +76,26 @@ def test_slurm_driver_log_filter_reformats_command():
         '\n\t-n 4'
         '\n\t-e /n/x/experiments'
         '\n\t-s /n/x/merlin BC553_sample_02_test/epi/data')
+
+
+def test_run_with_snakemake_keeps_done_tasks_after_code_change(tmp_path):
+    # Resuming after a MERlin upgrade changes rule shell commands; a task
+    # whose output exists and is newer than its inputs must not rerun.
+    from unittest import mock
+    from merlin.merlin import run_with_snakemake
+    out = tmp_path / 'task.done'
+    snakefile = tmp_path / 'Snakefile'
+    dataSet = mock.Mock()
+    dataSet.get_snakemake_path.return_value = str(tmp_path)
+
+    snakefile.write_text(
+        'rule task:\n\toutput: %r\n\tshell: "echo first > {output}"\n'
+        % str(out))
+    run_with_snakemake(dataSet, str(snakefile), 1)
+    assert out.read_text().strip() == 'first'
+
+    snakefile.write_text(
+        'rule task:\n\toutput: %r\n\tshell: "echo second > {output}"\n'
+        % str(out))
+    run_with_snakemake(dataSet, str(snakefile), 1)
+    assert out.read_text().strip() == 'first'

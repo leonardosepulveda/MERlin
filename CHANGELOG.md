@@ -210,6 +210,13 @@ major version).
     barcode per 2.28.
 
 ### Changed
+- A resumed run no longer reruns finished tasks because MERlin's code
+  changed. Snakemake's default rerun triggers (code, params, software
+  env, input, mtime) re-planned everything after an upgrade: on LT066,
+  all 11,915 jobs, including Decode, CellPose and every Optimize
+  iteration. Only a missing output, or an input newer than the output,
+  reruns a task now (`--rerun-triggers mtime`). To redo a finished
+  task, delete its outputs as before.
 - Verification figures are drawn by a separate `<Task>Figures` snakemake
   rule after each task is done (`merlin -t <Task> --figures-only`), not
   inside the task's run or its Done rule. Nothing depends on the Figures

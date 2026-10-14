@@ -64,3 +64,149 @@ def test_z_shift_is_zero_for_an_older_combine_run(simple_merfish_data,
         shift = task._z_shift_to_fov(_FakeAssignmentTask('Combine'), 0,
                                      np.array([0, 1]))
     assert shift == pytest.approx([0, 0])
+
+
+# The per-cell loops PartitionBarcodes used before count_traditional and
+# count_with_boundary_correction, kept as the reference for their output.
+
+def _reference_traditional(cells, barcodes, barcodeCount):
+    countsDF = pandas.DataFrame(
+        data=np.zeros((len(cells), barcodeCount)),
+        columns=range(barcodeCount),
+        index=[x.get_feature_id() for x in cells])
+    for cell in cells:
+        contained = cell.contains_positions(
+            barcodes.loc[:, ['global_x', 'global_y', 'z']].values)
+        count = barcodes[contained].groupby('barcode_id').size()
+        count = count.reindex(range(barcodeCount), fill_value=0)
+        countsDF.loc[cell.get_feature_id(), :] = count.values.tolist()
+    return countsDF
+
+
+def _reference_boundary_correction(cells, barcodes, barcodeCount,
+                                   bufferSize):
+    index = [x.get_feature_id() for x in cells]
+    countsDF = pandas.DataFrame(np.zeros((len(cells), barcodeCount)),
+                                columns=range(barcodeCount), index=index)
+    countsShrunk = countsDF.copy()
+    expandedCells = [c.make_a_buffered_copy(bufferSize) for c in cells]
+    shrunkCells = [c.make_a_buffered_copy(-bufferSize) for c in cells]
+    n = barcodes.shape[0]
+    hostNormal = [[] for _ in range(n)]
+    hostShrunk = [[] for _ in range(n)]
+    hostExpanded = [[] for _ in range(n)]
+    positions = barcodes.loc[:, ['global_x', 'global_y', 'z']].values
+    for i in range(len(cells)):
+        inNormal = cells[i].contains_positions(positions)
+        inShrunk = shrunkCells[i].contains_positions(positions)
+        inExpanded = expandedCells[i].contains_positions(positions)
+        for j in np.where(inNormal)[0]:
+            hostNormal[j].append(i)
+        for j in np.where(inShrunk)[0]:
+            hostShrunk[j].append(i)
+        for j in np.where(inExpanded)[0]:
+            hostExpanded[j].append(i)
+        count = barcodes[inShrunk].groupby('barcode_id').size()
+        count = count.reindex(range(barcodeCount), fill_value=0)
+        countsShrunk.loc[shrunkCells[i].get_feature_id(), :] = \
+            count.values.tolist()
+
+    types = list(barcodes['barcode_id'])
+    for i in range(n):
+        if len(hostExpanded[i]) == 0:
+            continue
+        t = types[i]
+        if len(hostShrunk[i]) > 0:
+            countsDF.iloc[hostShrunk[i][0], t] += 1
+            continue
+        filtered = [c for c in hostExpanded[i]
+                    if countsShrunk.iloc[c, t] > 0]
+        if len(hostNormal[i]) > 0:
+            c0 = hostNormal[i][0]
+            if countsShrunk.iloc[c0, t] > 0:
+                countsDF.iloc[c0, t] += 1
+            elif len(filtered) > 0:
+                countsDF.iloc[np.random.choice(filtered), t] += 1
+            else:
+                countsDF.iloc[c0, t] += 1
+            continue
+        if len(filtered) > 0:
+            countsDF.iloc[np.random.choice(filtered), t] += 1
+    return countsDF
+
+
+def _synthetic_cells_and_barcodes(seed):
+    """Overlapping cells over 4 planes (one plane empty in some cells,
+    one cell split in two parts on a plane) and barcodes around them:
+    inside, on edges, in the buffer zones, outside, with fractional z,
+    z exactly between planes and z outside the stack."""
+    from shapely import geometry
+    from merlin.util import spatialfeature
+    rng = np.random.default_rng(seed)
+    cells = []
+    for k in range(12):
+        cx, cy = rng.uniform(0, 20, 2)
+        r = rng.uniform(1.5, 4)
+        planes = []
+        for z in range(4):
+            if rng.random() < 0.15:
+                planes.append([])
+            elif rng.random() < 0.15:
+                planes.append([geometry.Point(cx - r, cy).buffer(r / 2),
+                               geometry.Point(cx + r, cy).buffer(r / 2)])
+            else:
+                planes.append([geometry.box(cx - r, cy - r, cx + r, cy + r)
+                               if k % 2 else
+                               geometry.Point(cx, cy).buffer(r)])
+        cells.append(spatialfeature.SpatialFeature(
+            planes, 0, np.arange(4, dtype=float), uniqueID=k))
+    n = 3000
+    x = rng.uniform(-3, 23, n)
+    y = rng.uniform(-3, 23, n)
+    # snap some barcodes to box edges and corners, which are not inside
+    x[:200] = np.round(x[:200])
+    y[:100] = np.round(y[:100])
+    z = rng.choice([0, 1, 2, 3, 0.5, 1.5, 2.49, 2.51, -0.6, 3.6, 4.2],
+                   n) + rng.normal(0, 0.05, n) * (rng.random(n) < 0.5)
+    barcodes = pandas.DataFrame({
+        'barcode_id': rng.integers(0, 5, n), 'global_x': x,
+        'global_y': y, 'z': z})
+    return cells, barcodes
+
+
+@pytest.mark.parametrize('seed', [0, 1, 2])
+def test_count_traditional_matches_per_cell_loop(seed):
+    from merlin.analysis import partition
+    cells, barcodes = _synthetic_cells_and_barcodes(seed)
+    zBefore = barcodes['z'].values.copy()
+    new = partition.count_traditional(cells, barcodes, 5)
+    pandas.testing.assert_frame_equal(
+        new, _reference_traditional(cells, barcodes, 5))
+    assert new.values.sum() > 0
+    assert np.array_equal(barcodes['z'].values, zBefore)
+
+
+@pytest.mark.parametrize('seed', [0, 1, 2])
+def test_count_with_boundary_correction_matches_per_barcode_loop(seed):
+    from merlin.analysis import partition
+    cells, barcodes = _synthetic_cells_and_barcodes(seed)
+    np.random.seed(seed)
+    new = partition.count_with_boundary_correction(cells, barcodes, 5, 0.5)
+    randomAfterNew = np.random.random()
+    np.random.seed(seed)
+    old = _reference_boundary_correction(cells, barcodes, 5, 0.5)
+    # the same number of random draws, so the same random choices
+    assert np.random.random() == randomAfterNew
+    pandas.testing.assert_frame_equal(new, old)
+    assert new.values.sum() > 0
+
+
+def test_contained_barcodes_with_no_cells_or_barcodes():
+    from merlin.analysis import partition
+    cells, barcodes = _synthetic_cells_and_barcodes(0)
+    b, c = partition.contained_barcodes([], *[barcodes[k].values for k in
+                                              ('global_x', 'global_y', 'z')])
+    assert len(b) == len(c) == 0
+    counts = partition.count_with_boundary_correction(
+        cells, barcodes.iloc[:0], 5, 0.5)
+    assert counts.shape == (len(cells), 5) and counts.values.sum() == 0

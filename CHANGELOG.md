@@ -177,6 +177,20 @@ major version).
   - Reruns find more barcodes than runs done in `merlin_cc_env` so far
     (LT066, BC553 epi): the 3-px ones in Decode, and 4-px ones in the
     Optimize refactors.
+- PartitionBarcodes takes minutes per fov instead of hours, with the same
+  counts. On LT066, fov 265 takes 2.8 min instead of 7.0 h, and fovs 604
+  and 189 take 3.5 and 5.1 min (they timed out at 12 h before). Peak
+  memory is 3.3-5.0 GB.
+  - Barcodes are sorted by plane and x once per fov. Each cell polygon
+    then tests only the barcodes in its bounding box, with
+    `shapely.contains_xy`, instead of all barcodes on every plane.
+  - The assignment to cells uses arrays instead of a Python loop over
+    every barcode. With the same `np.random` seed it gives the same
+    counts as before, including the random choices between cells.
+  - It reads only the 5 barcode columns it uses.
+  - Its memory and time estimates are now set (6 GB, 10 min).
+  - `make_a_buffered_copy` no longer prints every z index, and
+    `contains_positions` no longer rounds the caller's z in place.
 
 ### Added
 - Per-fov z offsets. Neighbouring fovs can disagree in z; on LT066 the

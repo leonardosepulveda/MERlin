@@ -109,5 +109,6 @@ def test_unmeasured_subclasses_opt_out(cls):
 
 def test_cellpose_time_request_is_at_least_one_hour():
     task = _task(segment.CellPoseSegmentSAM, EPI,
-                 {'channel_2_name': None, 'do_3D': True})
+                 {'channel_2_name': None, 'do_3D': True,
+                  'eval_task': None})
     assert _requested_minutes(task) == 60

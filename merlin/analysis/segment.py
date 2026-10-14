@@ -536,9 +536,9 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
             self.dataSet, frameCount=self._segmentation_frame_count(),
             kTask=8.4, baselineMb=590)
         if self.parameters['eval_task'] is not None:
-            # post-processing only: no model, but upsampling the masks
-            # to full resolution goes through float64 like the loading
-            # does. Not yet measured; the loading term is used.
+            # post-processing only: no model. LT066 fovs 0-49 (101
+            # planes, 2026-10-14) peaked at 3.3 GiB, well under the
+            # loading term, which is kept as a generous CPU request.
             return loadMb
         return max(loadMb, 3700)
 
@@ -932,11 +932,13 @@ class CellPoseEvalSAM(CellPoseSegmentSAM):
 
     def get_estimated_memory(self):
         # the next fov's full-resolution stack is loaded while the model
-        # evaluates the current one, so both are held at once
+        # evaluates the current one, so both are held at once. LT066
+        # batch of 50 (101 planes, 2026-10-14) peaked at 14,535 MiB,
+        # the loading term plus 4,938.
         loadMb = resourceestimate.estimate_stack_memory_mb(
             self.dataSet, frameCount=self._segmentation_frame_count(),
             kTask=8.4, baselineMb=590)
-        return loadMb + 3700
+        return loadMb + 5000
 
     def get_estimated_time(self):
         # On an H200 (pilot, 2026-10-14) eval took 28-43 s per fov and

@@ -115,6 +115,10 @@ def _translate_cluster_resources(rawResources: Dict) -> Dict:
         resources['gres'] = rawResources['gres']
     if rawResources.get('exclude'):
         resources['slurm_extra'] = '--exclude=%s' % rawResources['exclude']
+    # The legacy 'n' is not mapped: the old sbatch template passed it as
+    # -n (--ntasks), not as a CPU count, and every job runs one process.
+    if rawResources.get('cpus'):
+        resources['cpus_per_task'] = rawResources['cpus']
     return resources
 
 

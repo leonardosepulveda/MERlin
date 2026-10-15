@@ -126,6 +126,25 @@ def test_translate_cluster_resources_omits_zero_gres():
     assert 'gres' not in resources
 
 
+def test_snakemake_rule_resources_cpus(simple_merfish_task):
+    # 'cpus' becomes cpus_per_task only where it is set; the legacy 'n'
+    # (--ntasks in the old sbatch template) stays ignored.
+    taskName = simple_merfish_task.get_analysis_name()
+    default = {'account': 'zhuang_lab', 'time': '3:00:00', 'n': 1,
+               'mem': 8000, 'partition': 'zhuang'}
+    withCpus = snakewriter.SnakemakeRule(
+        simple_merfish_task, clusterConfig={
+            '__default__': default, taskName: {'cpus': 2}})
+    assert withCpus._cluster_resources_for_rule(taskName)[
+        'cpus_per_task'] == 2
+    assert 'cpus_per_task=2' in withCpus.as_string()
+    withoutCpus = snakewriter.SnakemakeRule(
+        simple_merfish_task, clusterConfig={'__default__': default})
+    assert 'cpus_per_task' not in withoutCpus._cluster_resources_for_rule(
+        taskName)
+    assert 'cpus_per_task' not in withoutCpus.as_string()
+
+
 def test_translate_cluster_resources_time_with_days():
     assert snakewriter._parse_slurm_time_to_minutes('2-03:15:30') \
         == 2*24*60 + 3*60 + 15 + 1

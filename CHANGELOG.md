@@ -123,6 +123,14 @@ major version).
 ## [Unreleased]
 
 ### Fixed
+- SumSignal keeps every cell separate (**rerun SumSignal** on earlier
+  outputs). Labels were drawn into a `uint8` mask, so in a fov with more
+  than 254 cells, cells 255 onward became one region, and each got the
+  summed intensity and pixel count of all of them.
+  - Affected: BC553_sample_02 disk (1,705 of 2,020 fovs; 1.07 M of
+    1.52 M cells), BC553_sample_02 epi (1,317 of 1,651 fovs; 206 k of
+    569 k cells) and BC555_sample_05 epi (267 of 476 fovs; 59 k of
+    147 k cells).
 - Verification figures no longer take hours on large experiments: the
   barcode radial-distribution metadata is vectorized (same bins, ~500x
   faster) and saved every 50 fovs, so a retry resumes. Segmentation-boundary
@@ -193,6 +201,19 @@ major version).
     `contains_positions` no longer rounds the caller's z in place.
 
 ### Added
+- SumSignal `z_index: all` sums each cell over every plane where it has
+  a boundary, for totals through the whole cell (e.g. DNA content per
+  nucleus). The default (`z_index: 0`) is unchanged.
+  - Channel columns hold the summed intensity (not the mean, as with an
+    integer `z_index`), plus `<channel>_background`, `Voxels` and
+    `Planes`. ExportSumSignals works as before.
+  - `<channel>_background` is the sum over planes of that plane's
+    background (median outside all cells) times the cell's voxels there,
+    so `<channel> - <channel>_background` is the corrected total. The
+    per-plane backgrounds are saved per fov (`get_backgrounds`).
+  - On LT066 (DAPI, 101 planes, up to 3,499 cells per fov), a fov takes
+    at most 4.9 min and 1.6 GB. Its estimates scale with z (2 GB, 18 min
+    requested at 101 planes).
 - Cluster resource templates take a `cpus` key per task. It is passed
   to SLURM as `--cpus-per-task`. Tasks without it still get 1 CPU, and
   the legacy `n` (`--ntasks`) stays ignored.

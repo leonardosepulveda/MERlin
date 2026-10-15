@@ -61,6 +61,7 @@ OBSERVED = [
     (sequential.SmfishSignal, {}, EPI, 1582, 25.4),
     (sequential.SumSignal, {}, DISK, 1084, 13.8),
     (sequential.SumSignal, {}, EPI, 650, 11.3),
+    (sequential.SumSignal, {'z_index': 'all'}, LT066, 1592, 4.9),
     (segment.CleanCellBoundaries, {}, LT066, 7985, 90),
     (segment.CleanCellBoundaries, {}, EPI, 1342, 8.1),
     (segment.RefineCellDatabases, {}, LT066, 1742, 13.2),

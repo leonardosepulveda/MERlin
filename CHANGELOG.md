@@ -193,6 +193,9 @@ major version).
     `contains_positions` no longer rounds the caller's z in place.
 
 ### Added
+- Cluster resource templates take a `cpus` key per task. It is passed
+  to SLURM as `--cpus-per-task`. Tasks without it still get 1 CPU, and
+  the legacy `n` (`--ntasks`) stays ignored.
 - CellPoseEvalSAM: runs only cellpose, on a GPU, for a batch of fovs
   per job (`fovs_per_job`, default 50). The model loads once per batch,
   and the next fov is read while the GPU evaluates the current one. Each

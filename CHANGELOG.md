@@ -123,6 +123,14 @@ major version).
 ## [Unreleased]
 
 ### Fixed
+- SumSignal keeps every cell separate (**rerun SumSignal** on earlier
+  outputs). Labels were drawn into a `uint8` mask, so in a fov with more
+  than 254 cells, cells 255 onward became one region, and each got the
+  summed intensity and pixel count of all of them.
+  - Affected: BC553_sample_02 disk (1,705 of 2,020 fovs; 1.07 M of
+    1.52 M cells), BC553_sample_02 epi (1,317 of 1,651 fovs; 206 k of
+    569 k cells) and BC555_sample_05 epi (267 of 476 fovs; 59 k of
+    147 k cells).
 - Verification figures no longer take hours on large experiments: the
   barcode radial-distribution metadata is vectorized (same bins, ~500x
   faster) and saved every 50 fovs, so a retry resumes. Segmentation-boundary

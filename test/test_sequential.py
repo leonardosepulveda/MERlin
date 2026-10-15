@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 
 from merlin.core import analysistask
@@ -59,6 +60,50 @@ def test_sumsignal_channel_names_invalid_entry_raises(
         _make_sum_signal(
             simple_merfish_data, sum_signal_global_align_task,
             channel_names=['not_a_real_channel'])
+
+
+def _grid_cells(cellCount, zCount=1, side=4, pitch=6, columns=20):
+    """Square cells on a grid, each with the same boundary on every plane,
+    in fov pixel coordinates."""
+    from shapely import geometry
+    from merlin.util import spatialfeature
+    cells = []
+    for i in range(cellCount):
+        x = (i % columns) * pitch + 1
+        y = (i // columns) * pitch + 1
+        square = geometry.box(x, y, x + side, y + side)
+        cells.append(spatialfeature.SpatialFeature(
+            [[square]] * zCount, 0, uniqueID=i))
+    return cells
+
+
+def _identity_sum_signal(parameters=None):
+    """A SumSignal whose global alignment maps coordinates to themselves."""
+    from unittest import mock
+    task = sequential.SumSignal.__new__(sequential.SumSignal)
+    task.parameters = parameters or {}
+    task.alignTask = mock.Mock()
+    task.alignTask.global_coordinates_to_fov = \
+        lambda fov, xy: np.array(xy).astype(int)
+    return task
+
+
+def test_sumsignal_keeps_cells_after_the_254th_apart():
+    # Each cell's pixels hold its own index + 1, so any merging of labels
+    # changes the summed intensities.
+    cells = _grid_cells(300)
+    task = _identity_sum_signal()
+    image = np.zeros((6 * 15 + 2, 6 * 20 + 2), np.float64)
+    for i, cell in enumerate(cells):
+        minx, miny, maxx, maxy = cell.get_boundaries()[0][0].bounds
+        image[int(miny):int(maxy) + 1, int(minx):int(maxx) + 1] = i + 1
+
+    signal = task._extract_signal(cells, image, 0)
+
+    pixels = signal['Pixels'].to_numpy()
+    assert (pixels == pixels[0]).all() and pixels[0] > 0
+    np.testing.assert_allclose(
+        signal['Intensity'].to_numpy(), pixels * np.arange(1, 301))
 
 
 def test_prepare_spot_chunk_keeps_parquet_schema_stable(tmp_path):

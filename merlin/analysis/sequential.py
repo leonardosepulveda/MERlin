@@ -44,6 +44,16 @@ class SumSignal(analysistask.ParallelAnalysisTask):
     An analysis task that calculates the signal intensity within the boundaries
     of a cell for all rounds not used in the codebook, useful for measuring
     RNA species that were stained individually.
+
+    With an integer 'z_index', each channel column is the mean intensity
+    inside the cell on that plane. With 'z_index': 'all', each cell is
+    measured inside its own boundary on every plane where it has one, and
+    the channel columns are the summed intensity over those voxels. Then
+    '<channel>_background' is the sum over planes of that plane's
+    background (median outside all cells) times the cell's voxels there,
+    so channel - '<channel>_background' is the background-corrected
+    total. 'Voxels' and 'Planes' count what was summed. The per-plane
+    backgrounds are saved by fov (get_backgrounds).
     """
 
     def __init__(self, dataSet, parameters=None, analysisName=None):
@@ -56,7 +66,9 @@ class SumSignal(analysistask.ParallelAnalysisTask):
         if 'z_index' not in self.parameters:
             self.parameters['z_index'] = 0
 
-        if self.parameters['z_index'] >= len(self.dataSet.get_z_positions()):
+        self.allZ = self._all_z()
+        if not self.allZ and self.parameters['z_index'] >= len(
+                self.dataSet.get_z_positions()):
             raise analysistask.InvalidParameterException(
                 'Invalid z_index specified for %s. (%i > %i)'
                 % (self.analysisName, self.parameters['z_index'],
@@ -90,15 +102,25 @@ class SumSignal(analysistask.ParallelAnalysisTask):
     #: BC555 epi. Each FOV's cells are read with their boundaries at
     #: every z, so memory grows with z count: 1.08 GB at 100 z, 0.65 GB
     #: at 25 z. Time is mostly launch delay (median 0.5-1.2 min, max
-    #: 13.8 min).
+    #: 13.8 min). With 'z_index': 'all' (pilot on 4 LT066 fovs, DAPI,
+    #: 101 z, up to 3,499 cells): 1.59 GB and 4.9 min at most, for
+    #: reading every plane and drawing every cell on it.
     providesMemoryEstimate = True
     providesTimeEstimate = True
 
     def get_estimated_memory(self):
-        return 230 + 5.8 * len(self.dataSet.get_z_positions())
+        zCount = len(self.dataSet.get_z_positions())
+        if self._all_z():
+            return 230 + 11 * zCount
+        return 230 + 5.8 * zCount
 
     def get_estimated_time(self):
+        if self._all_z():
+            return 0.06 * len(self.dataSet.get_z_positions())
         return 4
+
+    def _all_z(self):
+        return str(self.parameters.get('z_index')).lower() == 'all'
 
     def get_dependencies(self):
         return [self.parameters['warp_task'],
@@ -115,36 +137,44 @@ class SumSignal(analysistask.ParallelAnalysisTask):
                     if name in self.parameters['channel_names']]
         return [ch for ch, _ in selected], [name for _, name in selected]
 
-    def _extract_signal(self, cells, inputImage, zIndex) -> pandas.DataFrame:
-        cellCoords = []
-        for cell in cells:
-            regions = cell.get_boundaries()[zIndex]
-            if len(regions) == 0:
-                cellCoords.append([])
-            else:
-                pixels = []
-                for region in regions:
-                    coords = region.exterior.coords.xy
-                    xyZip = list(zip(coords[0].tolist(), coords[1].tolist()))
-                    pixels.append(np.array(
-                                self.alignTask.global_coordinates_to_fov(
-                                    cell.get_fov(), xyZip)))
-                cellCoords.append(pixels)
-
-        cellIDs = [str(cells[x].get_feature_id()) for x in range(len(cells))]
+    def _cell_mask(self, cells, shape, zIndex) -> np.ndarray:
+        """Label image of the cells' boundaries on one plane: cell i is
+        drawn as i + 1, background is 0."""
         # int32, not uint8: OpenCV saturates labels above 255 into one region
-        mask = np.zeros(inputImage.shape, np.int32)
-        for i, cell in enumerate(cellCoords):
-            cv2.drawContours(mask, cell, -1, i+1, -1)
+        mask = np.zeros(shape, np.int32)
+        for i, cell in enumerate(cells):
+            pixels = []
+            for region in cell.get_boundaries()[zIndex]:
+                coords = region.exterior.coords.xy
+                xyZip = list(zip(coords[0].tolist(), coords[1].tolist()))
+                pixels.append(np.array(
+                    self.alignTask.global_coordinates_to_fov(
+                        cell.get_fov(), xyZip)))
+            cv2.drawContours(mask, pixels, -1, i + 1, -1)
+        return mask
+
+    def _extract_signal(self, cells, inputImage, zIndex) -> pandas.DataFrame:
+        cellIDs = [str(cells[x].get_feature_id()) for x in range(len(cells))]
+        mask = self._cell_mask(cells, inputImage.shape, zIndex)
         propsDict = {x.label: x for x in regionprops(mask, inputImage)}
         propsOut = pandas.DataFrame(
             data=[(propsDict[k].intensity_image.sum(),
                    propsDict[k].filled_area)
                   if k in propsDict else (0, 0)
-                  for k in range(1, len(cellCoords) + 1)],
+                  for k in range(1, len(cells) + 1)],
             index=cellIDs,
             columns=['Intensity', 'Pixels'])
         return propsOut
+
+    def _load_image(self, fTask, fov, channel, zIndex):
+        img = fTask.get_aligned_image(fov, channel, zIndex)
+        if self.highpass:
+            highPassSigma = self.parameters['highpass_sigma']
+            highPassFilterSize = int(2 * np.ceil(3 * highPassSigma) + 1)
+            img = imagefilters.high_pass_filter(img,
+                                                highPassFilterSize,
+                                                highPassSigma)
+        return img
 
     def _get_sum_signal(self, fov, channels, zIndex):
 
@@ -155,13 +185,7 @@ class SumSignal(analysistask.ParallelAnalysisTask):
 
         signals = []
         for ch in channels:
-            img = fTask.get_aligned_image(fov, ch, zIndex)
-            if self.highpass:
-                highPassSigma = self.parameters['highpass_sigma']
-                highPassFilterSize = int(2 * np.ceil(3 * highPassSigma) + 1)
-                img = imagefilters.high_pass_filter(img,
-                                                    highPassFilterSize,
-                                                    highPassSigma)
+            img = self._load_image(fTask, fov, ch, zIndex)
             signals.append(self._extract_signal(cells, img,
                                                 zIndex).iloc[:, [0]])
 
@@ -172,6 +196,49 @@ class SumSignal(analysistask.ParallelAnalysisTask):
         compiledSignal.columns = channels+['Pixels']
 
         return compiledSignal
+
+    def _sum_all_z(self, cells, channels, geneNames, zCount, load_image):
+        """Sum each cell's signal over every plane where it has a boundary.
+
+        Args:
+            load_image: function (channel, zIndex) -> image.
+        Returns:
+            The per-cell signal (indexed by feature id) and the per-plane
+            background (median outside all cells; NaN on a plane with no
+            pixel outside the cells), indexed by z index.
+        """
+        labels = len(cells) + 1
+        sums = np.zeros((labels, len(channels)))
+        backgrounds = np.zeros((labels, len(channels)))
+        voxels = np.zeros(labels, np.int64)
+        planes = np.zeros(labels, np.int64)
+        planeBackground = np.full((zCount, len(channels)), np.nan)
+        for z in range(zCount):
+            mask = None
+            for c, ch in enumerate(channels):
+                img = load_image(ch, z)
+                if mask is None:
+                    mask = self._cell_mask(cells, img.shape, z).ravel()
+                    counts = np.bincount(mask, minlength=labels)
+                    outside = mask == 0
+                sums[:, c] += np.bincount(
+                    mask, weights=img.ravel(), minlength=labels)
+                if outside.any():
+                    planeBackground[z, c] = np.median(img.ravel()[outside])
+                    backgrounds[:, c] += planeBackground[z, c] * counts
+            voxels += counts
+            planes += counts > 0
+
+        signal = pandas.DataFrame(
+            sums[1:], columns=geneNames,
+            index=[str(cell.get_feature_id()) for cell in cells])
+        for c, name in enumerate(geneNames):
+            signal[name + '_background'] = backgrounds[1:, c]
+        signal['Voxels'] = voxels[1:]
+        signal['Planes'] = planes[1:]
+        background = pandas.DataFrame(planeBackground, columns=geneNames)
+        background.index.name = 'z_index'
+        return signal, background
 
     def get_sum_signals(self, fov: int = None) -> pandas.DataFrame:
         """Retrieve the sum signals calculated from this analysis task.
@@ -192,7 +259,17 @@ class SumSignal(analysistask.ParallelAnalysisTask):
             'sequential_signal', self.get_analysis_name(),
             fov, 'signals', index_col=0)
 
+    def get_backgrounds(self, fov: int) -> pandas.DataFrame:
+        """Per-plane background (median outside all cells) of one fov, by
+        channel. Only written with 'z_index': 'all'."""
+        return self.dataSet.load_dataframe_from_csv(
+            'sequential_background', self.get_analysis_name(),
+            fov, 'signals', index_col=0)
+
     def _run_analysis(self, fragmentIndex):
+        if self.allZ:
+            self._run_analysis_all_z(fragmentIndex)
+            return
         zIndex = int(self.parameters['z_index'])
         fovZPositions = self.dataSet.get_z_positions(fragmentIndex)
         if zIndex >= len(fovZPositions):
@@ -211,6 +288,26 @@ class SumSignal(analysistask.ParallelAnalysisTask):
 
         self.dataSet.save_dataframe_to_csv(
                 normSignal, 'sequential_signal', self.get_analysis_name(),
+                fragmentIndex, 'signals')
+
+    def _run_analysis_all_z(self, fragmentIndex):
+        channels, geneNames = self.dataSet.get_data_organization()\
+            .get_sequential_rounds()
+        channels, geneNames = self._select_channels(channels, geneNames)
+        fTask = self.dataSet.load_analysis_task(self.parameters['warp_task'])
+        sTask = self.dataSet.load_analysis_task(self.parameters['segment_task'])
+        cells = sTask.get_feature_database().read_features(fragmentIndex)
+
+        signal, background = self._sum_all_z(
+            cells, channels, geneNames,
+            len(self.dataSet.get_z_positions(fragmentIndex)),
+            lambda ch, z: self._load_image(fTask, fragmentIndex, ch, z))
+
+        self.dataSet.save_dataframe_to_csv(
+                background, 'sequential_background', self.get_analysis_name(),
+                fragmentIndex, 'signals')
+        self.dataSet.save_dataframe_to_csv(
+                signal, 'sequential_signal', self.get_analysis_name(),
                 fragmentIndex, 'signals')
 
 

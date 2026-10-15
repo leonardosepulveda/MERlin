@@ -106,6 +106,52 @@ def test_sumsignal_keeps_cells_after_the_254th_apart():
         signal['Intensity'].to_numpy(), pixels * np.arange(1, 301))
 
 
+def test_sumsignal_all_z_sums_each_cell_over_its_own_planes():
+    # 300 cells on 3 planes; the last cell has no boundary on plane 2.
+    # On plane z, cell i holds (i + 1) * (z + 1) and the background holds
+    # 10 * (z + 1).
+    cells = _grid_cells(300, zCount=3)
+    cells[-1].get_boundaries()[2] = []
+    task = _identity_sum_signal({'z_index': 'all'})
+    shape = (6 * 15 + 2, 6 * 20 + 2)
+
+    def load_image(channel, z):
+        image = np.full(shape, 10.0 * (z + 1))
+        for i, cell in enumerate(cells):
+            for region in cell.get_boundaries()[z]:
+                minx, miny, maxx, maxy = region.bounds
+                image[int(miny):int(maxy) + 1, int(minx):int(maxx) + 1] = \
+                    (i + 1) * (z + 1)
+        return image if channel == 'a' else 2 * image
+
+    signal, background = task._sum_all_z(
+        cells, ['a', 'b'], ['A', 'B'], 3, load_image)
+
+    assert list(signal.columns) == [
+        'A', 'B', 'A_background', 'B_background', 'Voxels', 'Planes']
+    np.testing.assert_allclose(background['A'], [10, 20, 30])
+    np.testing.assert_allclose(background['B'], [20, 40, 60])
+
+    perPlane = signal['Voxels'].iloc[0] / 3
+    planes = np.array([3] * 299 + [2])
+    zSum = np.array([6] * 299 + [3])  # sum of z + 1 over the cell's planes
+    np.testing.assert_array_equal(signal['Planes'], planes)
+    np.testing.assert_array_equal(signal['Voxels'], perPlane * planes)
+    np.testing.assert_allclose(
+        signal['A'], perPlane * np.arange(1, 301) * zSum)
+    np.testing.assert_allclose(signal['B'], 2 * signal['A'])
+    np.testing.assert_allclose(signal['A_background'], perPlane * 10 * zSum)
+
+
+def test_sumsignal_accepts_z_index_all(
+        simple_merfish_data, sum_signal_global_align_task):
+    task = sequential.SumSignal(
+        simple_merfish_data, parameters={
+            'global_align_task': sum_signal_global_align_task.analysisName,
+            'z_index': 'all'})
+    assert task.allZ
+
+
 def test_prepare_spot_chunk_keeps_parquet_schema_stable(tmp_path):
     # One z plane has only integer thresholds and no anti-colocalization
     # hits (int -1 placeholder); the next has an automatic float threshold

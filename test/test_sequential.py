@@ -182,3 +182,53 @@ def test_prepare_spot_chunk_keeps_parquet_schema_stable(tmp_path):
     assert list(result['threshold']) == [100.0, 100.0, 100.0, 4.5]
     assert list(result['anti_colocalization_distance']) == [-1, -1, -1, 3.25]
     assert list(result['index_right']) == ['-1'] * 4
+
+
+def test_sumsignal_use_ffc_requires_ffc_task(
+        simple_merfish_data, sum_signal_global_align_task):
+    with pytest.raises(analysistask.InvalidParameterException):
+        sequential.SumSignal(
+            simple_merfish_data,
+            parameters={'global_align_task':
+                        sum_signal_global_align_task.analysisName,
+                        'use_ffc': True},
+            analysisName='sumSignalFfcMissing')
+
+
+def test_sumsignal_ffc_is_a_dependency_only_when_used(
+        simple_merfish_data, sum_signal_global_align_task):
+    base = {'global_align_task': sum_signal_global_align_task.analysisName,
+            'warp_task': 'warp', 'segment_task': 'segment'}
+    off = sequential.SumSignal(
+        simple_merfish_data, parameters=dict(base),
+        analysisName='sumSignalFfcOff')
+    on = sequential.SumSignal(
+        simple_merfish_data,
+        parameters=dict(base, use_ffc=True, ffc_task='ffc'),
+        analysisName='sumSignalFfcOn')
+    assert 'ffc' not in off.get_dependencies()
+    assert 'ffc' in on.get_dependencies()
+
+
+def test_sumsignal_load_image_applies_ffc_and_default_is_unchanged():
+    from unittest import mock
+    from merlin.analysis import createffc
+    raw = np.full((4, 4), 110, np.float32)
+    field = np.full((4, 4), 2, np.float32)
+    dark = np.full((4, 4), 10, np.float32)
+    warp = mock.Mock()
+    warp.get_aligned_image.return_value = raw
+
+    off = _identity_sum_signal({'use_ffc': False})
+    off.highpass = False
+    np.testing.assert_array_equal(off._load_image(warp, 0, 3, 0), raw)
+
+    on = _identity_sum_signal({'use_ffc': True, 'ffc_task': 'ffc'})
+    on.highpass = False
+    on._ffcCache = {3: (field, dark)}
+    on._ffcTask = None
+    np.testing.assert_array_equal(
+        on._load_image(warp, 0, 3, 0), np.full((4, 4), 50, np.float32))
+    np.testing.assert_array_equal(
+        on._load_image(warp, 0, 3, 0),
+        createffc.CreateFfc.apply_ffc(raw, field, dark))

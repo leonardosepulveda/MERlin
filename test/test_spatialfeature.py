@@ -510,3 +510,58 @@ def test_features_from_label_matrix_stack_crop_matches_full_frame(
                                    np.array(q.exterior.coords))
                 assert p.symmetric_difference(q).area < 1e-9
     assert all(len(b) == 0 for b in cropped[-1].get_boundaries())
+
+
+def _tilted_grid_seams(tilt=(0.011, 0.004), outlier=True):
+    """Seams of a 4x4 fov grid, 182 um apart, under a focal-plane tilt."""
+    import pandas
+    centres = {4 * r + c: (182.0 * c, 182.0 * r)
+               for r in range(4) for c in range(4)}
+    rows = []
+    for f, (x, y) in centres.items():
+        for g, (u, v) in centres.items():
+            if f != g and max(abs(u - x), abs(v - y)) < 200:
+                rows.append({'fov': f, 'neighbor_fov': g, 'n_pairs': 100,
+                             'z_offset_um': tilt[0] * (u - x)
+                             + tilt[1] * (v - y)})
+    seams = pandas.DataFrame(rows)
+    if outlier:
+        seams.loc[0, 'z_offset_um'] += 10
+    return seams, centres
+
+
+def test_fit_focal_tilt_recovers_the_tilt_and_drops_outliers():
+    seams, centres = _tilted_grid_seams()
+    fit = spatialfeature.fit_focal_tilt(seams, centres)
+    np.testing.assert_allclose(fit['tilt'], (0.011, 0.004), atol=1e-9)
+    assert fit['n_seams'] == len(seams) - 1
+    assert fit['residual_sd_um'] == pytest.approx(0, abs=1e-9)
+
+
+def test_tissue_depth_agrees_across_a_seam_and_has_no_ramp():
+    from unittest import mock
+    import pandas
+    from merlin.analysis import segment
+    seams, centres = _tilted_grid_seams(outlier=False)
+    fovs = list(centres)
+    offsets = spatialfeature.solve_fov_z_offsets(seams, fovs, centres)
+    fit = spatialfeature.fit_focal_tilt(seams, centres)
+    c = np.array([centres[f] for f in fovs])
+    task = segment.CombineCleanedBoundaries.__new__(
+        segment.CombineCleanedBoundaries)
+    task.get_fov_z_offsets = mock.Mock(
+        return_value=offsets.set_index('fov')['z_offset_um'])
+    task.get_focal_tilt = mock.Mock(return_value=pandas.Series({
+        'gx_um_per_mm': fit['tilt'][0] * 1000,
+        'gy_um_per_mm': fit['tilt'][1] * 1000,
+        'depth_constant_um': np.mean(
+            offsets.z_offset_um.values + c @ fit['tilt'])}))
+    # the point midway between fov 0 and fov 1 is seen 2.0 um higher in
+    # fov 1 (0.011 * 182); both copies must get one depth
+    zA, zB = 10.0, 10.0 + 0.011 * 182
+    depth = task.get_tissue_depth([0, 1], [91, 91], [0, 0], [zA, zB])
+    assert depth[0] == pytest.approx(depth[1])
+    # each fov centre at plane z is at depth z: no section-wide ramp
+    centreDepth = task.get_tissue_depth(fovs, c[:, 0], c[:, 1],
+                                        np.full(len(fovs), 5.0))
+    np.testing.assert_allclose(centreDepth, 5.0, atol=1e-9)

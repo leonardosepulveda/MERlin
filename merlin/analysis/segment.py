@@ -1118,6 +1118,11 @@ class CombineCleanedBoundaries(analysistask.AnalysisTask):
     each frame, so every seam adds about the same offset and the offsets
     ramp across the section; the common z is therefore consistent at seams
     but is not tissue depth.
+
+    The tilt itself is fitted from the measured seams
+    (`spatialfeature.fit_focal_tilt`) and saved as focal_tilt.csv.
+    get_tissue_depth uses it to turn a point's local z into a depth that is
+    comparable across fovs and across the frame.
     """
     def __init__(self, dataSet, parameters=None, analysisName=None):
         super().__init__(dataSet, parameters, analysisName)
@@ -1147,6 +1152,30 @@ class CombineCleanedBoundaries(analysistask.AnalysisTask):
             'fov_z_offsets', analysisTask=self.analysisName,
             index_col='fov')['z_offset_um']
 
+    def get_focal_tilt(self) -> pandas.Series:
+        """gx_um_per_mm, gy_um_per_mm, residual_sd_um, n_seams and
+        depth_constant_um of the fitted focal-plane tilt."""
+        return self.dataSet.load_dataframe_from_csv(
+            'focal_tilt', analysisTask=self.analysisName).iloc[0]
+
+    def get_tissue_depth(self, fov, x, y, z) -> np.ndarray:
+        """The tissue depth, in microns, of points at local z (microns) and
+        global x, y (microns) in fov.
+
+        A point at plane z of fov sees the tissue at depth z + tilt . (p -
+        fov centre) plus fov's residual offset. With the common z of
+        get_fov_z_offsets that is common z + tilt . p, less a constant that
+        makes the depth z + tilt . (p - centre) on average over the fovs.
+        """
+        tilt = self.get_focal_tilt()
+        offsets = self.get_fov_z_offsets()
+        fov = np.asarray(fov)
+        return (np.asarray(z) + offsets.reindex(fov.ravel()).values.reshape(
+                    fov.shape)
+                + tilt.gx_um_per_mm / 1000 * np.asarray(x)
+                + tilt.gy_um_per_mm / 1000 * np.asarray(y)
+                - tilt.depth_constant_um)
+
     def _run_analysis(self):
         allFOVs = self.dataSet.get_fovs()
         graph = nx.Graph()
@@ -1165,10 +1194,24 @@ class CombineCleanedBoundaries(analysistask.AnalysisTask):
         fovBoxes = self.cleaningTask.alignTask.get_fov_boxes()
         fovCentres = {fov: (box.centroid.x, box.centroid.y)
                       for fov, box in zip(allFOVs, fovBoxes)}
+        seams = pandas.concat(seams, ignore_index=True)
         offsets = spatialfeature.solve_fov_z_offsets(
-            pandas.concat(seams, ignore_index=True), allFOVs, fovCentres)
+            seams, allFOVs, fovCentres)
         self.dataSet.save_dataframe_to_csv(offsets, 'fov_z_offsets',
                                            analysisTask=self, index=False)
+
+        if seams.z_offset_um.notna().sum() >= 2:
+            fit = spatialfeature.fit_focal_tilt(seams, fovCentres)
+            centres = np.array([fovCentres[f] for f in offsets.fov])
+            constant = float(np.mean(
+                offsets.z_offset_um.values + centres @ fit['tilt']))
+            self.dataSet.save_dataframe_to_csv(pandas.DataFrame([{
+                'gx_um_per_mm': fit['tilt'][0] * 1000,
+                'gy_um_per_mm': fit['tilt'][1] * 1000,
+                'residual_sd_um': fit['residual_sd_um'],
+                'n_seams': fit['n_seams'],
+                'depth_constant_um': constant}]), 'focal_tilt',
+                analysisTask=self, index=False)
 
 
 class RefineCellDatabases(FeatureSavingAnalysisTask):

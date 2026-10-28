@@ -1186,6 +1186,49 @@ def remove_overlapping_cells(graph: nx.Graph) -> pandas.DataFrame:
         columns=['cell_id', 'originalFOV', 'assignedFOV'])
 
 
+def _seam_displacements(seams: pandas.DataFrame,
+                        fovCentres: Dict[int, Tuple[float, float]]
+                        ) -> np.ndarray:
+    """neighbor_fov's centre minus fov's centre for each seam row."""
+    return np.array([np.subtract(fovCentres[g], fovCentres[f])
+                     for f, g in zip(seams.fov, seams.neighbor_fov)]
+                    ).reshape(-1, 2)
+
+
+def fit_focal_tilt(seams: pandas.DataFrame,
+                   fovCentres: Dict[int, Tuple[float, float]],
+                   rejectMads: float = 3) -> Dict:
+    """The in-frame tilt of the focal plane against the tissue, from the
+    measured seam offsets.
+
+    The focal plane is tilted inside every frame, so a neighbour whose
+    centre is d away sees the shared tissue tilt . d higher. The tilt is
+    fitted as z_offset_um = gx * dx + gy * dy over the seams, weighted by
+    the square root of their duplicate count. With rejectMads, seams whose
+    residual is more than that many scaled median absolute deviations off
+    are dropped and the fit repeated.
+
+    Returns:
+        a dict with tilt (gx, gy, in microns of z per micron), residual_sd_um
+        (weighted, of the seams kept) and n_seams (kept)
+    """
+    seams = seams.dropna(subset=['z_offset_um'])
+    d = _seam_displacements(seams, fovCentres)
+    z = seams.z_offset_um.values
+    w = np.sqrt(seams.n_pairs.values.astype(float))
+    keep = np.ones(len(z), dtype=bool)
+    tilt = np.linalg.lstsq(d * w[:, None], z * w, rcond=None)[0]
+    residual = z - d @ tilt
+    if rejectMads is not None:
+        mad = 1.4826 * np.median(np.abs(residual))
+        keep = np.abs(residual) <= rejectMads * max(mad, 1e-9)
+        tilt = np.linalg.lstsq(d[keep] * w[keep, None], z[keep] * w[keep],
+                               rcond=None)[0]
+        residual = z - d @ tilt
+    sd = float(np.sqrt(np.average(residual[keep] ** 2, weights=w[keep])))
+    return {'tilt': tilt, 'residual_sd_um': sd, 'n_seams': int(keep.sum())}
+
+
 def solve_fov_z_offsets(
         seams: pandas.DataFrame, fovs: List[int],
         fovCentres: Dict[int, Tuple[float, float]] = None) -> pandas.DataFrame:
@@ -1215,15 +1258,10 @@ def solve_fov_z_offsets(
                          measured.z_offset_um, weights))
     missing = seams[seams.z_offset_um.isna()]
     if fovCentres is not None and len(measured) >= 2 and len(missing):
-        def displacement(table):
-            return np.array([np.subtract(fovCentres[g], fovCentres[f])
-                             for f, g in zip(table.fov, table.neighbor_fov)]
-                            ).reshape(-1, 2)
-        plane = np.linalg.lstsq(
-            displacement(measured) * weights[:, None],
-            measured.z_offset_um.values * weights, rcond=None)[0]
+        plane = fit_focal_tilt(measured, fovCentres, rejectMads=None)['tilt']
         equations += [(f, g, offset, 1.0) for f, g, offset in zip(
-            missing.fov, missing.neighbor_fov, displacement(missing) @ plane)]
+            missing.fov, missing.neighbor_fov,
+            _seam_displacements(missing, fovCentres) @ plane)]
 
     graph = nx.Graph()
     graph.add_nodes_from(fovs)

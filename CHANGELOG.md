@@ -335,3 +335,9 @@ major version).
   offsets a tilted coverslip now say focal-plane tilt, and
   CombineCleanedBoundaries' docstring says the common z is consistent at
   seams but ramps across the section.
+- CombineCleanedBoundaries fits the in-frame focal-plane tilt from the
+  measured seam offsets (`spatialfeature.fit_focal_tilt`, robust to
+  outlier seams) and saves it as `focal_tilt.csv` (gx, gy in um/mm, their
+  residual SD, the seams used). `get_tissue_depth(fov, x, y, z)` turns a
+  point's local z into a depth comparable across fovs and across the
+  frame, without the section-wide ramp of the common z.

@@ -280,7 +280,8 @@ class GenerateMosaicTile(analysistask.ParallelAnalysisTask):
 
         if self.parameters['use_ffc']:
             ffcField = self.ffcTask.get_ffc_field_for_channel(dataChannel)
-            correctedImage = CreateFfc.apply_ffc(rawImage, ffcField)
+            correctedImage = CreateFfc.apply_ffc(
+                rawImage, ffcField, self.ffcTask.get_dark_frame())
         else:
             correctedImage = rawImage.astype(np.float32)
 

@@ -315,3 +315,13 @@ major version).
 - A computed request grows with snakemake's retry attempt (2x, then 3x),
   so a fov that needs more than the estimate succeeds on its retry
   instead of failing again at the same limit.
+- CreateFfc averages `fov_count` (default 300, was 10) fovs drawn at random
+  across the footprint with `random_seed`, not the fovs farthest from the
+  centroid, whose tissue texture the old field kept. The field is
+  normalized to median 1 (`normalize_percentile` default 50, was 99.99).
+  **Rerun CreateFfc**, and every GenerateMosaicTile that uses it, since
+  `use_ffc` defaults to true.
+- CreateFfc `dark_frame_indices` (default none) estimates the camera dark
+  frame from those frames of `dark_fov_count` fovs, saves it as
+  `dark_frame`, and subtracts it before averaging. `apply_ffc` takes an
+  optional `dark`, and GenerateMosaicTile passes the saved one.

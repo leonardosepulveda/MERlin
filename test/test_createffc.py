@@ -144,3 +144,60 @@ def test_generatemosaictile_use_ffc_false_skips_correction(simple_merfish_data):
         rawTile.astype(np.float32), mosaicTask.get_tile_shape(2),
         anti_aliasing=True, preserve_range=True).astype(np.float32)
     np.testing.assert_array_almost_equal(tile, expected)
+
+
+def test_apply_ffc_subtracts_dark():
+    image = np.array([[110, 120], [100, 140]], dtype=np.uint16)
+    field = np.array([[2, 4], [1, 8]], dtype=np.float32)
+    dark = np.full((2, 2), 100, dtype=np.float32)
+
+    corrected = createffc.CreateFfc.apply_ffc(image, field, dark)
+
+    np.testing.assert_array_almost_equal(
+        corrected, np.array([[5, 5], [0, 5]], dtype=np.float32))
+
+
+def test_select_fovs_is_seeded_and_capped(simple_merfish_data):
+    allFovs = list(simple_merfish_data.get_fovs())
+
+    def select(analysisName, **parameters):
+        return createffc.CreateFfc(
+            simple_merfish_data, parameters=parameters,
+            analysisName=analysisName)._select_fovs()
+
+    assert select('selAll') == allFovs  # default 300 exceeds the fov count
+    first = select('selSeedA', fov_count=1, random_seed=1)
+    assert first == select('selSeedB', fov_count=1, random_seed=1)
+    assert len(first) == 1
+    assert set(first) <= set(allFovs)
+
+
+def test_dark_frame_saved_and_subtracted(simple_merfish_data):
+    task = _run_ffc_task(
+        simple_merfish_data, 'createFfcDark', dark_frame_indices=[0, 1],
+        dark_fov_count=2)
+
+    dark = task.get_dark_frame()
+    assert dark.shape == tuple(simple_merfish_data.get_image_dimensions())
+
+    dataOrganization = simple_merfish_data.get_data_organization()
+    channel = dataOrganization.get_data_channels()[0]
+    fovs = simple_merfish_data.get_fovs()[:2]
+    expected = np.mean([
+        simple_merfish_data.load_image(
+            dataOrganization.get_image_filename(channel, f), i)
+        for f in fovs for i in (0, 1)], axis=0)
+    np.testing.assert_array_almost_equal(dark, expected, decimal=3)
+
+
+def test_no_dark_frame_without_indices(simple_merfish_data):
+    task = _run_ffc_task(simple_merfish_data, 'createFfcNoDark')
+    assert task.get_dark_frame() is None
+
+
+def test_field_is_normalized_to_median_one(simple_merfish_data):
+    task = _run_ffc_task(
+        simple_merfish_data, 'createFfcMedian', minimum_value=0.0)
+    field = task.get_ffc_field(
+        simple_merfish_data.get_data_organization().get_data_channel_color(0))
+    assert np.median(field) == pytest.approx(1.0, rel=1e-3)

@@ -16,10 +16,15 @@ class CreateFfc(analysistask.AnalysisTask):
     per color (see DataOrganization.get_data_channel_color) rather than per
     data channel; every data channel sharing a color reuses the same field.
     This task reads raw frames directly (no dependency on Warp/GlobalAlign)
-    from a small sample of fovs -- the fovs farthest from the imaged
-    footprint's centroid, a layout-agnostic proxy for "exterior fovs" (least
-    likely to be dominated by real tissue signal near the frame edges) that
-    needs nothing beyond the stage positions MERlin already loads.
+    from fov_count fovs drawn at random (fixed seed) across the whole
+    footprint, and averages them with a running sum. Few frames, or frames
+    from tissue-edge fovs only, leave the tissue texture in the mean.
+
+    Optionally (dark_frame_indices) the camera's dark offset is estimated
+    from blank frames of the same movies -- frames with no illumination,
+    which the acquisition's frame table marks with no color -- and saved
+    as 'dark_frame'. It does not depend on color. It is subtracted from
+    every frame before averaging, and apply_ffc subtracts it too.
 
     Consumption is opt-in: a task that wants FFC applied loads this task by
     name and calls get_ffc_field/get_ffc_field_for_channel on it (mirroring
@@ -32,11 +37,17 @@ class CreateFfc(analysistask.AnalysisTask):
         super().__init__(dataSet, parameters, analysisName)
 
         if 'fov_count' not in self.parameters:
-            self.parameters['fov_count'] = 10
+            self.parameters['fov_count'] = 300
+        if 'random_seed' not in self.parameters:
+            self.parameters['random_seed'] = 0
+        if 'dark_frame_indices' not in self.parameters:
+            self.parameters['dark_frame_indices'] = None
+        if 'dark_fov_count' not in self.parameters:
+            self.parameters['dark_fov_count'] = 40
         if 'smooth_sigma' not in self.parameters:
             self.parameters['smooth_sigma'] = 50
         if 'normalize_percentile' not in self.parameters:
-            self.parameters['normalize_percentile'] = 99.99
+            self.parameters['normalize_percentile'] = 50
         if 'minimum_value' not in self.parameters:
             self.parameters['minimum_value'] = 0.1
 
@@ -50,16 +61,31 @@ class CreateFfc(analysistask.AnalysisTask):
         return []
 
     def _select_fovs(self):
-        """The fov_count fovs farthest from the imaged footprint's centroid.
+        """fov_count fovs drawn at random across the whole footprint with
+        random_seed, or all fovs if there are fewer.
         """
         fovs = self.dataSet.get_fovs()
-        positions = np.array(
-            [self.dataSet.get_fov_offset(f) for f in fovs])
-        centroid = positions.mean(axis=0)
-        distances = np.linalg.norm(positions - centroid, axis=1)
-        order = np.argsort(distances)[::-1]
         n = min(self.parameters['fov_count'], len(fovs))
-        return [fovs[i] for i in order[:n]]
+        rng = np.random.RandomState(self.parameters['random_seed'])
+        return [fovs[i] for i in np.sort(
+            rng.choice(len(fovs), n, replace=False))]
+
+    def _compute_dark_frame(self, dataChannel, fovs):
+        """Per-pixel mean over the blank frames of the first dark_fov_count
+        fovs, read from the raw file of dataChannel.
+        """
+        fovs = fovs[:self.parameters['dark_fov_count']]
+        total = None
+        count = 0
+        for fov in fovs:
+            filename = self.dataSet.get_data_organization()\
+                .get_image_filename(dataChannel, fov)
+            for index in self.parameters['dark_frame_indices']:
+                frame = self.dataSet.load_image(
+                    filename, index).astype(np.float64)
+                total = frame if total is None else total + frame
+                count += 1
+        return (total / count).astype(np.float32)
 
     @staticmethod
     def _representative_channel_for_color(dataOrganization, color):
@@ -68,13 +94,15 @@ class CreateFfc(analysistask.AnalysisTask):
                 return d
         raise ValueError('No data channel found for color %s' % color)
 
-    def _compute_field_for_color(self, dataChannel, fovs):
+    def _compute_field_for_color(self, dataChannel, fovs, dark=None):
         total = None
         for fov in fovs:
             zPositions = self.dataSet.get_z_positions(fov)
             zPosition = zPositions[len(zPositions) // 2]
             frame = self.dataSet.get_raw_image(
                 dataChannel, fov, zPosition).astype(np.float64)
+            if dark is not None:
+                frame -= dark
             total = frame if total is None else total + frame
 
         field = (total / len(fovs)).astype(np.float32)
@@ -93,10 +121,17 @@ class CreateFfc(analysistask.AnalysisTask):
                           for d in dataOrganization.get_data_channels()})
         fovs = self._select_fovs()
 
+        dark = None
+        if self.parameters['dark_frame_indices'] is not None:
+            dark = self._compute_dark_frame(
+                self._representative_channel_for_color(
+                    dataOrganization, colors[0]), fovs)
+            self.dataSet.save_numpy_analysis_result(dark, 'dark_frame', self)
+
         for color in colors:
             dataChannel = self._representative_channel_for_color(
                 dataOrganization, color)
-            field = self._compute_field_for_color(dataChannel, fovs)
+            field = self._compute_field_for_color(dataChannel, fovs, dark)
             self.dataSet.save_numpy_analysis_result(
                 field, 'ffc_field_%s' % color, self)
 
@@ -121,10 +156,20 @@ class CreateFfc(analysistask.AnalysisTask):
             .get_data_channel_color(dataChannel)
         return self.get_ffc_field(color)
 
-    @staticmethod
-    def apply_ffc(image: np.ndarray, field: np.ndarray) -> np.ndarray:
-        """Divide image by the flat-field-correction field, clipping
-        negative results (from any upstream dark-offset subtraction) to
-        zero.
+    def get_dark_frame(self):
+        """Get the cached dark frame, or None if the task ran without
+        dark_frame_indices.
         """
-        return np.clip(image.astype(np.float32) / field, 0, None)
+        return self.dataSet.load_numpy_analysis_result_if_available(
+            'dark_frame', self, None)
+
+    @staticmethod
+    def apply_ffc(image: np.ndarray, field: np.ndarray,
+                  dark: np.ndarray = None) -> np.ndarray:
+        """Compute (image - dark) / field, clipping negative results to
+        zero. dark=None skips the dark subtraction.
+        """
+        image = image.astype(np.float32)
+        if dark is not None:
+            image = image - dark
+        return np.clip(image / field, 0, None)

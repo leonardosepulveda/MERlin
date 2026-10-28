@@ -328,3 +328,10 @@ major version).
 - SumSignal `use_ffc` (default false) with `ffc_task` flat-field corrects
   each loaded image, (image - dark) / field, before the high-pass filter
   and the sums. Default output is unchanged.
+- CleanCellBoundaries `adaptive_z_window` (default false) widens a seam's
+  z search past `max_z_shift_planes` while its best shift is on the window
+  edge. The in-frame focal-plane tilt makes LT066 diagonal seams need 5-6
+  planes, past the old window of 4. The comments that called the seam
+  offsets a tilted coverslip now say focal-plane tilt, and
+  CombineCleanedBoundaries' docstring says the common z is consistent at
+  seams but ramps across the section.

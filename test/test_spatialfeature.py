@@ -401,6 +401,29 @@ def test_construct_overlap_graph_without_z_shift_misses_duplicates():
     assert graph.number_of_edges() == 0
 
 
+def test_construct_overlap_graph_adaptive_z_window_finds_shift_past_edge():
+    extents, cells, _, _, _ = _two_fov_seam()
+    # the copies are 2 planes apart; a window of +-1 plane finds its best
+    # overlap on the edge (+1), and the adaptive window moves on to +2
+    graph, seams = spatialfeature.construct_overlap_graph(
+        0, cells, extents, zStep=1.0, minSeamPairs=2, maxZShift=1,
+        adaptiveZWindow=True)
+    assert seams.loc[0, 'z_offset_um'] == pytest.approx(2.0)
+    assert graph.number_of_edges() == 3
+    graph, seams = spatialfeature.construct_overlap_graph(
+        1, cells, extents, zStep=1.0, minSeamPairs=2, maxZShift=1,
+        adaptiveZWindow=True)
+    assert seams.loc[0, 'z_offset_um'] == pytest.approx(-2.0)
+
+
+def test_construct_overlap_graph_fixed_window_misses_shift_past_edge():
+    extents, cells, _, _, _ = _two_fov_seam()
+    # a fixed window of 0 planes sees 1 of 3 shared planes: no duplicates
+    graph, seams = spatialfeature.construct_overlap_graph(
+        0, cells, extents, zStep=1.0, minSeamPairs=2, maxZShift=0)
+    assert np.isnan(seams.loc[0, 'z_offset_um'])
+
+
 def test_remove_overlapping_cells_keeps_copy_away_from_edge():
     graph, _, copies0, copies1, graze = _seam_graph()
     kept = set(spatialfeature.remove_overlapping_cells(graph)['cell_id'])

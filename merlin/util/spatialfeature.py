@@ -1010,7 +1010,7 @@ def construct_overlap_graph(
         currentFOV: int, cellsByFOV: Dict[int, List[SpatialFeature]],
         fovExtents: Dict[int, Tuple[float, float, float, float]],
         zStep: float, overlapThreshold: float = 0.5, maxZShift: int = 4,
-        minSeamPairs: int = 10) -> Tuple[nx.Graph, pandas.DataFrame]:
+        minSeamPairs: int = 10, adaptiveZWindow: bool = False) -> Tuple[nx.Graph, pandas.DataFrame]:
     """Build the overlap graph for the cells of one fov.
 
     Two cells are linked when the volume they share is at least
@@ -1019,13 +1019,21 @@ def construct_overlap_graph(
     neighbouring cells touch, and linking them chains whole seams into one
     component.
 
-    Neighbouring fovs can disagree in z by a whole number of planes (a
-    tilted coverslip under per-fov focus). Cells of another fov are
+    Neighbouring fovs can disagree in z by a whole number of planes (the
+    focal plane is tilted against the tissue inside each frame, so
+    neighbours see their shared strip at different planes). Cells of another fov are
     therefore compared after shifting them by that fov's seam offset: the
     median z difference of the clear duplicates, the pairs whose bounding
     boxes overlap by at least overlapThreshold of the smaller box and
     whose best overlap within +-maxZShift planes passes overlapThreshold.
     With fewer than minSeamPairs duplicates the shift is 0.
+
+    With adaptiveZWindow, a seam whose best shift (the largest summed
+    overlap fraction of its candidates) lies on the edge of the window is
+    searched one plane further on that side, until the best shift is
+    inside the window or the window spans the z stack. The tilt makes the
+    seam shift grow with the distance between fov centres (diagonal LT066
+    seams need 5-6 planes), so a fixed window can clip it.
 
     Args:
         currentFOV: the fov whose cells are added
@@ -1033,6 +1041,8 @@ def construct_overlap_graph(
             overlaps it
         fovExtents: the global (xmin, ymin, xmax, ymax) of each fov's image
         zStep: the spacing of the z planes, in microns
+        adaptiveZWindow: widen a seam's z search past +-maxZShift while
+            its best shift is on the window edge
     Returns:
         the graph, whose nodes carry originalFOV, assignedFOV (the fov
         whose image centre is nearest) and edgeDistance (distance from the
@@ -1088,7 +1098,7 @@ def construct_overlap_graph(
 
     seamRows = []
     zShift = np.zeros(len(pairs), dtype=int)
-    shifts = np.arange(-maxZShift, maxZShift + 1)
+    zLimit = max((max(p) for p in planes if p), default=0)
     for fov in fovList:
         if fov == currentFOV:
             continue
@@ -1096,9 +1106,21 @@ def construct_overlap_graph(
         candidates = sel[boxFraction[sel] >= overlapThreshold]
         offset, nPairs = np.nan, 0
         if len(candidates):
-            overlaps = np.stack([_plane_overlaps(
+            byShift = {s: _plane_overlaps(
                 planes, pairs[candidates], np.full(len(candidates), s))
-                for s in shifts], axis=1)
+                for s in range(-maxZShift, maxZShift + 1)}
+            while adaptiveZWindow:
+                best = max(byShift, key=lambda s: np.sum(
+                    byShift[s] / smaller[candidates]))
+                if best == max(byShift) and best < zLimit:
+                    step = best + 1
+                elif best == min(byShift) and best > -zLimit:
+                    step = best - 1
+                else:
+                    break
+                byShift[step] = _plane_overlaps(
+                    planes, pairs[candidates], np.full(len(candidates), step))
+            overlaps = np.stack(list(byShift.values()), axis=1)
             duplicates = candidates[overlaps.max(axis=1) / smaller[candidates]
                                     >= overlapThreshold]
             nPairs = len(duplicates)
@@ -1177,7 +1199,7 @@ def solve_fov_z_offsets(
     Seams with too few cells to measure (z_offset_um NaN) would leave fovs
     in separate groups with unrelated offsets. Given fovCentres, they are
     filled from a plane fitted to the measured seams (offset = a * dx +
-    b * dy between the fov centres, the signature of a tilted coverslip)
+    b * dy between the fov centres, the in-frame tilt of the focal plane)
     with weight 1. Each still-separate group averages to 0, so a fov with
     no seam at all gets 0.
 

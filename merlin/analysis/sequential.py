@@ -6,6 +6,7 @@ import numbers
 import cv2
 from skimage.measure import regionprops
 
+from merlin.analysis.createffc import CreateFfc
 from merlin.core import analysistask
 from merlin.util import imagefilters
 
@@ -54,6 +55,11 @@ class SumSignal(analysistask.ParallelAnalysisTask):
     so channel - '<channel>_background' is the background-corrected
     total. 'Voxels' and 'Planes' count what was summed. The per-plane
     backgrounds are saved by fov (get_backgrounds).
+
+    With 'use_ffc' true (default false) and an 'ffc_task' (a CreateFfc),
+    each loaded image is flat-field corrected, (image - dark) / field,
+    before it is high-pass filtered and summed, so the background is also
+    measured on the corrected image.
     """
 
     def __init__(self, dataSet, parameters=None, analysisName=None):
@@ -65,6 +71,12 @@ class SumSignal(analysistask.ParallelAnalysisTask):
             self.parameters['highpass_sigma'] = 5
         if 'z_index' not in self.parameters:
             self.parameters['z_index'] = 0
+        if 'use_ffc' not in self.parameters:
+            self.parameters['use_ffc'] = False
+        if self.parameters['use_ffc'] and 'ffc_task' not in self.parameters:
+            raise analysistask.InvalidParameterException(
+                'use_ffc is set for %s but ffc_task is not'
+                % self.analysisName)
 
         self.allZ = self._all_z()
         if not self.allZ and self.parameters['z_index'] >= len(
@@ -123,9 +135,12 @@ class SumSignal(analysistask.ParallelAnalysisTask):
         return str(self.parameters.get('z_index')).lower() == 'all'
 
     def get_dependencies(self):
-        return [self.parameters['warp_task'],
-                self.parameters['segment_task'],
-                self.parameters['global_align_task']]
+        dependencies = [self.parameters['warp_task'],
+                        self.parameters['segment_task'],
+                        self.parameters['global_align_task']]
+        if self.parameters.get('use_ffc'):
+            dependencies.append(self.parameters['ffc_task'])
+        return dependencies
 
     def _select_channels(self, channels, geneNames):
         """Filter the channels/geneNames pair returned by
@@ -166,8 +181,22 @@ class SumSignal(analysistask.ParallelAnalysisTask):
             columns=['Intensity', 'Pixels'])
         return propsOut
 
+    def _ffc_inputs(self, channel):
+        """The (field, dark) of channel's color, loaded once per channel."""
+        if not hasattr(self, '_ffcCache'):
+            self._ffcCache = {}
+            self._ffcTask = self.dataSet.load_analysis_task(
+                self.parameters['ffc_task'])
+        if channel not in self._ffcCache:
+            self._ffcCache[channel] = (
+                self._ffcTask.get_ffc_field_for_channel(channel),
+                self._ffcTask.get_dark_frame())
+        return self._ffcCache[channel]
+
     def _load_image(self, fTask, fov, channel, zIndex):
         img = fTask.get_aligned_image(fov, channel, zIndex)
+        if self.parameters.get('use_ffc'):
+            img = CreateFfc.apply_ffc(img, *self._ffc_inputs(channel))
         if self.highpass:
             highPassSigma = self.parameters['highpass_sigma']
             highPassFilterSize = int(2 * np.ceil(3 * highPassSigma) + 1)

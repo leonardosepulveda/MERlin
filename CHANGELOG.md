@@ -325,3 +325,6 @@ major version).
   frame from those frames of `dark_fov_count` fovs, saves it as
   `dark_frame`, and subtracts it before averaging. `apply_ffc` takes an
   optional `dark`, and GenerateMosaicTile passes the saved one.
+- SumSignal `use_ffc` (default false) with `ffc_task` flat-field corrects
+  each loaded image, (image - dark) / field, before the high-pass filter
+  and the sums. Default output is unchanged.

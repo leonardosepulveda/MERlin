@@ -1016,11 +1016,10 @@ class CleanCellBoundaries(analysistask.ParallelAnalysisTask):
             seams and 1 plane across y seams.
         min_seam_pairs (10): the fewest duplicates needed to measure a
             seam's z offset; below that the seam is not shifted.
-        z_tilt_um_per_mm (None): the in-frame depth gradient [gx, gy]
-            along global x and y, in microns per mm (LT066 merfish: about
-            [11, 4]). When set, each seam's z search is centred on the
-            shift it predicts, so max_z_shift_planes only has to cover the
-            scatter around the tilt. None centres every search on 0.
+        adaptive_z_window (False): widen a seam's z search past
+            max_z_shift_planes while its best shift is on the window edge.
+            The in-frame focal-plane tilt makes diagonal LT066 seams need
+            5-6 planes.
     """
     def __init__(self, dataSet, parameters=None, analysisName=None):
         super().__init__(dataSet, parameters, analysisName)
@@ -1031,8 +1030,8 @@ class CleanCellBoundaries(analysistask.ParallelAnalysisTask):
             self.parameters['max_z_shift_planes'] = 4
         if 'min_seam_pairs' not in self.parameters:
             self.parameters['min_seam_pairs'] = 10
-        if 'z_tilt_um_per_mm' not in self.parameters:
-            self.parameters['z_tilt_um_per_mm'] = None
+        if 'adaptive_z_window' not in self.parameters:
+            self.parameters['adaptive_z_window'] = False
 
         self.segmentTask = self.dataSet.load_analysis_task(
             self.parameters['segment_task'])
@@ -1096,7 +1095,7 @@ class CleanCellBoundaries(analysistask.ParallelAnalysisTask):
             overlapThreshold=self.parameters['overlap_threshold'],
             maxZShift=self.parameters['max_z_shift_planes'],
             minSeamPairs=self.parameters['min_seam_pairs'],
-            zTiltUmPerMm=self.parameters['z_tilt_um_per_mm'])
+            adaptiveZWindow=self.parameters['adaptive_z_window'])
 
         self.dataSet.save_dataframe_to_csv(
             seams, 'seam_z_offsets', self, resultIndex=fragmentIndex,

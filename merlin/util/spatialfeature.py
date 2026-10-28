@@ -1010,7 +1010,7 @@ def construct_overlap_graph(
         currentFOV: int, cellsByFOV: Dict[int, List[SpatialFeature]],
         fovExtents: Dict[int, Tuple[float, float, float, float]],
         zStep: float, overlapThreshold: float = 0.5, maxZShift: int = 4,
-        minSeamPairs: int = 10, zTiltUmPerMm: Tuple[float, float] = None) -> Tuple[nx.Graph, pandas.DataFrame]:
+        minSeamPairs: int = 10, adaptiveZWindow: bool = False) -> Tuple[nx.Graph, pandas.DataFrame]:
     """Build the overlap graph for the cells of one fov.
 
     Two cells are linked when the volume they share is at least
@@ -1028,11 +1028,12 @@ def construct_overlap_graph(
     whose best overlap within +-maxZShift planes passes overlapThreshold.
     With fewer than minSeamPairs duplicates the shift is 0.
 
-    With zTiltUmPerMm (gx, gy), the window of each neighbour is centred on
-    its predicted shift, (gx * dx + gy * dy) / zStep planes, with dx, dy
-    the neighbour's fov centre minus this one's in mm, instead of on 0. A
-    seam then needs only maxZShift planes of scatter around the tilt, not
-    the whole tilt.
+    With adaptiveZWindow, a seam whose best shift (the largest summed
+    overlap fraction of its candidates) lies on the edge of the window is
+    searched one plane further on that side, until the best shift is
+    inside the window or the window spans the z stack. The tilt makes the
+    seam shift grow with the distance between fov centres (diagonal LT066
+    seams need 5-6 planes), so a fixed window can clip it.
 
     Args:
         currentFOV: the fov whose cells are added
@@ -1040,9 +1041,8 @@ def construct_overlap_graph(
             overlaps it
         fovExtents: the global (xmin, ymin, xmax, ymax) of each fov's image
         zStep: the spacing of the z planes, in microns
-        zTiltUmPerMm: the in-frame depth gradient (gx, gy) along the global
-            x and y axes, in microns per mm, or None to centre every
-            window on 0
+        adaptiveZWindow: widen a seam's z search past +-maxZShift while
+            its best shift is on the window edge
     Returns:
         the graph, whose nodes carry originalFOV, assignedFOV (the fov
         whose image centre is nearest) and edgeDistance (distance from the
@@ -1098,22 +1098,29 @@ def construct_overlap_graph(
 
     seamRows = []
     zShift = np.zeros(len(pairs), dtype=int)
-    currentCentre = fovCentres[fovList.index(currentFOV)]
-    for fov, centre in zip(fovList, fovCentres):
+    zLimit = max((max(p) for p in planes if p), default=0)
+    for fov in fovList:
         if fov == currentFOV:
             continue
-        predicted = 0
-        if zTiltUmPerMm is not None:
-            predicted = int(np.round(
-                np.dot(zTiltUmPerMm, centre - currentCentre) / 1000 / zStep))
-        shifts = predicted + np.arange(-maxZShift, maxZShift + 1)
         sel = np.nonzero(neighbourFOV == fov)[0]
         candidates = sel[boxFraction[sel] >= overlapThreshold]
         offset, nPairs = np.nan, 0
         if len(candidates):
-            overlaps = np.stack([_plane_overlaps(
+            byShift = {s: _plane_overlaps(
                 planes, pairs[candidates], np.full(len(candidates), s))
-                for s in shifts], axis=1)
+                for s in range(-maxZShift, maxZShift + 1)}
+            while adaptiveZWindow:
+                best = max(byShift, key=lambda s: np.sum(
+                    byShift[s] / smaller[candidates]))
+                if best == max(byShift) and best < zLimit:
+                    step = best + 1
+                elif best == min(byShift) and best > -zLimit:
+                    step = best - 1
+                else:
+                    break
+                byShift[step] = _plane_overlaps(
+                    planes, pairs[candidates], np.full(len(candidates), step))
+            overlaps = np.stack(list(byShift.values()), axis=1)
             duplicates = candidates[overlaps.max(axis=1) / smaller[candidates]
                                     >= overlapThreshold]
             nPairs = len(duplicates)

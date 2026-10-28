@@ -1016,6 +1016,11 @@ class CleanCellBoundaries(analysistask.ParallelAnalysisTask):
             seams and 1 plane across y seams.
         min_seam_pairs (10): the fewest duplicates needed to measure a
             seam's z offset; below that the seam is not shifted.
+        z_tilt_um_per_mm (None): the in-frame depth gradient [gx, gy]
+            along global x and y, in microns per mm (LT066 merfish: about
+            [11, 4]). When set, each seam's z search is centred on the
+            shift it predicts, so max_z_shift_planes only has to cover the
+            scatter around the tilt. None centres every search on 0.
     """
     def __init__(self, dataSet, parameters=None, analysisName=None):
         super().__init__(dataSet, parameters, analysisName)
@@ -1026,6 +1031,8 @@ class CleanCellBoundaries(analysistask.ParallelAnalysisTask):
             self.parameters['max_z_shift_planes'] = 4
         if 'min_seam_pairs' not in self.parameters:
             self.parameters['min_seam_pairs'] = 10
+        if 'z_tilt_um_per_mm' not in self.parameters:
+            self.parameters['z_tilt_um_per_mm'] = None
 
         self.segmentTask = self.dataSet.load_analysis_task(
             self.parameters['segment_task'])
@@ -1088,7 +1095,8 @@ class CleanCellBoundaries(analysistask.ParallelAnalysisTask):
             fragmentIndex, cellsByFOV, fovExtents, self._z_step(),
             overlapThreshold=self.parameters['overlap_threshold'],
             maxZShift=self.parameters['max_z_shift_planes'],
-            minSeamPairs=self.parameters['min_seam_pairs'])
+            minSeamPairs=self.parameters['min_seam_pairs'],
+            zTiltUmPerMm=self.parameters['z_tilt_um_per_mm'])
 
         self.dataSet.save_dataframe_to_csv(
             seams, 'seam_z_offsets', self, resultIndex=fragmentIndex,
@@ -1106,8 +1114,11 @@ class CombineCleanedBoundaries(analysistask.AnalysisTask):
     Also solves the per-fov z offsets from the seam offsets
     (`spatialfeature.solve_fov_z_offsets`, unmeasured seams filled from a
     plane fitted to the measured ones) and saves them as
-    fov_z_offsets.csv: local z + z_offset_um puts every fov in one common
-    z frame.
+    fov_z_offsets.csv: local z + z_offset_um makes neighbouring fovs agree
+    at their seams. The focal plane is tilted against the tissue inside
+    each frame, so every seam adds about the same offset and the offsets
+    ramp across the section; the common z is therefore consistent at seams
+    but is not tissue depth.
     """
     def __init__(self, dataSet, parameters=None, analysisName=None):
         super().__init__(dataSet, parameters, analysisName)

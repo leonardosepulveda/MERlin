@@ -1010,7 +1010,7 @@ def construct_overlap_graph(
         currentFOV: int, cellsByFOV: Dict[int, List[SpatialFeature]],
         fovExtents: Dict[int, Tuple[float, float, float, float]],
         zStep: float, overlapThreshold: float = 0.5, maxZShift: int = 4,
-        minSeamPairs: int = 10) -> Tuple[nx.Graph, pandas.DataFrame]:
+        minSeamPairs: int = 10, zTiltUmPerMm: Tuple[float, float] = None) -> Tuple[nx.Graph, pandas.DataFrame]:
     """Build the overlap graph for the cells of one fov.
 
     Two cells are linked when the volume they share is at least
@@ -1019,13 +1019,20 @@ def construct_overlap_graph(
     neighbouring cells touch, and linking them chains whole seams into one
     component.
 
-    Neighbouring fovs can disagree in z by a whole number of planes (a
-    tilted coverslip under per-fov focus). Cells of another fov are
+    Neighbouring fovs can disagree in z by a whole number of planes (the
+    focal plane is tilted against the tissue inside each frame, so
+    neighbours see their shared strip at different planes). Cells of another fov are
     therefore compared after shifting them by that fov's seam offset: the
     median z difference of the clear duplicates, the pairs whose bounding
     boxes overlap by at least overlapThreshold of the smaller box and
     whose best overlap within +-maxZShift planes passes overlapThreshold.
     With fewer than minSeamPairs duplicates the shift is 0.
+
+    With zTiltUmPerMm (gx, gy), the window of each neighbour is centred on
+    its predicted shift, (gx * dx + gy * dy) / zStep planes, with dx, dy
+    the neighbour's fov centre minus this one's in mm, instead of on 0. A
+    seam then needs only maxZShift planes of scatter around the tilt, not
+    the whole tilt.
 
     Args:
         currentFOV: the fov whose cells are added
@@ -1033,6 +1040,9 @@ def construct_overlap_graph(
             overlaps it
         fovExtents: the global (xmin, ymin, xmax, ymax) of each fov's image
         zStep: the spacing of the z planes, in microns
+        zTiltUmPerMm: the in-frame depth gradient (gx, gy) along the global
+            x and y axes, in microns per mm, or None to centre every
+            window on 0
     Returns:
         the graph, whose nodes carry originalFOV, assignedFOV (the fov
         whose image centre is nearest) and edgeDistance (distance from the
@@ -1088,10 +1098,15 @@ def construct_overlap_graph(
 
     seamRows = []
     zShift = np.zeros(len(pairs), dtype=int)
-    shifts = np.arange(-maxZShift, maxZShift + 1)
-    for fov in fovList:
+    currentCentre = fovCentres[fovList.index(currentFOV)]
+    for fov, centre in zip(fovList, fovCentres):
         if fov == currentFOV:
             continue
+        predicted = 0
+        if zTiltUmPerMm is not None:
+            predicted = int(np.round(
+                np.dot(zTiltUmPerMm, centre - currentCentre) / 1000 / zStep))
+        shifts = predicted + np.arange(-maxZShift, maxZShift + 1)
         sel = np.nonzero(neighbourFOV == fov)[0]
         candidates = sel[boxFraction[sel] >= overlapThreshold]
         offset, nPairs = np.nan, 0
@@ -1177,7 +1192,7 @@ def solve_fov_z_offsets(
     Seams with too few cells to measure (z_offset_um NaN) would leave fovs
     in separate groups with unrelated offsets. Given fovCentres, they are
     filled from a plane fitted to the measured seams (offset = a * dx +
-    b * dy between the fov centres, the signature of a tilted coverslip)
+    b * dy between the fov centres, the in-frame tilt of the focal plane)
     with weight 1. Each still-separate group averages to 0, so a fov with
     no seam at all gets 0.
 

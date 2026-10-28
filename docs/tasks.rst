@@ -125,6 +125,8 @@ segment.CombineCleanedBoundaries
 
 Description: Combines the cleaned cell boundaries generated for each fov, and eliminates overlapping cells, preferentially removing cells that overlap with the largest number of other cells until there is no more overlap in a given group of cells.
 
+It also fits the in-frame focal-plane tilt from the seam offsets and saves it as ``focal_tilt.csv``. With it, a point's local z becomes a tissue depth in microns that agrees across fovs and across the frame. Exports given ``depth_task`` add this depth as a ``depth`` column: per barcode (ExportBarcodes), or per cell centre, the mean z of the cell's planes (ExportCellMetadata, ExportPartitionedBarcodes, ExportSumSignals).
+
 segment.RefineCellDatabases
 --------------------------------
 
@@ -134,6 +136,10 @@ segment.ExportCellMetadata
 --------------------------------
 
 Description: Exports a csv containing the cell metadata, i.e. fov, volume, x and y coordinates.
+
+Parameters:
+
+* depth\_task -- optional; the CombineCleanedBoundaries task to take a tissue depth from. When set, a ``depth`` column is added (see segment.CombineCleanedBoundaries).
 
 createffc.CreateFfc
 --------------------
@@ -220,6 +226,10 @@ sequential.ExportSumSignals
 
 Description: Export the sum signals calculated by a SumSignal task to a csv file.
 
+Parameters:
+
+* depth\_task -- optional; the CombineCleanedBoundaries task to take a tissue depth from. When set, a ``depth`` column is added (see segment.CombineCleanedBoundaries).
+
 partition.PartitionBarcodes
 -------------------------------
 
@@ -229,6 +239,10 @@ partition.ExportPartitionedBarcodes
 ----------------------------------
 
 Description: Combines the counts per cell csv files from each fov into a single output file.
+
+Parameters:
+
+* depth\_task -- optional; the CombineCleanedBoundaries task to take a tissue depth from. When set, a ``depth`` column is added (see segment.CombineCleanedBoundaries).
 
 slurmreport.SlurmReport
 -------------------------------

@@ -565,3 +565,64 @@ def test_tissue_depth_agrees_across_a_seam_and_has_no_ramp():
     centreDepth = task.get_tissue_depth(fovs, c[:, 0], c[:, 1],
                                         np.full(len(fovs), 5.0))
     np.testing.assert_allclose(centreDepth, 5.0, atol=1e-9)
+
+
+def test_feature_hdf5_db_z_centres_use_only_filled_planes(
+        single_task, simple_merfish_data):
+    feature = spatialfeature.SpatialFeature(
+        [[], [geometry.Polygon(testCoords1)], [],
+         [geometry.Polygon(testCoords2)], [geometry.Polygon(testCoords2)]],
+        0, zCoordinates=np.array([0, 0.25, 0.5, 0.75, 1.0]))
+    empty = spatialfeature.SpatialFeature([[], []], 0,
+                                          zCoordinates=np.array([0, 1.0]))
+    featureDB = spatialfeature.HDF5SpatialFeatureDB(
+        simple_merfish_data, single_task)
+    featureDB.write_features([feature, empty], fov=0)
+
+    centres = featureDB.read_feature_z_centres(fov=0)
+    metadata = featureDB.read_feature_metadata(fov=0)
+    featureDB.empty_database(0)
+
+    assert sorted(centres.index) == sorted(metadata.index)
+    assert centres[str(feature.get_feature_id())] == pytest.approx(2 / 3)
+    assert np.isnan(centres[str(empty.get_feature_id())])
+
+
+def _flat_depth_task(zPositions):
+    """A CombineCleanedBoundaries with no tilt and no fov offsets, so a
+    point's depth is its local z."""
+    from unittest import mock
+    import pandas
+    from merlin.analysis import segment
+    task = segment.CombineCleanedBoundaries.__new__(
+        segment.CombineCleanedBoundaries)
+    task.dataSet = mock.Mock()
+    task.dataSet.get_z_positions.return_value = zPositions
+    task.get_fov_z_offsets = mock.Mock(
+        return_value=pandas.Series({0: 0.0, 1: 0.0}))
+    task.get_focal_tilt = mock.Mock(return_value=pandas.Series({
+        'gx_um_per_mm': 0.0, 'gy_um_per_mm': 0.0, 'depth_constant_um': 0.0}))
+    return task
+
+
+def test_barcode_depths_turn_plane_indexes_into_z_positions():
+    import pandas
+    task = _flat_depth_task([0.5, 1.0, 1.5, 2.0])
+    barcodes = pandas.DataFrame({'fov': [0, 1, 1], 'global_x': [0.0] * 3,
+                                 'global_y': [0.0] * 3,
+                                 'z': [0.0, 2.0, 2.5]})
+    np.testing.assert_allclose(task.get_barcode_depths(barcodes),
+                               [0.5, 1.5, 1.75])
+
+
+def test_cell_depths_are_indexed_by_cell_id():
+    from unittest import mock
+    import pandas
+    task = _flat_depth_task([0.5, 1.0])
+    metadata = pandas.DataFrame({'fov': [0, 1], 'center_x': [0.0, 0.0],
+                                 'center_y': [0.0, 0.0]}, index=['7', '3'])
+    featureDB = mock.Mock()
+    featureDB.read_feature_z_centres.return_value = pandas.Series(
+        {'3': 2.0, '7': 4.0})
+    depths = task.get_cell_depths(featureDB, metadata)
+    assert depths.to_dict() == {'7': 4.0, '3': 2.0}

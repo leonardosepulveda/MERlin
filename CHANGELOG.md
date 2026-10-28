@@ -341,3 +341,9 @@ major version).
   residual SD, the seams used). `get_tissue_depth(fov, x, y, z)` turns a
   point's local z into a depth comparable across fovs and across the
   frame, without the section-wide ramp of the common z.
+- Optional `depth_task` (a CombineCleanedBoundaries task) on
+  ExportBarcodes, ExportCellMetadata, ExportPartitionedBarcodes and
+  ExportSumSignals adds a `depth` column: the tissue depth of each barcode,
+  or of each cell's centre (mean z of its planes). Default output is
+  unchanged. `HDF5SpatialFeatureDB.read_feature_z_centres` reads the cell
+  z centres without loading the geometry.

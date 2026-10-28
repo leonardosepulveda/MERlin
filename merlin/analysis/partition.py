@@ -345,12 +345,21 @@ class ExportPartitionedBarcodes(analysistask.AnalysisTask):
         return 5
 
     def get_dependencies(self):
-        return [self.parameters['partition_task']]
+        depthTask = self.parameters.get('depth_task')
+        return [self.parameters['partition_task']] + \
+            ([depthTask] if depthTask else [])
 
     def _run_analysis(self):
         pTask = self.dataSet.load_analysis_task(
                     self.parameters['partition_task'])
         parsedBarcodes = pTask.get_partitioned_barcodes()
+        if self.parameters.get('depth_task'):
+            featureDB = self.dataSet.load_analysis_task(
+                pTask.parameters['assignment_task']).get_feature_database()
+            depths = self.dataSet.load_analysis_task(
+                self.parameters['depth_task']).get_cell_depths(featureDB)
+            parsedBarcodes['depth'] = depths.reindex(
+                parsedBarcodes.index.astype(str)).values
 
         self.dataSet.save_dataframe_to_csv(
                     parsedBarcodes, 'barcodes_per_feature',

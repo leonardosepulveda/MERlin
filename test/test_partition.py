@@ -210,3 +210,31 @@ def test_contained_barcodes_with_no_cells_or_barcodes():
     counts = partition.count_with_boundary_correction(
         cells, barcodes.iloc[:0], 5, 0.5)
     assert counts.shape == (len(cells), 5) and counts.values.sum() == 0
+
+
+def test_export_partitioned_barcodes_adds_cell_depth(simple_merfish_data,
+                                                     monkeypatch):
+    """Cell ids read back from csv are ints; depth is matched to them by
+    id, not by row order."""
+    from unittest import mock
+    counts = pandas.DataFrame({'GeneA': [1, 2]}, index=[30, 10])
+    pTask = mock.Mock(parameters={'assignment_task': 'FakeSegment'})
+    pTask.get_partitioned_barcodes.return_value = counts
+    depthTask = mock.Mock()
+    depthTask.get_cell_depths.return_value = pandas.Series(
+        {'10': 1.5, '30': 3.5})
+    tasks = {'FakePartition': pTask, 'FakeSegment': mock.Mock(),
+             'FakeDepth': depthTask}
+    monkeypatch.setattr(simple_merfish_data, 'load_analysis_task',
+                        tasks.__getitem__)
+    from merlin.analysis.partition import ExportPartitionedBarcodes
+    task = ExportPartitionedBarcodes(
+        simple_merfish_data, {'partition_task': 'FakePartition',
+                              'depth_task': 'FakeDepth'},
+        analysisName='ExportPartitionedDepthTest')
+    assert task.get_dependencies() == ['FakePartition', 'FakeDepth']
+    task._run_analysis()
+    exported = simple_merfish_data.load_dataframe_from_csv(
+        'barcodes_per_feature', task.get_analysis_name(), index_col=0)
+    assert exported.loc[30, 'depth'] == 3.5
+    assert exported.loc[10, 'depth'] == 1.5

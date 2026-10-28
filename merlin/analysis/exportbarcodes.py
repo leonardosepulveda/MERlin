@@ -16,6 +16,8 @@ class ExportBarcodes(analysistask.AnalysisTask):
         if 'columns' not in self.parameters:
             self.parameters['columns'] = ['barcode_id', 'global_x',
                                           'global_y', 'cell_index']
+        # depth_task (optional): a CombineCleanedBoundaries task; adds a
+        # tissue depth column (CombineCleanedBoundaries.get_tissue_depth).
         if 'exclude_blanks' not in self.parameters:
             self.parameters['exclude_blanks'] = True
         # 'parquet' writes barcodes.parquet; 'csv' writes barcodes.csv for
@@ -38,7 +40,13 @@ class ExportBarcodes(analysistask.AnalysisTask):
         return 30
 
     def get_dependencies(self):
-        return [self.parameters['filter_task']]
+        depthTask = self.parameters.get('depth_task')
+        return [self.parameters['filter_task']] + \
+            ([depthTask] if depthTask else [])
+
+    def _output_columns(self):
+        return self.columns + (['depth'] if self.parameters.get('depth_task')
+                               else [])
 
     def _fov_barcodes(self):
         """Yield the barcodes to export, one fov at a time, so memory stays
@@ -49,16 +57,26 @@ class ExportBarcodes(analysistask.AnalysisTask):
         barcodeDB = filterTask.get_barcode_database()
         if self.excludeBlanks:
             codingIndexes = filterTask.get_codebook().get_coding_indexes()
+        readColumns = self.columns
+        if self.parameters.get('depth_task'):
+            depthTask = self.dataSet.load_analysis_task(
+                self.parameters['depth_task'])
+            readColumns = list(dict.fromkeys(
+                self.columns + ['barcode_id', 'fov', 'global_x', 'global_y',
+                                'z']))
 
         for fov in self.dataSet.get_fovs():
             barcodeData = barcodeDB.get_barcodes(
-                fov=fov, columnList=self.columns)
+                fov=fov, columnList=readColumns)
 
             if self.excludeBlanks:
                 barcodeData = barcodeData[
                         barcodeData['barcode_id'].isin(codingIndexes)]
+            if self.parameters.get('depth_task'):
+                barcodeData = barcodeData.assign(
+                    depth=depthTask.get_barcode_depths(barcodeData))
 
-            yield barcodeData
+            yield barcodeData[self._output_columns()]
 
     def _run_analysis(self):
         if self.parameters['format'] == 'csv':
@@ -75,4 +93,5 @@ class ExportBarcodes(analysistask.AnalysisTask):
 
         if not writer.wrote_any:
             self.dataSet.save_dataframe_to_parquet(
-                pandas.DataFrame(columns=self.columns), 'barcodes', self)
+                pandas.DataFrame(columns=self._output_columns()),
+                'barcodes', self)

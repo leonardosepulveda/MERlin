@@ -115,3 +115,39 @@ def test_export_barcodes_rejects_unknown_format(simple_merfish_data):
         ExportBarcodes(simple_merfish_data,
                        {'filter_task': 'FakeFilter', 'format': 'tsv'},
                        analysisName='ExportBarcodesBadFormatTest')
+
+
+class _FakeDepthTask:
+
+    def get_barcode_depths(self, barcodes):
+        return barcodes['z'].values * 10 + barcodes['fov'].values
+
+
+def test_export_barcodes_adds_depth_without_extra_columns(
+        simple_merfish_data, monkeypatch):
+    """With depth_task, the export gains a depth column computed from fov
+    and z, which are read but not exported."""
+    perFov = {f: pandas.DataFrame({
+        'barcode_id': np.array([0, 1], dtype=np.uint16),
+        'global_x': np.array([1.0, 2.0], dtype=np.float32),
+        'global_y': np.array([3.0, 4.0], dtype=np.float32),
+        'z': np.array([0.0, 2.0], dtype=np.float32),
+        'fov': np.full(2, f, dtype=np.uint16)}) for f in (0, 1)}
+    tasks = {'FakeFilter': _FakeFilterTask(perFov),
+             'FakeDepth': _FakeDepthTask()}
+    monkeypatch.setattr(simple_merfish_data, 'get_fovs', lambda: [0, 1])
+    monkeypatch.setattr(simple_merfish_data, 'load_analysis_task',
+                        tasks.__getitem__)
+    task = ExportBarcodes(simple_merfish_data,
+                          {'filter_task': 'FakeFilter',
+                           'columns': ['barcode_id', 'global_x'],
+                           'exclude_blanks': False,
+                           'depth_task': 'FakeDepth'},
+                          analysisName='ExportBarcodesDepthTest')
+    assert task.get_dependencies() == ['FakeFilter', 'FakeDepth']
+    task._run_analysis()
+    exported = simple_merfish_data.load_dataframe_from_parquet(
+        'barcodes', task)
+
+    assert list(exported.columns) == ['barcode_id', 'global_x', 'depth']
+    np.testing.assert_allclose(exported['depth'], [0, 20, 1, 21])

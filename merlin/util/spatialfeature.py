@@ -898,6 +898,29 @@ class HDF5SpatialFeatureDB(SpatialFeatureDB):
 
         return finalDF
 
+    def read_feature_z_centres(self, fov: int = None) -> pandas.Series:
+        """The mean z of the planes that hold a boundary of each feature,
+        indexed by feature id like read_feature_metadata. Reads only the
+        z coordinates and the plane groups' sizes, not the geometry."""
+        if fov is None:
+            return pandas.concat([self.read_feature_z_centres(x)
+                                  for x in self._dataSet.get_fovs()])
+        ids, centres = [], []
+        try:
+            with self._dataSet.open_hdf5_file('r', 'feature_data',
+                                              self._analysisTask, fov,
+                                              'features') as f:
+                for feature in f['featuredata'].values():
+                    z = np.array(feature['z_coordinates'])
+                    filled = [len(feature['zIndex_%d' % i]) > 0
+                              for i in range(len(z))]
+                    ids.append(feature.attrs['id'].decode('utf-8'))
+                    centres.append(z[filled].mean() if any(filled)
+                                   else np.nan)
+        except FileNotFoundError:
+            pass
+        return pandas.Series(centres, index=ids, dtype=float)
+
 
 class JSONSpatialFeatureDB(SpatialFeatureDB):
 

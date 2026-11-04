@@ -577,6 +577,12 @@ class HDF5SpatialFeatureDB(SpatialFeatureDB):
         
         # add number of z planes with actual polygons
         featureGroup.attrs['num_z'] = len([element for element in feature.get_boundaries() if element])
+        # mean z of those planes, so read_feature_z_centres need not open
+        # every plane group
+        filled = [bool(b) for b in feature.get_boundaries()]
+        featureGroup.attrs['z_centre'] = \
+            np.mean(np.asarray(feature.get_z_coordinates())[filled]) \
+            if any(filled) else np.nan
 
         for i, bSet in enumerate(feature.get_boundaries()):
             zBoundaryGroup = featureGroup.create_group('zIndex_' + str(i))
@@ -900,8 +906,10 @@ class HDF5SpatialFeatureDB(SpatialFeatureDB):
 
     def read_feature_z_centres(self, fov: int = None) -> pandas.Series:
         """The mean z of the planes that hold a boundary of each feature,
-        indexed by feature id like read_feature_metadata. Reads only the
-        z coordinates and the plane groups' sizes, not the geometry."""
+        indexed by feature id like read_feature_metadata. Reads the
+        z_centre attribute saved with each feature; for databases written
+        before it existed, the z coordinates and the plane groups' sizes
+        (slow: every plane group is opened), never the geometry."""
         if fov is None:
             return pandas.concat([self.read_feature_z_centres(x)
                                   for x in self._dataSet.get_fovs()])
@@ -911,6 +919,10 @@ class HDF5SpatialFeatureDB(SpatialFeatureDB):
                                               self._analysisTask, fov,
                                               'features') as f:
                 for feature in f['featuredata'].values():
+                    if 'z_centre' in feature.attrs:
+                        ids.append(feature.attrs['id'].decode('utf-8'))
+                        centres.append(float(feature.attrs['z_centre']))
+                        continue
                     z = np.array(feature['z_coordinates'])
                     filled = [len(feature['zIndex_%d' % i]) > 0
                               for i in range(len(z))]

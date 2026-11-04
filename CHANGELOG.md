@@ -353,3 +353,10 @@ major version).
   or of each cell's centre (mean z of its planes). Default output is
   unchanged. `HDF5SpatialFeatureDB.read_feature_z_centres` reads the cell
   z centres without loading the geometry.
+  - Feature databases now save each cell's z centre (`z_centre`
+    attribute) when written, so reading the centres is one attribute per
+    cell (0.3 s per LT066 fov on local disk, against 7.3 s scanning the
+    planes, which older databases still fall back to). Rerun the
+    segmentation tasks to get the fast read.
+  - The export time estimates include the depth read when `depth_task`
+    is set.

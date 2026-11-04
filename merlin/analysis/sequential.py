@@ -954,6 +954,11 @@ class ExportSumSignals(analysistask.AnalysisTask):
         return 2048
 
     def get_estimated_time(self):
+        if self.parameters.get('depth_task'):
+            # get_cell_depths reads the metadata and the z centres
+            from merlin.analysis.segment import CombineCleanedBoundaries
+            return 5 + CombineCleanedBoundaries.cell_depth_minutes(
+                self.dataSet, 2)
         return 5
 
     def get_dependencies(self):

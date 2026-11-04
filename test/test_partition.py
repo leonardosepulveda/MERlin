@@ -233,6 +233,14 @@ def test_export_partitioned_barcodes_adds_cell_depth(simple_merfish_data,
                               'depth_task': 'FakeDepth'},
         analysisName='ExportPartitionedDepthTest')
     assert task.get_dependencies() == ['FakePartition', 'FakeDepth']
+    # the depth read (two passes over every fov's cells) is in the estimate
+    plain = ExportPartitionedBarcodes(
+        simple_merfish_data, {'partition_task': 'FakePartition'},
+        analysisName='ExportPartitionedNoDepthTest')
+    fovCount = len(simple_merfish_data.get_fovs())
+    assert plain.get_estimated_time() == 5
+    assert task.get_estimated_time() == pytest.approx(
+        5 + 2 * 20 * fovCount / 60)
     task._run_analysis()
     exported = simple_merfish_data.load_dataframe_from_csv(
         'barcodes_per_feature', task.get_analysis_name(), index_col=0)

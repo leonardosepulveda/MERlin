@@ -1,5 +1,6 @@
 import pytest
 import numpy as np
+from pandas import testing as pd_testing
 import json
 import networkx as nx
 from shapely import geometry
@@ -581,11 +582,20 @@ def test_feature_hdf5_db_z_centres_use_only_filled_planes(
 
     centres = featureDB.read_feature_z_centres(fov=0)
     metadata = featureDB.read_feature_metadata(fov=0)
+    # a database written before z_centre was saved: read from the planes
+    with simple_merfish_data.open_hdf5_file(
+            'a', 'feature_data', single_task, 0, 'features') as f:
+        for group in f['featuredata'].values():
+            del group.attrs['z_centre']
+    oldCentres = featureDB.read_feature_z_centres(fov=0)
     featureDB.empty_database(0)
 
     assert sorted(centres.index) == sorted(metadata.index)
+    assert 'z_centre' not in metadata.columns
     assert centres[str(feature.get_feature_id())] == pytest.approx(2 / 3)
     assert np.isnan(centres[str(empty.get_feature_id())])
+    pd_testing.assert_series_equal(oldCentres.sort_index(),
+                                       centres.sort_index())
 
 
 def _flat_depth_task(zPositions):

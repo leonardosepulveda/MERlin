@@ -1224,6 +1224,15 @@ class CombineCleanedBoundaries(analysistask.AnalysisTask):
             barcodes['fov'].values, barcodes['global_x'].values,
             barcodes['global_y'].values, z)
 
+    @staticmethod
+    def cell_depth_minutes(dataSet, featureReads: int) -> float:
+        """Time to add to an export for get_cell_depths: featureReads
+        passes over every fov's feature attributes (metadata, z centres).
+        A pass over one LT066 fov (about 1,950 cells) took 0.3-0.9 s on
+        local disk but 11-19 s on loaded lab storage (2026-11-04), so 20 s
+        is allowed."""
+        return featureReads * 20 * len(dataSet.get_fovs()) / 60
+
     def get_cell_depths(self, featureDB,
                         metadata: pandas.DataFrame = None) -> pandas.Series:
         """The tissue depth of each cell's centre (bounding-box centre, mean
@@ -1333,6 +1342,9 @@ class ExportCellMetadata(analysistask.AnalysisTask):
         return 2048
 
     def get_estimated_time(self):
+        if self.parameters.get('depth_task'):
+            return 30 + CombineCleanedBoundaries.cell_depth_minutes(
+                self.dataSet, 1)
         return 30
 
     def get_dependencies(self):

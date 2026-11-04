@@ -19,6 +19,7 @@ import scipy.ndimage
     
 from merlin.core import dataset
 from merlin.core import analysistask
+from merlin.analysis.createffc import CreateFfc
 from merlin.util import spatialfeature
 from merlin.util import watershed
 from merlin.util import resourceestimate
@@ -505,6 +506,16 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
         if 'eval_task' not in self.parameters:
             self.parameters['eval_task'] = None
 
+        # with use_ffc, each raw frame is flat-field corrected,
+        # (raw - dark) / field, with the ffc_task's (a CreateFfc) field
+        # for that channel, before the warp, and the stack stays float32
+        if 'use_ffc' not in self.parameters:
+            self.parameters['use_ffc'] = False
+        if self.parameters['use_ffc'] and 'ffc_task' not in self.parameters:
+            raise analysistask.InvalidParameterException(
+                'use_ffc is set for %s but ffc_task is not'
+                % self.analysisName)
+
     def fragment_count(self):
         return len(self.dataSet.get_fovs())
 
@@ -577,16 +588,31 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
                         self.parameters['global_align_task']]
         if self.parameters['eval_task'] is not None:
             dependencies.append(self.parameters['eval_task'])
+        if self.parameters['use_ffc']:
+            dependencies.append(self.parameters['ffc_task'])
         return dependencies
 
     def get_cell_boundaries(self) -> List[spatialfeature.SpatialFeature]:
         featureDB = self.get_feature_database()
         return featureDB.read_features()
 
+    def _ffc_inputs(self, channelIndex):
+        """The (field, dark) of channelIndex's color, loaded once per
+        channel."""
+        if not hasattr(self, '_ffcCache'):
+            self._ffcCache = {}
+            self._ffcTask = self.dataSet.load_analysis_task(
+                self.parameters['ffc_task'])
+        if channelIndex not in self._ffcCache:
+            self._ffcCache[channelIndex] = (
+                self._ffcTask.get_ffc_field_for_channel(channelIndex),
+                self._ffcTask.get_dark_frame())
+        return self._ffcCache[channelIndex]
+
     def _read_image_stack(self, fov: int, channelIndex: int) -> np.ndarray:
         warpTask = self.dataSet.load_analysis_task(
             self.parameters['warp_task'])
-        
+
         transformation = warpTask.get_transformation(fov, channelIndex)
 
         # here we get more z positions
@@ -595,10 +621,18 @@ class CellPoseSegmentSAM(FeatureSavingAnalysisTask):
         stack = []
         for zPos in zPositions:
             rawImage = self.dataSet.get_raw_image(channelIndex, fov, zPos)
+            outputDtype = rawImage.dtype
+            if self.parameters['use_ffc']:
+                # the field is in camera pixels, so correct before the
+                # warp. float32 output: corrected corners can pass the
+                # raw range.
+                rawImage = CreateFfc.apply_ffc(
+                    rawImage, *self._ffc_inputs(channelIndex))
+                outputDtype = np.float32
             warpedImage = transform.warp(rawImage, transformation, preserve_range=True)
             stack.append(warpedImage)
 
-        return np.array(stack).astype(rawImage.dtype)
+        return np.array(stack).astype(outputDtype)
 
     def _anisotropy_override(self):
         """The anisotropy parameter as a float, or None when it is 'auto'
@@ -931,8 +965,11 @@ class CellPoseEvalSAM(CellPoseSegmentSAM):
                            / self.parameters['fovs_per_job']))
 
     def get_dependencies(self):
-        return [self.parameters['warp_task'],
-                self.parameters['global_align_task']]
+        dependencies = [self.parameters['warp_task'],
+                        self.parameters['global_align_task']]
+        if self.parameters['use_ffc']:
+            dependencies.append(self.parameters['ffc_task'])
+        return dependencies
 
     def get_estimated_memory(self):
         # the next fov's full-resolution stack is loaded while the model

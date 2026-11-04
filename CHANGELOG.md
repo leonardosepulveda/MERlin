@@ -328,6 +328,12 @@ major version).
 - SumSignal `use_ffc` (default false) with `ffc_task` flat-field corrects
   each loaded image, (image - dark) / field, before the high-pass filter
   and the sums. Default output is unchanged.
+- CellPoseSegmentSAM and CellPoseEvalSAM `use_ffc` (default false) with
+  `ffc_task` flat-field correct each raw frame, (raw - dark) / field,
+  before the warp, and keep the stack as float32. On LT066 this finds
+  whole nuclei in the dim frame corners that the uncorrected run split
+  into fragments (+1.8% cells, almost all at the frame border). Default
+  output is unchanged.
 - CleanCellBoundaries `adaptive_z_window` (default false) widens a seam's
   z search past `max_z_shift_planes` while its best shift is on the window
   edge. The in-frame focal-plane tilt makes LT066 diagonal seams need 5-6

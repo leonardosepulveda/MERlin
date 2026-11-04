@@ -1213,6 +1213,39 @@ class CombineCleanedBoundaries(analysistask.AnalysisTask):
                 + tilt.gy_um_per_mm / 1000 * np.asarray(y)
                 - tilt.depth_constant_um)
 
+    def get_barcode_depths(self, barcodes: pandas.DataFrame) -> np.ndarray:
+        """The tissue depth of barcodes with the columns fov, global_x,
+        global_y and z (a plane index, turned into the plane's z
+        position)."""
+        zPositions = self.dataSet.get_z_positions()
+        z = np.interp(barcodes['z'].values, np.arange(len(zPositions)),
+                      zPositions)
+        return self.get_tissue_depth(
+            barcodes['fov'].values, barcodes['global_x'].values,
+            barcodes['global_y'].values, z)
+
+    @staticmethod
+    def cell_depth_minutes(dataSet, featureReads: int) -> float:
+        """Time to add to an export for get_cell_depths: featureReads
+        passes over every fov's feature attributes (metadata, z centres).
+        A pass over one LT066 fov (about 1,950 cells) took 0.3-0.9 s on
+        local disk but 11-19 s on loaded lab storage (2026-11-04), so 20 s
+        is allowed."""
+        return featureReads * 20 * len(dataSet.get_fovs()) / 60
+
+    def get_cell_depths(self, featureDB,
+                        metadata: pandas.DataFrame = None) -> pandas.Series:
+        """The tissue depth of each cell's centre (bounding-box centre, mean
+        z of its planes), indexed by cell id as a string. metadata is
+        featureDB.read_feature_metadata(), read here if not given."""
+        if metadata is None:
+            metadata = featureDB.read_feature_metadata()
+        z = featureDB.read_feature_z_centres().reindex(metadata.index)
+        return pandas.Series(self.get_tissue_depth(
+            metadata['fov'].values, metadata['center_x'].values,
+            metadata['center_y'].values, z.values),
+            index=metadata.index.astype(str))
+
     def _run_analysis(self):
         allFOVs = self.dataSet.get_fovs()
         graph = nx.Graph()
@@ -1309,13 +1342,23 @@ class ExportCellMetadata(analysistask.AnalysisTask):
         return 2048
 
     def get_estimated_time(self):
+        if self.parameters.get('depth_task'):
+            return 30 + CombineCleanedBoundaries.cell_depth_minutes(
+                self.dataSet, 1)
         return 30
 
     def get_dependencies(self):
-        return [self.parameters['segment_task']]
+        depthTask = self.parameters.get('depth_task')
+        return [self.parameters['segment_task']] + \
+            ([depthTask] if depthTask else [])
 
     def _run_analysis(self):
-        df = self.segmentTask.get_feature_database().read_feature_metadata()
+        featureDB = self.segmentTask.get_feature_database()
+        df = featureDB.read_feature_metadata()
+        if self.parameters.get('depth_task'):
+            df['depth'] = self.dataSet.load_analysis_task(
+                self.parameters['depth_task']).get_cell_depths(
+                    featureDB, df).values
 
         self.dataSet.save_dataframe_to_csv(df, 'feature_metadata',
                                            self.analysisName)

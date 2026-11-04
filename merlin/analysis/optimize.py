@@ -31,7 +31,7 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
         if 'fov_per_iteration' not in self.parameters:
             self.parameters['fov_per_iteration'] = 50
         if 'area_threshold' not in self.parameters:
-            self.parameters['area_threshold'] = 4
+            self.parameters['area_threshold'] = 3
         if 'optimize_background' not in self.parameters:
             self.parameters['optimize_background'] = False
         if 'optimize_chromatic_correction' not in self.parameters:
@@ -573,7 +573,7 @@ class OptimizeIterationFOV(OptimizeIteration):
         super().__init__(dataSet, parameters, analysisName)
 
         if 'area_threshold' not in self.parameters:
-            self.parameters['area_threshold'] = 4
+            self.parameters['area_threshold'] = 3
         if 'optimize_background' not in self.parameters:
             self.parameters['optimize_background'] = False
         if 'optimize_chromatic_correction' not in self.parameters:

@@ -115,3 +115,52 @@ def test_build_model_fails_without_cuda(ragged_merfish_data, monkeypatch):
                                    analysisName='cpEvalNoGpu')
     with pytest.raises(RuntimeError, match='CUDA'):
         task._build_model()
+
+
+def test_use_ffc_requires_ffc_task(ragged_merfish_data):
+    with pytest.raises(segment.analysistask.InvalidParameterException):
+        segment.CellPoseSegmentSAM(ragged_merfish_data,
+                                   {**CELLPOSE, 'use_ffc': True},
+                                   analysisName='cpFfcMissing')
+
+
+def test_ffc_task_is_a_dependency_only_when_used(ragged_merfish_data):
+    for cls in (segment.CellPoseSegmentSAM, segment.CellPoseEvalSAM):
+        off = cls(ragged_merfish_data, dict(CELLPOSE), analysisName='cpOff')
+        on = cls(ragged_merfish_data,
+                 {**CELLPOSE, 'use_ffc': True, 'ffc_task': 'ffc'},
+                 analysisName='cpOn')
+        assert 'ffc' not in off.get_dependencies()
+        assert 'ffc' in on.get_dependencies()
+
+
+def test_read_image_stack_applies_ffc_before_warp(
+        ragged_merfish_data, ragged_warp_task, monkeypatch):
+    from skimage import transform
+    from merlin.analysis.createffc import CreateFfc
+    fov = sorted(ragged_merfish_data.get_fovs())[0]
+    channel = ragged_merfish_data.get_data_organization()\
+        .get_data_channel_index('bit1')
+    off = segment.CellPoseSegmentSAM(ragged_merfish_data, dict(CELLPOSE),
+                                     analysisName='cpOff')
+    on = segment.CellPoseSegmentSAM(
+        ragged_merfish_data,
+        {**CELLPOSE, 'use_ffc': True, 'ffc_task': 'ffc'},
+        analysisName='cpOn')
+    raw0 = ragged_merfish_data.get_raw_image(
+        channel, fov, ragged_merfish_data.get_z_positions_segmentation(fov)[0])
+    rows, cols = np.indices(raw0.shape)
+    field = (0.5 + rows / rows.max()).astype(np.float32)
+    dark = np.full(raw0.shape, 3, dtype=np.float32)
+    monkeypatch.setattr(on, '_ffc_inputs', lambda ch: (field, dark))
+
+    plain = off._read_image_stack(fov, channel)
+    corrected = on._read_image_stack(fov, channel)
+    assert plain.dtype == raw0.dtype
+    assert corrected.dtype == np.float32
+    assert corrected.shape == plain.shape
+
+    tf = ragged_warp_task.get_transformation(fov, channel)
+    expected = transform.warp(CreateFfc.apply_ffc(raw0, field, dark), tf,
+                              preserve_range=True).astype(np.float32)
+    assert np.allclose(corrected[0], expected)

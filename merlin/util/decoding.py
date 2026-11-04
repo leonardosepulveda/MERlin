@@ -91,7 +91,7 @@ class PixelBasedDecoder(object):
         else:
             self._backgrounds = backgrounds.copy()
 
-        self.refactorAreaThreshold = 4 # this gets reset in optimize task!
+        self.refactorAreaThreshold = 3 # this gets reset in optimize task!
 
         # test for if we want to disregard low abundant barcodes in refactors
         # value of zero will not do anything

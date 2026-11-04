@@ -360,3 +360,6 @@ major version).
     segmentation tasks to get the fast read.
   - The export time estimates include the depth read when `depth_task`
     is set.
+- OptimizeIteration's default `area_threshold` is 3 (was 4), matching
+  the `minimum_area: 3` that Decode is run with, since both now mean
+  "spots of N px or more". Only configs that leave it out change.
